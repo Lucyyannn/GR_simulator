@@ -13,3 +13,6 @@
 [submodule "extern/ramulator2"]
 	path = extern/ramulator2
 	url = https://github.com/PSAL-POSTECH/ramulator2.git
+[submodule "extern/femu"]
+	path = extern/femu
+	url = https://github.com/MoatLab/FEMU.git

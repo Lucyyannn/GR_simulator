@@ -49,6 +49,7 @@ add_subdirectory("${PROJECT_SOURCE_DIR}/extern/onnx" EXCLUDE_FROM_ALL)
 set_target_properties(onnx PROPERTIES FOLDER "extern/onnx")
 set_target_properties(onnx_proto PROPERTIES FOLDER "extern/onnx")
 
+
 target_include_directories(Simulator PUBLIC ${ONNX_INCLUDE_DIRS})
 target_link_libraries(Simulator ramulator1 booksim2 ramulator)
 target_link_libraries(Simulator ${PROTOBUF_LIB} onnx_proto ${CONAN_LIBS} stdc++fs)
