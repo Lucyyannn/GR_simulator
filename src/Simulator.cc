@@ -51,6 +51,25 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
     exit(EXIT_FAILURE);
   }
 
+  /* Optional SSD (FEMU bbssd-inspired) */
+  if (config.ssd.enabled) {
+    SsdConfig scfg;
+    scfg.address_base   = config.ssd.address_base;
+    scfg.capacity_bytes = config.ssd.capacity_bytes;
+    scfg.secsz          = config.ssd.secsz;
+    scfg.secs_per_pg    = config.ssd.secs_per_pg;
+    scfg.pgs_per_blk    = config.ssd.pgs_per_blk;
+    scfg.blks_per_pl    = config.ssd.blks_per_pl;
+    scfg.pls_per_lun    = config.ssd.pls_per_lun;
+    scfg.luns_per_ch    = config.ssd.luns_per_ch;
+    scfg.nchs           = config.ssd.nchs;
+    scfg.pg_rd_lat      = config.ssd.pg_rd_lat;
+    scfg.pg_wr_lat      = config.ssd.pg_wr_lat;
+    scfg.blk_er_lat     = config.ssd.blk_er_lat;
+    scfg.ch_xfer_lat    = config.ssd.ch_xfer_lat;
+    _ssd = std::make_unique<Ssd>(scfg, config.core_freq);
+  }
+
   // Create interconnect object
   if (config.icnt_type == IcntType::SIMPLE) {
     _icnt = std::make_unique<SimpleInterconnect>(config);
@@ -142,6 +161,7 @@ void Simulator::cycle() {
     // DRAM cycle
     if (_cycle_mask & DRAM_MASK) {
       _dram->cycle();
+      if (_ssd) _ssd->cycle();
     }
     // Interconnect cycle
     if (_cycle_mask & ICNT_MASK) {
@@ -170,13 +190,21 @@ void Simulator::cycle() {
       }
 
       for (int mem_id = 0; mem_id < _n_memories; mem_id++) {
-        // ICNT to memory
+        // ICNT to memory (DRAM or SSD depending on target address)
         int core_offset = _n_cores * _noc_node_per_core;
-        if (!_icnt->is_empty(core_offset + mem_id) &&
-            !_dram->is_full(mem_id, _icnt->top(core_offset+ mem_id))) {
-          _dram->push(mem_id, _icnt->top(core_offset + mem_id));
-          _icnt->pop(core_offset + mem_id);
-          _nr_to_mem++;
+        if (!_icnt->is_empty(core_offset + mem_id)) {
+          MemoryAccess* mreq = _icnt->top(core_offset + mem_id);
+          if (_ssd && _ssd->owns_address(mreq->dram_address)) {
+            if (!_ssd->is_full(mreq)) {
+              _ssd->push(mreq);
+              _icnt->pop(core_offset + mem_id);
+              _nr_to_mem++;
+            }
+          } else if (!_dram->is_full(mem_id, mreq)) {
+            _dram->push(mem_id, mreq);
+            _icnt->pop(core_offset + mem_id);
+            _nr_to_mem++;
+          }
         }
         // Pop response to ICNT from dram
         if (!_dram->is_empty(mem_id) &&
@@ -184,6 +212,16 @@ void Simulator::cycle() {
           _icnt->push(core_offset + mem_id, get_dest_node(_dram->top(mem_id)),
                       _dram->top(mem_id));
           _dram->pop(mem_id);
+          _nr_from_mem++;
+        }
+      }
+      // Pop responses from SSD back into ICNT (use mem channel 0 as return port)
+      if (_ssd && !_ssd->is_empty()) {
+        int core_offset = _n_cores * _noc_node_per_core;
+        MemoryAccess* sresp = _ssd->top();
+        if (!_icnt->is_full(core_offset + 0, sresp)) {
+          _icnt->push(core_offset + 0, get_dest_node(sresp), sresp);
+          _ssd->pop();
           _nr_from_mem++;
         }
       }
@@ -207,6 +245,7 @@ void Simulator::cycle() {
   }
   _icnt->print_stats();
   _dram->print_stat();
+  if (_ssd) _ssd->print_stat();
 }
 
 void Simulator::register_model(std::unique_ptr<Model> model) {
@@ -242,6 +281,7 @@ bool Simulator::running() {
   }
   running = running || _icnt->running();
   running = running || _dram->running();
+  if (_ssd) running = running || _ssd->running();
   running = running || !_scheduler->empty();
   if(_language_mode) {
     running = running || _lang_scheduler->busy();

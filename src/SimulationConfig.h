@@ -37,12 +37,35 @@ struct CoreConfig {
   uint32_t accum_spad_size;
 };
 
+struct SsdSimConfig {
+  bool enabled = false;
+  /* Placement policy: tensors >= `place_threshold_bytes` are pinned in SSD.
+     Set to 0 to disable size-based placement (no tensors in SSD). */
+  uint64_t place_threshold_bytes = 0;
+  uint64_t address_base = 0x800000000ULL;   // 32GB
+  uint64_t capacity_bytes = (1ULL << 40);   // 1TB
+  int secsz = 512;
+  int secs_per_pg = 8;
+  int pgs_per_blk = 256;
+  int blks_per_pl = 256;
+  int pls_per_lun = 1;
+  int luns_per_ch = 8;
+  int nchs = 8;
+  int pg_rd_lat  = 40000;
+  int pg_wr_lat  = 200000;
+  int blk_er_lat = 2000000;
+  int ch_xfer_lat = 0;
+};
+
 struct SimulationConfig {
   /* Core config */
   uint32_t num_cores;
   uint32_t core_freq;
   uint32_t core_print_interval;
   struct CoreConfig *core_config;
+
+  /* SSD config (FEMU-inspired black-box SSD) */
+  SsdSimConfig ssd;
 
   /* DRAM config */
   DramType dram_type;

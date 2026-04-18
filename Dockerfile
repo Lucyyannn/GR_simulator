@@ -27,21 +27,22 @@ RUN wget https://github.com/Kitware/CMake/releases/download/v3.22.0/cmake-3.22.0
 # Install specific Python packages with pip
 RUN pip3 install conan==1.57.0 transformers==4.40.1 onnx onnxruntime torch==2.3.1 torchvision optimum
 
-# Copy your project files into the image
-COPY ./ ONNXim
 
-# Prepare ONNXim project
-RUN cd ONNXim && \
-    git submodule update --recursive --init && \
-    mkdir -p build && \
-    cd build && \
-    conan install .. --build=missing && \
-    cmake .. && \
-    make -j$(nproc)
+# # Copy your project files into the image
+# COPY ./ ONNXim
 
-# Set environment variable
-ENV ONNXIM_HOME /workspace/ONNXim
+# # Prepare ONNXim project
+# RUN cd ONNXim && \
+#     git submodule update --recursive --init && \
+#     mkdir -p build && \
+#     cd build && \
+#     conan install .. --build=missing && \
+#     cmake .. && \
+#     make -j$(nproc)
 
-# Final command
-CMD ["echo", "Welcome to ONNXim!"]
+# # Set environment variable
+# ENV ONNXIM_HOME /workspace/ONNXim
+
+# # Final command
+# CMD ["echo", "Welcome to ONNXim!"]
 

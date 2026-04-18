@@ -107,8 +107,15 @@ void Tensor::allocate_tensor(int precision) {
   for (auto dim : _dims) {
     size *= dim;
   }
-  _address = allocate_address(size * precision);
-  _size = size * precision;
+  uint32_t total_bytes = size * precision;
+  /* Route large tensors (e.g., weights) to SSD region if policy enables. */
+  bool place_ssd = should_place_in_ssd(total_bytes);
+  _address = allocate_address_placed(total_bytes, place_ssd, get_ssd_base());
+  _size = total_bytes;
+  if (place_ssd) {
+    spdlog::debug("[TENSOR] {} ({} B) placed in SSD at 0x{:x}",
+                  _name, total_bytes, _address);
+  }
 }
 
 void Tensor::print_tensor() {

@@ -3,6 +3,7 @@
 #include "Common.h"
 #include "Core.h"
 #include "Dram.h"
+#include "Ssd.h"
 #include "Interconnect.h"
 #include "Model.h"
 #include "scheduler/Scheduler.h"
@@ -41,6 +42,7 @@ class Simulator {
   std::vector<std::unique_ptr<Core>> _cores;
   std::unique_ptr<Interconnect> _icnt;
   std::unique_ptr<Dram> _dram;
+  std::unique_ptr<Ssd>  _ssd;    // FEMU-inspired storage (optional)
   std::unique_ptr<Scheduler> _scheduler;
   
   // period information (ps)

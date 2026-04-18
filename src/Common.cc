@@ -23,6 +23,35 @@ addr_type allocate_address(uint32_t size) {
   return result;
 }
 
+/* SSD placement policy globals */
+static uint64_t g_ssd_threshold_bytes = 0;   // 0 = disabled
+static uint64_t g_ssd_base_addr      = 0x800000000ULL;
+static uint64_t g_ssd_capacity_bytes = (1ULL << 40);   // 1TB default
+static addr_type g_ssd_cursor        = 0;    // offset within SSD region
+
+void set_ssd_placement_policy(uint64_t threshold_bytes, uint64_t ssd_base, uint64_t capacity_bytes) {
+  g_ssd_threshold_bytes = threshold_bytes;
+  g_ssd_base_addr       = ssd_base;
+  g_ssd_capacity_bytes  = capacity_bytes;
+  g_ssd_cursor          = 0;
+}
+bool should_place_in_ssd(uint32_t size) {
+  return g_ssd_threshold_bytes > 0 && size >= g_ssd_threshold_bytes;
+}
+uint64_t get_ssd_base() { return g_ssd_base_addr; }
+
+addr_type allocate_address_placed(uint32_t size, bool place_in_ssd,
+                                  uint64_t ssd_base) {
+  if (!place_in_ssd) return allocate_address(size);
+  addr_type result = ssd_base + g_ssd_cursor;
+  int offset = 0;
+  if (result % 256 != 0) offset = 256 - (result % 256);
+  result += offset;
+  g_ssd_cursor += size + offset;
+  g_ssd_cursor += (256 - g_ssd_cursor % 256);
+  return result;
+}
+
 template <typename T>
 T get_config_value(json config, std::string key) {
   if (config.contains(key)) {
@@ -130,6 +159,53 @@ SimulationConfig initialize_config(json config) {
     parsed_config.icnt_print_interval = config["icnt_print_interval"];
   if (config.contains("icnt_injection_ports_per_core"))
     parsed_config.icnt_injection_ports_per_core = config["icnt_injection_ports_per_core"];
+
+  /* SSD config (optional) */
+  if (config.contains("ssd")) {
+    auto& s = config["ssd"];
+    parsed_config.ssd.enabled = s.value("enabled", true);
+    if (s.contains("place_threshold_bytes")) {
+      if (s["place_threshold_bytes"].is_string())
+        parsed_config.ssd.place_threshold_bytes =
+            std::stoull(s["place_threshold_bytes"].get<std::string>(), nullptr, 0);
+      else
+        parsed_config.ssd.place_threshold_bytes =
+            s["place_threshold_bytes"].get<uint64_t>();
+    }
+    if (s.contains("address_base")) {
+      // Accept either integer or hex string
+      if (s["address_base"].is_string()) {
+        parsed_config.ssd.address_base =
+            std::stoull(s["address_base"].get<std::string>(), nullptr, 0);
+      } else {
+        parsed_config.ssd.address_base = s["address_base"].get<uint64_t>();
+      }
+    }
+    if (s.contains("capacity_bytes")) {
+      if (s["capacity_bytes"].is_string())
+        parsed_config.ssd.capacity_bytes =
+            std::stoull(s["capacity_bytes"].get<std::string>(), nullptr, 0);
+      else
+        parsed_config.ssd.capacity_bytes = s["capacity_bytes"].get<uint64_t>();
+    }
+    parsed_config.ssd.secsz        = s.value("secsz",        parsed_config.ssd.secsz);
+    parsed_config.ssd.secs_per_pg  = s.value("secs_per_pg",  parsed_config.ssd.secs_per_pg);
+    parsed_config.ssd.pgs_per_blk  = s.value("pgs_per_blk",  parsed_config.ssd.pgs_per_blk);
+    parsed_config.ssd.blks_per_pl  = s.value("blks_per_pl",  parsed_config.ssd.blks_per_pl);
+    parsed_config.ssd.pls_per_lun  = s.value("pls_per_lun",  parsed_config.ssd.pls_per_lun);
+    parsed_config.ssd.luns_per_ch  = s.value("luns_per_ch",  parsed_config.ssd.luns_per_ch);
+    parsed_config.ssd.nchs         = s.value("nchs",         parsed_config.ssd.nchs);
+    parsed_config.ssd.pg_rd_lat    = s.value("pg_rd_lat",    parsed_config.ssd.pg_rd_lat);
+    parsed_config.ssd.pg_wr_lat    = s.value("pg_wr_lat",    parsed_config.ssd.pg_wr_lat);
+    parsed_config.ssd.blk_er_lat   = s.value("blk_er_lat",   parsed_config.ssd.blk_er_lat);
+    parsed_config.ssd.ch_xfer_lat  = s.value("ch_xfer_lat",  parsed_config.ssd.ch_xfer_lat);
+    spdlog::info("[CONFIG] SSD enabled, base=0x{:x}, cap={}GB, chs={}, luns/ch={}",
+                 parsed_config.ssd.address_base,
+                 parsed_config.ssd.capacity_bytes / (1ULL<<30),
+                 parsed_config.ssd.nchs, parsed_config.ssd.luns_per_ch);
+  } else {
+    parsed_config.ssd.enabled = false;
+  }
 
   parsed_config.scheduler_type = get_config_value<std::string>(config, "scheduler");
   parsed_config.precision = get_config_value<uint32_t>(config, "precision");
