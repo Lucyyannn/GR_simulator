@@ -26,6 +26,7 @@ class Interconnect {
 class SimpleInterconnect : public Interconnect {
  public:
   SimpleInterconnect(SimulationConfig config);
+  ~SimpleInterconnect() override;
   virtual bool running() override;
   virtual void cycle() override;
   virtual void push(uint32_t src, uint32_t dest,

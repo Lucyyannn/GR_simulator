@@ -22,6 +22,23 @@ SimpleInterconnect::SimpleInterconnect(SimulationConfig config)
   }
 }
 
+SimpleInterconnect::~SimpleInterconnect() {
+  for (int src = 0; src < _n_nodes; src++) {
+    for (int dest = 0; dest < _n_nodes; dest++) {
+      while (!_in_buffers[src][dest].empty()) {
+        delete _in_buffers[src][dest].front().access;
+        _in_buffers[src][dest].pop();
+      }
+    }
+  }
+  for (int node = 0; node < _n_nodes; node++) {
+    while (!_out_buffers[node].empty()) {
+      delete _out_buffers[node].front();
+      _out_buffers[node].pop();
+    }
+  }
+}
+
 
 bool SimpleInterconnect::running() {
   return false;

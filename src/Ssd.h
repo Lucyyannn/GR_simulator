@@ -72,7 +72,7 @@ struct SsdChannelState {
 class Ssd {
  public:
   explicit Ssd(const SsdConfig& cfg, uint32_t tick_freq_mhz);
-  ~Ssd() = default;
+  ~Ssd();
 
   /* Lifecycle (mirrors Dram) */
   bool running();

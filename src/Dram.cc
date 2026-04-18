@@ -22,6 +22,19 @@ SimpleDram::SimpleDram(SimulationConfig config)
   _response_queue.resize(_n_ch);
 }
 
+SimpleDram::~SimpleDram() {
+  for (uint32_t ch = 0; ch < _n_ch; ch++) {
+    while (!_waiting_queue[ch].empty()) {
+      delete _waiting_queue[ch].front().second;
+      _waiting_queue[ch].pop();
+    }
+    while (!_response_queue[ch].empty()) {
+      delete _response_queue[ch].front();
+      _response_queue[ch].pop();
+    }
+  }
+}
+
 bool SimpleDram::running() { return false; }
 
 void SimpleDram::cycle() {
@@ -70,6 +83,17 @@ DramRamulator::DramRamulator(SimulationConfig config)
   for (int ch = 0; ch < _n_ch; ch++) {
     _total_processed_requests[ch] = 0;
     _processed_requests[ch] = 0;
+  }
+}
+
+DramRamulator::~DramRamulator() {
+  for (auto& [addr, access] : _waiting_mem_access) {
+    delete access;
+  }
+  _waiting_mem_access.clear();
+  while (!_responses.empty()) {
+    delete _responses.front();
+    _responses.pop();
   }
 }
 
@@ -144,6 +168,9 @@ DramRamulator2::DramRamulator2(SimulationConfig config) {
   }
   _tx_log2 = log2(_req_size);
   _tx_ch_log2 = log2(_n_ch) + _tx_log2;
+}
+
+DramRamulator2::~DramRamulator2() {
 }
 
 bool DramRamulator2::running() { 

@@ -21,6 +21,17 @@ Ssd::Ssd(const SsdConfig& cfg, uint32_t tick_freq_mhz)
       _cfg.address_base, _cfg.capacity_bytes / (1ULL << 30), _tick_freq_mhz);
 }
 
+Ssd::~Ssd() {
+  while (!_pending.empty()) {
+    delete _pending.top().access;
+    _pending.pop();
+  }
+  while (!_finished.empty()) {
+    delete _finished.front();
+    _finished.pop();
+  }
+}
+
 bool Ssd::running() {
   return !_pending.empty() || !_finished.empty();
 }

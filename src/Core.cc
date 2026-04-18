@@ -29,6 +29,17 @@ Core::Core(uint32_t id, SimulationConfig config)
   _running_layer = -1;
 }
 
+Core::~Core() {
+  while (!_request_queue.empty()) {
+    delete _request_queue.front();
+    _request_queue.pop();
+  }
+  while (!_response_queue.empty()) {
+    delete _response_queue.front();
+    _response_queue.pop();
+  }
+}
+
 bool Core::can_issue(bool is_accum_tile) {
   return _tiles.size() < 2;  // double buffer
 }

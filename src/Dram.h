@@ -32,6 +32,7 @@ class Dram {
 class SimpleDram : public Dram {
  public:
   SimpleDram(SimulationConfig config);
+  ~SimpleDram() override;
   virtual bool running() override;
   virtual void cycle() override;
   virtual bool is_full(uint32_t cid, MemoryAccess* request) override;
@@ -52,7 +53,7 @@ class SimpleDram : public Dram {
 class DramRamulator : public Dram {
  public:
   DramRamulator(SimulationConfig config);
-
+  ~DramRamulator() override;
   virtual bool running() override;
   virtual void cycle() override;
   virtual bool is_full(uint32_t cid, MemoryAccess* request) override;
@@ -74,7 +75,7 @@ class DramRamulator : public Dram {
 class DramRamulator2 : public Dram {
  public:
   DramRamulator2(SimulationConfig config);
-
+  ~DramRamulator2() override;
   virtual bool running() override;
   virtual void cycle() override;
   virtual bool is_full(uint32_t cid, MemoryAccess* request) override;

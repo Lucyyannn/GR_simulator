@@ -13,7 +13,7 @@ class Core {
  public:
   static std::unique_ptr<Core> create(uint32_t id, SimulationConfig config);
   Core(uint32_t id, SimulationConfig config);
-  virtual ~Core() = default;
+  virtual ~Core();
   virtual bool running();
   virtual bool can_issue(bool is_accum_tile=false);
   virtual void issue(std::unique_ptr<Tile> tile);
