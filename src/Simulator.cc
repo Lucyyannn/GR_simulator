@@ -67,7 +67,7 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
     scfg.pg_wr_lat      = config.ssd.pg_wr_lat;
     scfg.blk_er_lat     = config.ssd.blk_er_lat;
     scfg.ch_xfer_lat    = config.ssd.ch_xfer_lat;
-    _ssd = std::make_unique<Ssd>(scfg, config.core_freq);
+    _ssd = std::make_unique<Ssd>(scfg, config.dram_freq);
   }
 
   // Create interconnect object
@@ -219,8 +219,13 @@ void Simulator::cycle() {
       if (_ssd && !_ssd->is_empty()) {
         int core_offset = _n_cores * _noc_node_per_core;
         MemoryAccess* sresp = _ssd->top();
+        uint32_t dest_node = get_dest_node(sresp);
+        spdlog::debug("[SSD-RESP] addr=0x{:x} spad=0x{:x} wr={} core={} ch_id={} dest_node={}",
+                      sresp->dram_address, sresp->spad_address,
+                      sresp->write, sresp->core_id,
+                      _dram->get_channel_id(sresp), dest_node);
         if (!_icnt->is_full(core_offset + 0, sresp)) {
-          _icnt->push(core_offset + 0, get_dest_node(sresp), sresp);
+          _icnt->push(core_offset + 0, dest_node, sresp);
           _ssd->pop();
           _nr_from_mem++;
         }

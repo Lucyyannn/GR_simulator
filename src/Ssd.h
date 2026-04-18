@@ -71,7 +71,7 @@ struct SsdChannelState {
 
 class Ssd {
  public:
-  explicit Ssd(const SsdConfig& cfg, uint32_t core_freq_mhz);
+  explicit Ssd(const SsdConfig& cfg, uint32_t tick_freq_mhz);
   ~Ssd() = default;
 
   /* Lifecycle (mirrors Dram) */
@@ -117,8 +117,8 @@ class Ssd {
   }
 
   SsdConfig _cfg;
-  uint32_t  _core_freq_mhz;
-  double    _ns_per_cycle;  // = 1000 / core_freq_mhz
+  uint32_t  _tick_freq_mhz;
+  double    _ns_per_cycle;  // = 1000 / tick_freq_mhz (DRAM freq)
   cycle_type _cycles;       // local cycle counter
 
   std::vector<SsdChannelState> _channels;
@@ -144,6 +144,11 @@ class Ssd {
   uint64_t _stat_total_read_lat_ns = 0;
   uint64_t _stat_total_write_lat_ns = 0;
   uint64_t _stat_max_lat_ns = 0;
+  uint64_t _stat_min_lat_ns = UINT64_MAX;
+  uint64_t _stat_max_read_lat_ns = 0;
+  uint64_t _stat_max_write_lat_ns = 0;
+  std::vector<uint64_t> _stat_ch_reads;
+  std::vector<uint64_t> _stat_ch_writes;
 };
 
 #endif  // SSD_H

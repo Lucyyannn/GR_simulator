@@ -75,7 +75,10 @@ void Sram::fill(addr_type address, int buffer_id) {
   _cache_table[buffer_id].at(address).remain_req_count--;
   if (_cache_table[buffer_id].at(address).remain_req_count == 0) {
     _cache_table[buffer_id].at(address).valid = true;
-    spdlog::trace("MAKE valid {} {}F", buffer_id, address);
+    spdlog::debug("[SRAM] MAKE valid bid={} addr=0x{:x} accum={}", buffer_id, address, _accum);
+  } else {
+    spdlog::trace("[SRAM] fill bid={} addr=0x{:x} remain={} accum={}", buffer_id, address,
+                  _cache_table[buffer_id].at(address).remain_req_count, _accum);
   }
 }
 

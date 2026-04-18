@@ -2,46 +2,23 @@
 
 #include <algorithm>
 
-/*
- * The algorithm below is a line-by-line C++ port of
- *   extern/femu/bbssd/ftl.c :: ssd_advance_status()
- * for the NAND_READ / NAND_WRITE / NAND_ERASE cases.
- *
- * The original code in FEMU:
- *
- *   case NAND_READ:
- *     nand_stime = max(lun->next_lun_avail_time, cmd_stime);
- *     lun->next_lun_avail_time = nand_stime + spp->pg_rd_lat;
- *     lat = lun->next_lun_avail_time - cmd_stime;
- *     // optional channel xfer block guarded by #if 0 in FEMU source
- *
- *   case NAND_WRITE:
- *     nand_stime = max(lun->next_lun_avail_time, cmd_stime);
- *     lun->next_lun_avail_time = nand_stime + spp->pg_wr_lat;
- *     lat = lun->next_lun_avail_time - cmd_stime;
- *
- *   case NAND_ERASE: similar with blk_er_lat.
- *
- * If ch_xfer_lat > 0, we additionally charge the channel bus time, so
- * that this model can also approximate transfer-bound workloads. This
- * matches the (#if 0'd but conceptually correct) FEMU channel path.
- */
-
-Ssd::Ssd(const SsdConfig& cfg, uint32_t core_freq_mhz)
+Ssd::Ssd(const SsdConfig& cfg, uint32_t tick_freq_mhz)
     : _cfg(cfg),
-      _core_freq_mhz(core_freq_mhz > 0 ? core_freq_mhz : 1000),
-      _ns_per_cycle(1000.0 / (core_freq_mhz > 0 ? core_freq_mhz : 1000)),
-      _cycles(0) {
+      _tick_freq_mhz(tick_freq_mhz > 0 ? tick_freq_mhz : 1000),
+      _ns_per_cycle(1000.0 / (tick_freq_mhz > 0 ? tick_freq_mhz : 1000)),
+      _cycles(0),
+      _stat_ch_reads(cfg.nchs, 0),
+      _stat_ch_writes(cfg.nchs, 0) {
   _channels.resize(_cfg.nchs);
   for (int c = 0; c < _cfg.nchs; c++) {
     _channels[c].luns.resize(_cfg.luns_per_ch);
   }
   spdlog::info(
       "[SSD] Initialized FEMU-bbssd model: {} channels x {} LUNs, "
-      "rd={}ns wr={}ns er={}ns xfer={}ns, addr_base=0x{:x} cap={}GB",
+      "rd={}ns wr={}ns er={}ns xfer={}ns, addr_base=0x{:x} cap={}GB, tick_freq={}MHz",
       _cfg.nchs, _cfg.luns_per_ch,
       _cfg.pg_rd_lat, _cfg.pg_wr_lat, _cfg.blk_er_lat, _cfg.ch_xfer_lat,
-      _cfg.address_base, _cfg.capacity_bytes / (1ULL << 30));
+      _cfg.address_base, _cfg.capacity_bytes / (1ULL << 30), _tick_freq_mhz);
 }
 
 bool Ssd::running() {
@@ -50,14 +27,14 @@ bool Ssd::running() {
 
 void Ssd::cycle() {
   _cycles++;
-  // Move any pending requests whose finish_cycle has passed into the
-  // completion queue in time order.
   while (!_pending.empty() && _pending.top().finish_cycle <= _cycles) {
     MemoryAccess* a = _pending.top().access;
     _pending.pop();
-    a->request = false;                // mark as response (see Dram.cc)
-    a->dram_finish_cycle = _cycles;    // reuse dram_finish_cycle field
+    a->request = false;
+    a->dram_finish_cycle = _cycles;
     _finished.push(a);
+    spdlog::debug("[SSD] complete addr=0x{:x} wr={} finish_cycle={} pending={}",
+                  a->dram_address, a->write, _cycles, _pending.size());
   }
 }
 
@@ -133,16 +110,23 @@ void Ssd::push(MemoryAccess* req) {
   if (req->write) {
     _stat_writes++;
     _stat_total_write_lat_ns += lat_ns;
+    if (lat_ns > _stat_max_write_lat_ns) _stat_max_write_lat_ns = lat_ns;
+    if (ch < _stat_ch_writes.size()) _stat_ch_writes[ch]++;
   } else {
     _stat_reads++;
     _stat_total_read_lat_ns += lat_ns;
+    if (lat_ns > _stat_max_read_lat_ns) _stat_max_read_lat_ns = lat_ns;
+    if (ch < _stat_ch_reads.size()) _stat_ch_reads[ch]++;
   }
   if (lat_ns > _stat_max_lat_ns) _stat_max_lat_ns = lat_ns;
+  if (lat_ns < _stat_min_lat_ns) _stat_min_lat_ns = lat_ns;
 
-  spdlog::trace(
-      "[SSD] push addr=0x{:x} wr={} ch={} lun={} stime={}ns lat={}ns "
-      "finish_cycle={}",
-      req->dram_address, req->write, ch, lun, stime_ns, lat_ns, finish);
+  spdlog::debug(
+      "[SSD] push addr=0x{:x} wr={} ch={} lun={} core={} spad=0x{:x} "
+      "stime={:.1f}ns lat={:.1f}ns finish_cycle={} pending={}",
+      req->dram_address, req->write, ch, lun, req->core_id,
+      req->spad_address, (double)stime_ns, (double)lat_ns,
+      finish, _pending.size());
 }
 
 bool Ssd::is_empty() { return _finished.empty(); }
@@ -161,10 +145,21 @@ void Ssd::print_stat() {
   uint64_t total = _stat_reads + _stat_writes;
   double avg_rd = _stat_reads  ? (double)_stat_total_read_lat_ns  / _stat_reads  : 0.0;
   double avg_wr = _stat_writes ? (double)_stat_total_write_lat_ns / _stat_writes : 0.0;
+  double min_lat = _stat_min_lat_ns < UINT64_MAX ? (double)_stat_min_lat_ns : 0.0;
   spdlog::info("[SSD] Total IOs: {} (read={}, write={})", total,
                _stat_reads, _stat_writes);
   spdlog::info("[SSD] Avg read  latency: {:.2f} us", avg_rd / 1000.0);
   spdlog::info("[SSD] Avg write latency: {:.2f} us", avg_wr / 1000.0);
-  spdlog::info("[SSD] Max latency:      {:.2f} us",
+  spdlog::info("[SSD] Min latency:      {:.2f} us", min_lat / 1000.0);
+  spdlog::info("[SSD] Max latency:       {:.2f} us",
                (double)_stat_max_lat_ns / 1000.0);
+  spdlog::info("[SSD] Max read  latency: {:.2f} us",
+               (double)_stat_max_read_lat_ns / 1000.0);
+  spdlog::info("[SSD] Max write latency: {:.2f} us",
+               (double)_stat_max_write_lat_ns / 1000.0);
+  for (int c = 0; c < _cfg.nchs; c++) {
+    uint64_t ch_rd = c < (int)_stat_ch_reads.size() ? _stat_ch_reads[c] : 0;
+    uint64_t ch_wr = c < (int)_stat_ch_writes.size() ? _stat_ch_writes[c] : 0;
+    spdlog::info("[SSD] CH{}: reads={} writes={}", c, ch_rd, ch_wr);
+  }
 }

@@ -184,7 +184,10 @@ void Core::pop_memory_request() {
 }
 
 void Core::push_memory_response(MemoryAccess *response) {
-  assert(!response->request);  // can only push response
+  assert(!response->request);
+  spdlog::debug("[CORE-RESP] core={} addr=0x{:x} spad=0x{:x} wr={} bid={}",
+                _id, response->dram_address, response->spad_address,
+                response->write, response->buffer_id);
   if (response->write) {
     _waiting_write_reqs--;
   } else if (response->spad_address >= ACCUM_SPAD_BASE) {
