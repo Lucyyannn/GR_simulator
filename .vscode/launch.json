@@ -3,7 +3,7 @@
   "configurations": [
     {
       "name": "Simulator (SSD fast)",
-      "type": "cppdbg",
+      "type": "lldb",
       "request": "launch",
       "program": "${workspaceFolder}/build/bin/Simulator",
       "args": [
@@ -11,25 +11,15 @@
         "--models_list", "${workspaceFolder}/example/models_list.json",
         "--log_level", "debug"
       ],
-      "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [
         {"name": "ONNXIM_HOME", "value": "${workspaceFolder}"}
-      ],
-      "externalConsole": false,
-      "MIMode": "gdb",
-      "setupCommands": [
-        {
-          "description": "Enable pretty-printing for gdb",
-          "text": "-enable-pretty-printing",
-          "ignoreFailures": true
-        }
       ],
       "preLaunchTask": "build"
     },
     {
       "name": "Simulator (SSD realistic)",
-      "type": "cppdbg",
+      "type": "lldb",
       "request": "launch",
       "program": "${workspaceFolder}/build/bin/Simulator",
       "args": [
@@ -37,25 +27,15 @@
         "--models_list", "${workspaceFolder}/example/models_list.json",
         "--log_level", "info"
       ],
-      "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [
         {"name": "ONNXIM_HOME", "value": "${workspaceFolder}"}
-      ],
-      "externalConsole": false,
-      "MIMode": "gdb",
-      "setupCommands": [
-        {
-          "description": "Enable pretty-printing for gdb",
-          "text": "-enable-pretty-printing",
-          "ignoreFailures": true
-        }
       ],
       "preLaunchTask": "build"
     },
     {
       "name": "Simulator (no SSD)",
-      "type": "cppdbg",
+      "type": "lldb",
       "request": "launch",
       "program": "${workspaceFolder}/build/bin/Simulator",
       "args": [
@@ -63,41 +43,21 @@
         "--models_list", "${workspaceFolder}/example/models_list.json",
         "--log_level", "info"
       ],
-      "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [
         {"name": "ONNXIM_HOME", "value": "${workspaceFolder}"}
-      ],
-      "externalConsole": false,
-      "MIMode": "gdb",
-      "setupCommands": [
-        {
-          "description": "Enable pretty-printing for gdb",
-          "text": "-enable-pretty-printing",
-          "ignoreFailures": true
-        }
       ],
       "preLaunchTask": "build"
     },
     {
       "name": "Simulator_test",
-      "type": "cppdbg",
+      "type": "lldb",
       "request": "launch",
       "program": "${workspaceFolder}/build/bin/Simulator_test",
       "args": [],
-      "stopAtEntry": false,
       "cwd": "${workspaceFolder}",
       "environment": [
         {"name": "ONNXIM_HOME", "value": "${workspaceFolder}"}
-      ],
-      "externalConsole": false,
-      "MIMode": "gdb",
-      "setupCommands": [
-        {
-          "description": "Enable pretty-printing for gdb",
-          "text": "-enable-pretty-printing",
-          "ignoreFailures": true
-        }
       ],
       "preLaunchTask": "build"
     }

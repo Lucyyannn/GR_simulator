@@ -5,7 +5,7 @@
       "label": "build",
       "type": "shell",
       "command": "make",
-      "args": ["-j${command:nproc}"],
+      "args": ["-j4"],
       "options": {
         "cwd": "${workspaceFolder}/build"
       },
@@ -16,10 +16,21 @@
       "problemMatcher": ["$gcc"]
     },
     {
-      "label": "cmake-configure",
+      "label": "cmake-configure-debug",
       "type": "shell",
       "command": "cmake",
       "args": ["..", "-DCMAKE_BUILD_TYPE=Debug"],
+      "options": {
+        "cwd": "${workspaceFolder}/build"
+      },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "cmake-configure-release",
+      "type": "shell",
+      "command": "cmake",
+      "args": ["..", "-DCMAKE_BUILD_TYPE=Release"],
       "options": {
         "cwd": "${workspaceFolder}/build"
       },
