@@ -39,6 +39,24 @@ GlobalAvgPool::GlobalAvgPool(const GlobalAvgPool& src)
   _strides = src._strides;
 } 
 
+GlobalAvgPool::GlobalAvgPool(SimulationConfig config, Model* model, std::string name,
+                             std::map<std::string, std::string>& attrs, uint32_t target_core)
+    : Operation(config, model, name, attrs, target_core) {
+  std::vector<uint32_t> input_shape = parse_dims(get_attribute("input_shape"));
+  std::vector<uint32_t> output_shape = input_shape;
+  output_shape[Hdim] = 1;
+  output_shape[Wdim] = 1;
+
+  _kernel_shape.push_back(input_shape[Hdim]);
+  _kernel_shape.push_back(input_shape[Wdim]);
+  _strides = _kernel_shape;
+
+  std::unique_ptr<Tensor> output_tensor = std::make_unique<Tensor>(
+      _id, name_gen(_name, "out"), output_shape, _config.precision, false);
+  _outputs.push_back(output_tensor.get()->get_id());
+  _model->add_tensor(std::move(output_tensor));
+}
+
 /* TODO: Implement this */
 void GlobalAvgPool::initialize_tiles(MappingTable& mapping_table) {
   spdlog::trace("initialize_tile {}", _name);

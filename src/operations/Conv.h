@@ -28,6 +28,8 @@ class Conv : public Operation {
     Conv(SimulationConfig config, Model* model, onnx::NodeProto& node_proto, uint32_t target_core=0);
     Conv(const Conv& src);
     Conv(SimulationConfig config, MappingTable& mapping_table, convInfo info, uint32_t target_core=0);
+    Conv(SimulationConfig config, Model* model, std::string name,
+        std::map<std::string, std::string>& attrs, uint32_t target_core=0);
     // virtual void initialize_tiles(MappingTable& mapping_table) override;
   protected:
     virtual void im2col_nhwc();

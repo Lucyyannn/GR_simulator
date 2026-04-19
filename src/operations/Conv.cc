@@ -231,3 +231,69 @@ Conv::Conv(SimulationConfig config, MappingTable& mapping_table,
   _pool_strides = info.pool_strides;
   _pool_pads =info.pool_pads;
 }
+
+Conv::Conv(SimulationConfig config, Model* model, std::string name,
+           std::map<std::string, std::string>& attrs, uint32_t target_core)
+    : Operation(config, model, name, attrs, target_core) {
+  _activation_fused = false;
+  _pool_fused = false;
+  _bathnorm_fused = false;
+  _skip_connection_fused = false;
+  _group = 1;
+
+  _input_shape = parse_dims(get_attribute("input_shape"));
+  _weight_shape = parse_dims(get_attribute("weight_shape"));
+
+  if (_attributes.count("kernel_shape"))
+    _kernel_shape = parse_dims(get_attribute("kernel_shape"));
+  else if (_weight_shape.size() >= 4) {
+    _kernel_shape.push_back(_weight_shape[Sdim]);
+    _kernel_shape.push_back(_weight_shape[Rdim]);
+  }
+
+  if (_attributes.count("strides"))
+    _strides = parse_dims(get_attribute("strides"));
+  else {
+    _strides = {1, 1};
+  }
+
+  if (_attributes.count("dilations"))
+    _dilations = parse_dims(get_attribute("dilations"));
+  else {
+    _dilations = {1, 1};
+  }
+
+  if (_attributes.count("pads"))
+    _pads = parse_dims(get_attribute("pads"));
+  else {
+    _pads = {0, 0, 0, 0};
+  }
+
+  if (_attributes.count("group"))
+    _group = std::stoi(get_attribute("group"));
+
+  _conv_out_shape.resize(4);
+  _conv_out_shape[Ndim] = _input_shape[Ndim];
+  _conv_out_shape[Cdim] = _weight_shape[Mdim];
+  for (int i = 0; i < 2; i++) {
+    _conv_out_shape[Hdim + i] =
+        (uint32_t)((float)_input_shape[Hdim + i] + _pads[i] + _pads[i + 2] -
+                   (_dilations[i] * (_kernel_shape[i] - 1)) - 1) /
+            (float)_strides[i] +
+        1;
+  }
+
+  std::vector<uint32_t> output_shape = _conv_out_shape;
+
+  if (_attributes.count("output_shape")) {
+    output_shape = parse_dims(get_attribute("output_shape"));
+  }
+
+  std::unique_ptr<Tensor> output_tensor = std::make_unique<Tensor>(
+      _id, name_gen(_name, "out"), output_shape, _config.precision, false);
+  _outputs.push_back(output_tensor.get()->get_id());
+  _model->add_tensor(std::move(output_tensor));
+
+  spdlog::debug("[Conv] input_shape: {} weight_shape: {} output_shape: {}",
+                _input_shape, _weight_shape, output_shape);
+}

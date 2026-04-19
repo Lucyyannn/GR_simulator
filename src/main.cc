@@ -3,6 +3,7 @@
 #include <filesystem>
 
 #include "Simulator.h"
+#include "TraceModel.h"
 #include "helper/CommandLineParser.h"
 #include "operations/OperationFactory.h"
 
@@ -23,6 +24,8 @@ int main(int argc, char** argv) {
       "mode", "choose default or language mode, default = default");
   cmd_parser.add_command_line_option<std::string>(
       "trace_file", "input trace file for language mode, default = input.csv");
+  cmd_parser.add_command_line_option<std::string>(
+      "trace_path", "Path for operator trace JSON file (trace mode)");
 
   try {
     cmd_parser.parse(argc, argv);
@@ -78,6 +81,8 @@ int main(int argc, char** argv) {
   } else if (mode == "language") {
     spdlog::info("Running in language mode");
     language_mode = true;
+  } else if (mode == "trace") {
+    spdlog::info("Running in trace mode");
   } else {
     spdlog::error("Invalid mode: {}", mode);
     return 1;
@@ -114,6 +119,28 @@ int main(int argc, char** argv) {
       auto model = std::make_unique<LanguageModel>(model_json, config, model_name);
       spdlog::info("Register Language Model: {}", model_name);
       simulator->register_language_model(model_config, std::move(model));
+    }
+    else if (mode == "trace") {
+      std::string model_name = model_config["name"];
+      std::string trace_path;
+      if (model_config.contains("trace_path"))
+        trace_path = model_config["trace_path"];
+      cmd_parser.set_if_defined("trace_path", &trace_path);
+      if (trace_path.empty()) {
+        spdlog::error("trace_path not specified for model {}", model_name);
+        exit(EXIT_FAILURE);
+      }
+
+      MappingTable mapping_table(config);
+      if (model_config.contains("mapping_path")) {
+        std::string mapping_path = model_config["mapping_path"];
+        mapping_table = MappingTable::parse_mapping_file(mapping_path, config);
+      }
+
+      auto model = std::make_unique<TraceModel>(
+          trace_path, model_config, config, model_name, mapping_table);
+      spdlog::info("Register Trace Model: {}", model_name);
+      simulator->register_model(std::move(model));
     }
     else {
       std::string model_name = model_config["name"];

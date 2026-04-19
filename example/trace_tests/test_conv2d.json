@@ -1,0 +1,26 @@
+{
+  "metadata": {
+    "format_version": "1.0",
+    "model_name": "test_conv2d",
+    "layout": "NHWC"
+  },
+  "operators": [
+    {
+      "id": 0,
+      "name": "aten::conv2d",
+      "inputs": [
+        { "name": "input", "shape": [1, 56, 56, 64], "dtype": "float16" },
+        { "name": "weight", "shape": [64, 64, 3, 3], "dtype": "float16", "is_weight": true }
+      ],
+      "outputs": [
+        { "name": "output", "shape": [1, 56, 56, 64], "dtype": "float16" }
+      ],
+      "attrs": {
+        "stride": [1, 1],
+        "padding": [1, 1],
+        "dilation": [1, 1],
+        "groups": 1
+      }
+    }
+  ]
+}

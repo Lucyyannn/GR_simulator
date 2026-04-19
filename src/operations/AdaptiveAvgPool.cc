@@ -54,6 +54,34 @@ AdaptiveAvgPool::AdaptiveAvgPool(const AdaptiveAvgPool& src) : Operation(src) {
   _skip = src._skip;
 }
 
+AdaptiveAvgPool::AdaptiveAvgPool(SimulationConfig config, Model* model, std::string name,
+                                 std::map<std::string, std::string>& attrs, uint32_t target_core)
+    : Operation(config, model, name, attrs, target_core) {
+  _skip = false;
+  std::vector<uint32_t> input_shape = parse_dims(get_attribute("input_shape"));
+  std::vector<uint32_t> output_shape;
+
+  if (_attributes.count("output_shape")) {
+    output_shape = parse_dims(get_attribute("output_shape"));
+  } else {
+    output_shape = input_shape;
+    if (_attributes.count("kernel_shape")) {
+      _kernel_shape = parse_dims(get_attribute("kernel_shape"));
+      _strides = _attributes.count("strides") ? parse_dims(get_attribute("strides")) : _kernel_shape;
+      output_shape[Hdim] = (input_shape[Hdim] - _kernel_shape[0]) / _strides[0] + 1;
+      output_shape[Wdim] = (input_shape[Wdim] - _kernel_shape[1]) / _strides[1] + 1;
+    } else {
+      output_shape[Hdim] = 1;
+      output_shape[Wdim] = 1;
+    }
+  }
+
+  std::unique_ptr<Tensor> output_tensor = std::make_unique<Tensor>(
+      _id, name_gen(_name, "out"), output_shape, _config.precision, false);
+  _outputs.push_back(output_tensor.get()->get_id());
+  _model->add_tensor(std::move(output_tensor));
+}
+
 void AdaptiveAvgPool::initialize_tiles(MappingTable& mapping_table) {
   spdlog::trace("initialize_tile {}", _name);
   std::vector<uint32_t> output_shape = get_output(0)->get_dims();

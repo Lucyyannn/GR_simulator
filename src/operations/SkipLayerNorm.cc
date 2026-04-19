@@ -38,7 +38,29 @@ SkipLayerNorm::SkipLayerNorm(SimulationConfig config, Model* model,
 SkipLayerNorm::SkipLayerNorm(SimulationConfig config, Model *model,
                 std::string name, std::map<std::string, std::string>& attributes, uint32_t target_core)
     : Operation(config, model, name, attributes, target_core) {
-//TODO:
+  _input_shape = parse_dims(get_attribute("input_shape"));
+  _weight_shape = parse_dims(get_attribute("weight_shape"));
+  _bias_shape = parse_dims(get_attribute("bias_shape"));
+  _dense_bias_shape = _bias_shape;
+
+  if (_input_shape.size() == 2) {
+    _batch_size = 1;
+    _seq = _input_shape[0];
+    _dk = _input_shape[1];
+  } else if (_input_shape.size() == 3) {
+    _batch_size = _input_shape[0];
+    _seq = _input_shape[1];
+    _dk = _input_shape[2];
+  } else {
+    spdlog::error("[SkipLayerNorm] Unsupported input shape dimensions: {}", _input_shape.size());
+    std::exit(EXIT_FAILURE);
+  }
+
+  _output_shape = _input_shape;
+  auto output_tensor = std::make_unique<Tensor>(
+      _id, name_gen(_name, "output"), _output_shape, _config.precision, false);
+  _outputs.push_back(output_tensor.get()->get_id());
+  _model->add_tensor(std::move(output_tensor));
 }
 
 void SkipLayerNorm::initialize_tiles(MappingTable& mapping_table) {

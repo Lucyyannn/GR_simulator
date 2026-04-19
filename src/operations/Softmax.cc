@@ -42,6 +42,23 @@ Softmax::Softmax(SimulationConfig config, MappingTable& mapping_table,
     calculate_loops();
 }
 
+Softmax::Softmax(SimulationConfig config, Model* model, std::string name,
+                 std::map<std::string, std::string>& attrs, uint32_t target_core)
+    : Operation(config, model, name, attrs, target_core) {
+    _input_shape = parse_dims(get_attribute("input_shape"));
+    _output_shape = _input_shape;
+
+    assert(_input_shape.size()==2);
+    _seq = _input_shape.at(0);
+    _dk = _input_shape.at(1);
+
+    std::unique_ptr<Tensor> output_tensor = std::make_unique<Tensor>(
+        _id, name_gen(_name, "out"), _output_shape, _config.precision, false);
+    _outputs.push_back(output_tensor.get()->get_id());
+    _model->add_tensor(std::move(output_tensor));
+    calculate_loops();
+}
+
 void Softmax::initialize_tiles(MappingTable& mapping_table) {
     for (uint32_t tokens=0; tokens < _seq; tokens+=_tokens_per_tile) {
         uint32_t remain_tokens = std::min(_seq-tokens, _tokens_per_tile);

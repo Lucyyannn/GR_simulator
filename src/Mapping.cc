@@ -102,9 +102,9 @@ void MappingTable::gemm_mapping(Mapping::LoopCounts &key) {
   inner_J = ceil_div(dim_J_padded, tile_J);
   inner_K = ceil_div(dim_K_padded, tile_K);
 
-  inner_I -= inner_I & (dim)-1;
-  inner_J -= inner_J & (dim)-1;
-  inner_K -= inner_K & (dim)-1;
+  inner_I = std::max(inner_I - (inner_I & (dim)-1), dim);
+  inner_J = std::max(inner_J - (inner_J & (dim)-1), dim);
+  inner_K = std::max(inner_K - (inner_K & (dim)-1), dim);
 
   tile_I = ceil_div(dim_I, inner_I);
   tile_J = ceil_div(dim_J, inner_J);

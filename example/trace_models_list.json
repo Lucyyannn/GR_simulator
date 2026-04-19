@@ -1,0 +1,40 @@
+{
+  "models": [
+    {
+      "name": "test_gemm",
+      "trace_path": "example/trace_tests/test_gemm.json"
+    },
+    {
+      "name": "test_conv2d",
+      "trace_path": "example/trace_tests/test_conv2d.json"
+    },
+    {
+      "name": "test_matmul",
+      "trace_path": "example/trace_tests/test_matmul.json"
+    },
+    {
+      "name": "test_maxpool",
+      "trace_path": "example/trace_tests/test_maxpool.json"
+    },
+    {
+      "name": "test_adaptive_avgpool",
+      "trace_path": "example/trace_tests/test_adaptive_avgpool.json"
+    },
+    {
+      "name": "test_flatten",
+      "trace_path": "example/trace_tests/test_flatten.json"
+    },
+    {
+      "name": "test_softmax",
+      "trace_path": "example/trace_tests/test_softmax.json"
+    },
+    {
+      "name": "test_layernorm_gelu",
+      "trace_path": "example/trace_tests/test_layernorm_gelu.json"
+    },
+    {
+      "name": "test_pipeline",
+      "trace_path": "example/trace_tests/test_pipeline.json"
+    }
+  ]
+}

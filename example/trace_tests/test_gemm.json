@@ -1,0 +1,24 @@
+{
+  "metadata": {
+    "format_version": "1.0",
+    "model_name": "test_gemm",
+    "layout": "NHWC"
+  },
+  "operators": [
+    {
+      "id": 0,
+      "name": "aten::linear",
+      "inputs": [
+        { "name": "input", "shape": [128, 512], "dtype": "float16" },
+        { "name": "weight", "shape": [512, 256], "dtype": "float16", "is_weight": true },
+        { "name": "bias", "shape": [256], "dtype": "float16", "is_weight": true }
+      ],
+      "outputs": [
+        { "name": "output", "shape": [128, 256], "dtype": "float16" }
+      ],
+      "attrs": {
+        "has_bias": 1
+      }
+    }
+  ]
+}

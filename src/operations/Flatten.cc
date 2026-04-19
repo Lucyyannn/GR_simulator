@@ -41,6 +41,28 @@ Flatten::Flatten(SimulationConfig config, Model* model,
 
 Flatten::Flatten(const Flatten& src) : Operation(src) { _axis = src._axis; }
 
+Flatten::Flatten(SimulationConfig config, Model* model, std::string name,
+                 std::map<std::string, std::string>& attrs, uint32_t target_core)
+    : Operation(config, model, name, attrs, target_core) {
+  _axis = _attributes.count("start_dim") ? std::stoi(get_attribute("start_dim")) : 1;
+  if (_axis < 0) _axis = 1;
+
+  std::vector<uint32_t> input_shape = parse_dims(get_attribute("input_shape"));
+  std::vector<uint32_t> output_shape(_axis + 1, 1);
+  for (int i = 0; i < (int)input_shape.size(); i++) {
+    if (i < _axis) {
+      output_shape[i] = input_shape[i];
+    } else {
+      output_shape[_axis] *= input_shape[i];
+    }
+  }
+
+  std::unique_ptr<Tensor> output_tensor = std::make_unique<Tensor>(
+      _id, name_gen(_name, "out"), output_shape, _config.precision, false);
+  _outputs.push_back(output_tensor.get()->get_id());
+  _model->add_tensor(std::move(output_tensor));
+}
+
 void Flatten::initialize_tiles(MappingTable& mapping_table) {
   spdlog::trace("initialize_tile {}", _name);
 

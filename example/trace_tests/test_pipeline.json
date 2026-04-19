@@ -1,0 +1,59 @@
+{
+  "metadata": {
+    "format_version": "1.0",
+    "model_name": "test_pipeline",
+    "layout": "NHWC"
+  },
+  "operators": [
+    {
+      "id": 0,
+      "name": "aten::linear",
+      "inputs": [
+        { "name": "input", "shape": [128, 512], "dtype": "float16" },
+        { "name": "fc1_w", "shape": [512, 256], "dtype": "float16", "is_weight": true },
+        { "name": "fc1_b", "shape": [256], "dtype": "float16", "is_weight": true }
+      ],
+      "outputs": [
+        { "name": "fc1_out", "shape": [128, 256], "dtype": "float16" }
+      ],
+      "attrs": { "has_bias": 1 }
+    },
+    {
+      "id": 1,
+      "name": "aten::layer_norm",
+      "inputs": [
+        { "name": "fc1_out", "shape": [128, 256], "dtype": "float16" },
+        { "name": "ln_w", "shape": [256], "dtype": "float16", "is_weight": true },
+        { "name": "ln_b", "shape": [256], "dtype": "float16", "is_weight": true }
+      ],
+      "outputs": [
+        { "name": "ln_out", "shape": [128, 256], "dtype": "float16" }
+      ],
+      "attrs": { "normalized_shape": "256" }
+    },
+    {
+      "id": 2,
+      "name": "aten::gelu",
+      "inputs": [
+        { "name": "ln_out", "shape": [128, 256], "dtype": "float16" }
+      ],
+      "outputs": [
+        { "name": "gelu_out", "shape": [128, 256], "dtype": "float16" }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 3,
+      "name": "aten::linear",
+      "inputs": [
+        { "name": "gelu_out", "shape": [128, 256], "dtype": "float16" },
+        { "name": "fc2_w", "shape": [256, 128], "dtype": "float16", "is_weight": true },
+        { "name": "fc2_b", "shape": [128], "dtype": "float16", "is_weight": true }
+      ],
+      "outputs": [
+        { "name": "fc2_out", "shape": [128, 128], "dtype": "float16" }
+      ],
+      "attrs": { "has_bias": 1 }
+    }
+  ]
+}

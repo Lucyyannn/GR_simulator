@@ -11,6 +11,10 @@ ConvWS::ConvWS(const Conv& src) : Conv(src) {}
 
 ConvWS::ConvWS(SimulationConfig config, MappingTable& mapping_table, convInfo info)
     : Conv(config, mapping_table, info) {}
+
+ConvWS::ConvWS(SimulationConfig config, Model* model, std::string name,
+               std::map<std::string, std::string>& attrs, uint32_t target_core)
+    : Conv(config, model, name, attrs, target_core) {}
 /* TODO: handle depthwise convolutoin (Important) */
 /* TODO: handle grouped convolutoin (less important) */
 void ConvWS::initialize_tiles(MappingTable& mapping_table) {

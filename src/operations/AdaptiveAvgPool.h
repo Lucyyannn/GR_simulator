@@ -3,12 +3,12 @@
 #include "Operation.h"
 
 class AdaptiveAvgPool : public Operation {
- public:
-  AdaptiveAvgPool(SimulationConfig config, Model* model,
-                  onnx::NodeProto& node_proto, uint32_t target_core=0);
-  AdaptiveAvgPool(const AdaptiveAvgPool& src);
-
-  virtual void initialize_tiles(MappingTable& mapping_table) override;
+  public:
+    AdaptiveAvgPool(SimulationConfig config, Model* model, onnx::NodeProto& node_proto, uint32_t target_core=0);
+    AdaptiveAvgPool(const AdaptiveAvgPool& src);
+    AdaptiveAvgPool(SimulationConfig config, Model* model, std::string name,
+                    std::map<std::string, std::string>& attrs, uint32_t target_core=0);
+    virtual void initialize_tiles(MappingTable& mapping_table) override;
 
  protected:
   virtual void initialize_instructions(Tile* tile, Mapping mapping);

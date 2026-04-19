@@ -1,0 +1,21 @@
+{
+  "metadata": {
+    "format_version": "1.0",
+    "model_name": "test_matmul",
+    "layout": "NHWC"
+  },
+  "operators": [
+    {
+      "id": 0,
+      "name": "aten::mm",
+      "inputs": [
+        { "name": "input", "shape": [128, 256], "dtype": "float16" },
+        { "name": "weight", "shape": [256, 512], "dtype": "float16", "is_weight": true }
+      ],
+      "outputs": [
+        { "name": "output", "shape": [128, 512], "dtype": "float16" }
+      ],
+      "attrs": {}
+    }
+  ]
+}

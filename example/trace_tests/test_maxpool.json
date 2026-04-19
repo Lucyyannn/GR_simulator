@@ -1,0 +1,24 @@
+{
+  "metadata": {
+    "format_version": "1.0",
+    "model_name": "test_maxpool",
+    "layout": "NHWC"
+  },
+  "operators": [
+    {
+      "id": 0,
+      "name": "aten::max_pool2d",
+      "inputs": [
+        { "name": "input", "shape": [1, 112, 112, 64], "dtype": "float16" }
+      ],
+      "outputs": [
+        { "name": "output", "shape": [1, 56, 56, 64], "dtype": "float16" }
+      ],
+      "attrs": {
+        "kernel_shape": [2, 2],
+        "strides": [2, 2],
+        "pads": [0, 0, 0, 0]
+      }
+    }
+  ]
+}

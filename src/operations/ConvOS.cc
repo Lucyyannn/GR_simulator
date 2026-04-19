@@ -9,6 +9,10 @@ ConvOS::ConvOS(SimulationConfig config, Model* model,
                onnx::NodeProto& node_proto, uint32_t target_core)
     : Conv(config, model, node_proto, target_core) {}
 
+ConvOS::ConvOS(SimulationConfig config, Model* model, std::string name,
+               std::map<std::string, std::string>& attrs, uint32_t target_core)
+    : Conv(config, model, name, attrs, target_core) {}
+
 ConvOS::ConvOS(const Conv& src) : Conv(src) {}
 
 /* TODO: handle depthwise convolutoin (Important) */

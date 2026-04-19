@@ -7,6 +7,8 @@ class ConvWS : public Conv {
   ConvWS(SimulationConfig config, Model* model, onnx::NodeProto& node_proto, uint32_t target_core=0);
   ConvWS(const Conv& src);
   ConvWS(SimulationConfig config, MappingTable& mapping_table, convInfo info);
+  ConvWS(SimulationConfig config, Model* model, std::string name,
+         std::map<std::string, std::string>& attrs, uint32_t target_core=0);
   virtual void initialize_tiles(MappingTable& mapping_table) override;
 
  protected:

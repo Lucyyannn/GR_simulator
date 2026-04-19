@@ -1,0 +1,35 @@
+{
+  "metadata": {
+    "format_version": "1.0",
+    "model_name": "test_layernorm_gelu",
+    "layout": "NHWC"
+  },
+  "operators": [
+    {
+      "id": 0,
+      "name": "aten::layer_norm",
+      "inputs": [
+        { "name": "input", "shape": [128, 512], "dtype": "float16" },
+        { "name": "weight", "shape": [512], "dtype": "float16", "is_weight": true },
+        { "name": "bias", "shape": [512], "dtype": "float16", "is_weight": true }
+      ],
+      "outputs": [
+        { "name": "ln_out", "shape": [128, 512], "dtype": "float16" }
+      ],
+      "attrs": {
+        "normalized_shape": "512"
+      }
+    },
+    {
+      "id": 1,
+      "name": "aten::gelu",
+      "inputs": [
+        { "name": "ln_out", "shape": [128, 512], "dtype": "float16" }
+      ],
+      "outputs": [
+        { "name": "gelu_out", "shape": [128, 512], "dtype": "float16" }
+      ],
+      "attrs": {}
+    }
+  ]
+}

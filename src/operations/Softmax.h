@@ -6,6 +6,8 @@ public:
     Softmax(SimulationConfig config, Model* model, onnx::NodeProto& node_proto, uint32_t target_core=0);
     Softmax(SimulationConfig config, MappingTable& mapping_table,
        std::vector<uint32_t> input_shape, uint32_t target_core=0);
+    Softmax(SimulationConfig config, Model* model, std::string name,
+            std::map<std::string, std::string>& attrs, uint32_t target_core=0);
     std::vector<uint32_t> _input_shape;
     std::vector<uint32_t> _output_shape;
 

@@ -66,6 +66,37 @@ MaxPool::MaxPool(const MaxPool& src) : Operation(src) {
   _pads = src._pads;
 }
 
+MaxPool::MaxPool(SimulationConfig config, Model* model, std::string name,
+                 std::map<std::string, std::string>& attrs, uint32_t target_core)
+    : Operation(config, model, name, attrs, target_core) {
+  _kernel_shape = parse_dims(get_attribute("kernel_shape"));
+  _strides = parse_dims(get_attribute("strides"));
+  if (_attributes.count("pads"))
+    _pads = parse_dims(get_attribute("pads"));
+  else
+    _pads = {0, 0, 0, 0};
+
+  std::vector<uint32_t> input_shape = parse_dims(get_attribute("input_shape"));
+  std::vector<uint32_t> output_shape;
+  output_shape.resize(input_shape.size());
+  output_shape[Ndim] = input_shape[Ndim];
+  output_shape[Cdim] = input_shape[Cdim];
+  for (int i = 0; i < 2; i++) {
+    output_shape[Hdim + i] =
+        (uint32_t)ceil(((float)input_shape[Hdim + i] + _pads[i] +
+                        _pads[i + 2] - (_kernel_shape[i] - 1)) /
+                       (float)_strides[i]);
+  }
+
+  std::unique_ptr<Tensor> output_tensor = std::make_unique<Tensor>(
+      _id, name_gen(_name, "out"), output_shape, _config.precision, false);
+  _outputs.push_back(output_tensor.get()->get_id());
+  _model->add_tensor(std::move(output_tensor));
+
+  _tiles.push_back(
+      std::make_unique<Tile>(Tile{.status = Tile::Status::INITIALIZED, .layer_id = _id, .batch = 0, .skip = true}));
+}
+
 /*TODO: implement this */
 void MaxPool::initialize_tiles(MappingTable& mapping_table) {
   spdlog::trace("initialize_tile {} ", _name);

@@ -16,6 +16,7 @@
 #include "BiasGelu.h"
 // #include "MatMul.h"
 #include "MaxPool.h"
+#include "Softmax.h"
 
 SimulationConfig OperationFactory::_config = SimulationConfig();
 
@@ -97,4 +98,40 @@ std::unique_ptr<Operation> OperationFactory::copy_operation(Operation* op) {
   }
   spdlog::warn("Node Proto optype \"{}\" returned dummy operator!", op->get_optype());
   return std::make_unique<Dummy>(*dynamic_cast<Dummy*>(op));
+}
+
+std::unique_ptr<Operation> OperationFactory::create_from_trace(
+    Model* model,
+    const trace_frontend::ConvertedOp& converted,
+    const trace_frontend::OpEntry& entry,
+    uint32_t target_core) {
+  const auto& optype = converted.optype;
+  auto attrs = converted.attrs;
+
+  if (optype == "Conv") {
+    if (_config.core_config[target_core].core_type == CoreType::SYSTOLIC_WS)
+      return std::make_unique<ConvWS>(_config, model, entry.name, attrs, target_core);
+    else
+      return std::make_unique<ConvOS>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "Gemm") {
+    return std::make_unique<GemmWS>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "MaxPool") {
+    return std::make_unique<MaxPool>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "AdaptiveAvgPool" || optype == "AveragePool") {
+    return std::make_unique<AdaptiveAvgPool>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "GlobalAvgPool") {
+    return std::make_unique<GlobalAvgPool>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "Flatten") {
+    return std::make_unique<Flatten>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "SkipLayerNorm") {
+    return std::make_unique<SkipLayerNorm>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "BiasGelu") {
+    return std::make_unique<BiasGelu>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "Softmax") {
+    return std::make_unique<Softmax>(_config, model, entry.name, attrs, target_core);
+  }
+
+  spdlog::warn("[TraceOpConverter] optype \"{}\" (from \"{}\") returned Dummy",
+               optype, entry.name);
+  return std::make_unique<Dummy>(_config, model, entry.name, attrs, target_core);
 }
