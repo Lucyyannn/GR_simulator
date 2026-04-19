@@ -85,26 +85,49 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
     auto op = OperationFactory::create_from_trace(
         this, converted, op_entry, _target_core);
     if (op) {
-      if (converted.optype == "SkipLayerNorm" && op_entry.inputs.size() < 4) {
-        Tensor* input_tensor = find_tensor(op_entry.inputs[0].name);
-        if (input_tensor) op->add_input(input_tensor->get_id());
-      }
-      if (converted.optype == "BiasGelu" && op_entry.inputs.size() < 2) {
-        Tensor* input_tensor = find_tensor(op_entry.inputs[0].name);
-        if (input_tensor) {
-          std::vector<uint32_t> bias_dims = {input_tensor->get_dims().back()};
-          auto bias_tensor = std::make_unique<Tensor>(
-              _id, name_gen(op_entry.inputs[0].name, "gelu_bias"),
-              bias_dims, _config.precision, true);
-          bias_tensor->set_produced();
-          uint32_t bias_id = bias_tensor->get_id();
-          _tensor_map[bias_id] = std::move(bias_tensor);
-          op->add_input(bias_id);
-        }
-      }
+      // Add all declared inputs first
       for (auto& inp : op_entry.inputs) {
         Tensor* t = find_tensor(inp.name);
         if (t) op->add_input(t->get_id());
+      }
+      // For SkipLayerNorm from layer_norm (only 1 activation input),
+      // synthesize a zero-valued skip tensor so _INPUT_OPERAND+1 is valid.
+      if (converted.optype == "SkipLayerNorm" && op_entry.inputs.size() < 4) {
+        Tensor* input_tensor = find_tensor(op_entry.inputs[0].name);
+        if (input_tensor) {
+          std::string skip_name = name_gen(op_entry.inputs[0].name, "skip_syn");
+          Tensor* existing_skip = find_tensor(skip_name);
+          if (!existing_skip) {
+            auto skip_dims = input_tensor->get_dims();
+            auto skip_tensor = std::make_unique<Tensor>(
+                _id, skip_name, skip_dims, _config.precision, true);
+            skip_tensor->set_produced();
+            uint32_t skip_id = skip_tensor->get_id();
+            _tensor_map[skip_id] = std::move(skip_tensor);
+            op->add_input(skip_id);
+          } else {
+            op->add_input(existing_skip->get_id());
+          }
+        }
+      }
+      // For BiasGelu (aten::gelu) with no bias input, synthesize one.
+      if (converted.optype == "BiasGelu" && op_entry.inputs.size() < 2) {
+        Tensor* input_tensor = find_tensor(op_entry.inputs[0].name);
+        if (input_tensor) {
+          std::string bias_name = name_gen(op_entry.inputs[0].name, "gelu_bias_syn");
+          Tensor* existing_bias = find_tensor(bias_name);
+          if (!existing_bias) {
+            std::vector<uint32_t> bias_dims = {input_tensor->get_dims().back()};
+            auto bias_tensor = std::make_unique<Tensor>(
+                _id, bias_name, bias_dims, _config.precision, true);
+            bias_tensor->set_produced();
+            uint32_t bias_id = bias_tensor->get_id();
+            _tensor_map[bias_id] = std::move(bias_tensor);
+            op->add_input(bias_id);
+          } else {
+            op->add_input(existing_bias->get_id());
+          }
+        }
       }
       _operation_map[op->get_id()] = std::move(op);
     }

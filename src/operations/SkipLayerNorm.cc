@@ -40,7 +40,10 @@ SkipLayerNorm::SkipLayerNorm(SimulationConfig config, Model *model,
     : Operation(config, model, name, attributes, target_core) {
   _input_shape = parse_dims(get_attribute("input_shape"));
   _weight_shape = parse_dims(get_attribute("weight_shape"));
-  _bias_shape = parse_dims(get_attribute("bias_shape"));
+  if (attributes.count("bias_shape"))
+    _bias_shape = parse_dims(get_attribute("bias_shape"));
+  else
+    _bias_shape = {_input_shape.back()};
   _dense_bias_shape = _bias_shape;
 
   if (_input_shape.size() == 2) {

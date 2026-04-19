@@ -95,6 +95,14 @@ DramRamulator::~DramRamulator() {
     delete _responses.front();
     _responses.pop();
   }
+  // drain any leftover write completions that were never consumed
+  for (int ch = 0; ch < _n_ch; ch++) {
+    while (!_mem->isEmpty(ch)) {
+      MemoryAccess* acc = (MemoryAccess*)_mem->top(ch);
+      _mem->pop(ch);
+      delete acc;
+    }
+  }
 }
 
 bool DramRamulator::running() { return false; }
@@ -126,12 +134,24 @@ void DramRamulator::push(uint32_t cid, MemoryAccess* request) {
   const addr_type start_addr = target_addr - (target_addr % atomic_bytes);
   assert(start_addr == target_addr);
   assert(request->size == atomic_bytes);
-  int count = 0;
   request->request = false;
   _mem->push(cid, target_addr, request->write, request->core_id, request);
 }
 
-bool DramRamulator::is_empty(uint32_t cid) { return _mem->isEmpty(cid); }
+bool DramRamulator::is_empty(uint32_t cid) {
+  // skip write completions - they do not need to be returned to Core
+  while (!_mem->isEmpty(cid)) {
+    MemoryAccess* acc = (MemoryAccess*)_mem->top(cid);
+    if (acc->write) {
+      _mem->pop(cid);
+      _processed_requests[cid]++;
+      delete acc;
+    } else {
+      break;
+    }
+  }
+  return _mem->isEmpty(cid);
+}
 
 MemoryAccess* DramRamulator::top(uint32_t cid) {
   assert(!is_empty(cid));
@@ -204,8 +224,12 @@ void DramRamulator2::push(uint32_t cid, MemoryAccess* request) {
   _mem[cid]->push(mf);
 }
 
-bool DramRamulator2::is_empty(uint32_t cid) { 
-  return _mem[cid]->return_queue_top() == NULL;
+bool DramRamulator2::is_empty(uint32_t cid) {
+  bool empty = (_mem[cid]->return_queue_top() == NULL);
+  if (!empty) {
+    spdlog::debug("[DramR2] ch={} return_queue non-empty", cid);
+  }
+  return empty;
 }
 
 MemoryAccess* DramRamulator2::top(uint32_t cid) {
@@ -218,6 +242,8 @@ MemoryAccess* DramRamulator2::top(uint32_t cid) {
 void DramRamulator2::pop(uint32_t cid) {
   assert(!is_empty(cid));
   NDPSim::mem_fetch* mf = _mem[cid]->return_queue_pop();
+  // origin_data (MemoryAccess*) is owned by Core after top(); caller must
+  // have already forwarded it - delete the wrapper only
   delete mf;
 }
 

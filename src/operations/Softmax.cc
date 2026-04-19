@@ -78,12 +78,17 @@ void Softmax::initialize_tiles(MappingTable& mapping_table) {
 
 void Softmax::initialize_instructions(Tile* tile, Mapping mapping, uint32_t token_offset, uint32_t tokens) {
     addr_type sram_base = SPAD_BASE;
+    addr_type input_addr = get_operand_addr(_INPUT_OPERAND);
+    addr_type output_addr = get_operand_addr(_OUTPUT_OPERAND);
 
-    /* Load two tile (input: tokens x _dk, skip: tokens x _dk) */
+    /* Load input tile (tokens x _dk) */
     std::set<addr_type> dram_addrs;
+    std::set<addr_type> dram_output_addrs;
     int offset;
-    for (offset=0; offset<tokens*_dk*_config.precision; offset+=_config.dram_req_size)
-        dram_addrs.insert(token_offset*_dk*_config.precision + offset);
+    for (offset=0; offset<tokens*_dk*_config.precision; offset+=_config.dram_req_size) {
+        dram_addrs.insert(input_addr + token_offset*_dk*_config.precision + offset);
+        dram_output_addrs.insert(output_addr + token_offset*_dk*_config.precision + offset);
+    }
 
     tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
         .opcode = Opcode::MOVIN,
@@ -104,8 +109,8 @@ void Softmax::initialize_instructions(Tile* tile, Mapping mapping, uint32_t toke
     tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
         .opcode = Opcode::MOVOUT,
         .dest_addr = sram_base,
-        .size = (uint32_t)dram_addrs.size(),
-        .src_addrs = std::vector<addr_type>(dram_addrs.begin(), dram_addrs.end()),
+        .size = (uint32_t)dram_output_addrs.size(),
+        .src_addrs = std::vector<addr_type>(dram_output_addrs.begin(), dram_output_addrs.end()),
         .operand_id = _OUTPUT_OPERAND,
     }));
 }
