@@ -76,8 +76,10 @@ class Ssd {
 
   /* Lifecycle (mirrors Dram) */
   bool running();
-  void cycle();                        // advance one NPU-core cycle
+  void cycle();                        // advance one SSD-domain cycle (DRAM-rate)
   void print_stat();
+
+  void set_current_time_ps(uint64_t ps) { _now_ps = ps; }
 
   /* Address routing */
   bool owns_address(addr_type addr) const {
@@ -119,7 +121,10 @@ class Ssd {
   SsdConfig _cfg;
   uint32_t  _tick_freq_mhz;
   double    _ns_per_cycle;  // = 1000 / tick_freq_mhz (DRAM freq)
-  cycle_type _cycles;       // local cycle counter
+  cycle_type _cycles;       // local cycle counter (DRAM-domain)
+  /* Simulator-injected wall-time (picoseconds). UINT64_MAX = "not set",
+   * in which case push() falls back to cycles_to_ns(_cycles). */
+  uint64_t   _now_ps = UINT64_MAX;
 
   std::vector<SsdChannelState> _channels;
 

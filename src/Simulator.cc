@@ -194,7 +194,10 @@ void Simulator::cycle() {
         int core_offset = _n_cores * _noc_node_per_core;
         if (!_icnt->is_empty(core_offset + mem_id)) {
           MemoryAccess* mreq = _icnt->top(core_offset + mem_id);
+
           if (_ssd && _ssd->owns_address(mreq->dram_address)) {
+            uint64_t sim_ps = MAX(MAX(_icnt_time, _dram_time), _core_time);
+            _ssd->set_current_time_ps(sim_ps);
             if (!_ssd->is_full(mreq)) {
               _ssd->push(mreq);
               _icnt->pop(core_offset + mem_id);

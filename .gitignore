@@ -1,3 +1,7 @@
 models/*
 model_lists/*
 build/*
+logs/*
+docs/*
+cache/*
+.continue/*

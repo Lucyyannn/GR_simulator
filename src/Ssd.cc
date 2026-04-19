@@ -109,7 +109,13 @@ void Ssd::push(MemoryAccess* req) {
   uint32_t ch = 0, lun = 0;
   address_to_ch_lun(req->dram_address, ch, lun);
 
-  uint64_t stime_ns = cycles_to_ns(_cycles);
+  /* Prefer the simulator-injected wall time (ps -> ns) so that stime_ns
+   * reflects the real moment at which this request reached the SSD port,
+   * not just the most recent DRAM tick. Fall back to the local counter if
+   * the simulator didn't set the time (keeps the module usable in unit
+   * tests / stand-alone mode).  */
+  uint64_t stime_ns = (_now_ps != UINT64_MAX) ? (_now_ps / 1000ULL)
+                                              : cycles_to_ns(_cycles);
   SsdCmd cmd = req->write ? SsdCmd::NAND_WRITE : SsdCmd::NAND_READ;
   uint64_t lat_ns = ssd_advance_status(ch, lun, cmd, stime_ns);
 
