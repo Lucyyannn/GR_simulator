@@ -8,11 +8,10 @@ GR\_simulator 是基于 [ONNXim](https://ieeexplore.ieee.org/document/10726822) 
 
 ## 目录
 
-- [系统架构图](#系统架构)
-- [GR算子支持列表](#目前支持的gr算子)
+- [系统架构图](#系统架构图)
+- [GR算子支持列表](#GR算子支持)
 - [环境配置](#环境配置)
 - [编译和执行](#编译和执行测试)
-- [硬件配置](#硬件配置)
 - [Trace输入格式](#trace输入格式)
 
 ***
@@ -320,59 +319,6 @@ cd build
 
 ***
 
-## 硬件配置
-
-配置文件位于 `configs/` 目录，主要参数：
-
-```json
-{
-  "num_cores": 4,
-  "core_freq": 1000,
-  "core_config": {
-    "core_0": {
-      "core_type": "systolic_ws",
-      "core_width": 128,
-      "core_height": 128,
-      "spad_size": 16384,
-      "accum_spad_size": 4096,
-      "sram_width": 32,
-      "vector_process_bit": 16384,
-      "add_latency": 1,
-      "mul_latency": 1,
-      "gelu_latency": 1,
-      "exp_latency": 1
-    }
-  },
-  "dram_type": "ramulator2",
-  "dram_freq": 1200,
-  "dram_channels": 16,
-  "dram_config_path": "../configs/ramulator2_configs/HBM2.yaml",
-  "icnt_type": "simple",
-  "icnt_latency": 1,
-  "ssd": {
-    "enabled": true,
-    "place_threshold_bytes": 1048576,
-    "address_base": "0x800000000",
-    "nchs": 8,
-    "luns_per_ch": 8
-  },
-  "precision": 2,
-  "layout": "NHWC",
-  "scheduler": "simple"
-}
-```
-
-**可用配置：**
-
-| 配置文件                                                                    | 核心阵列          | DRAM              | NoC      | SSD    |
-| ----------------------------------------------------------------------- | ------------- | ----------------- | -------- | ------ |
-| `systolic_ws_128x128_c4_simple_noc_tpuv4.json`                          | 4× WS 128×128 | Ramulator 1（简单模式） | Simple   | ❌      |
-| `systolic_ws_128x128_c4_booksim2_tpuv4.json`                            | 4× WS 128×128 | Ramulator 1（简单模式） | Booksim2 | ❌      |
-| `systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2.json`          | 4× WS 128×128 | Ramulator 2（HBM2） | Simple   | ❌      |
-| `systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd_fast.json` | 4× WS 128×128 | Ramulator 2（HBM2） | Simple   | ✅ FEMU |
-
-***
-
 ## Trace输入格式
 
 算子trace前端接受符合PyTorch算子trace格式的JSON文件：
@@ -403,24 +349,3 @@ cd build
   ]
 }
 ```
-
-**支持的PyTorch算子名称映射：**
-
-| PyTorch算子                   | NPU算子           | 说明                |
-| --------------------------- | --------------- | ----------------- |
-| `aten::linear`              | Gemm            | 线性层（A×B^T + bias） |
-| `aten::addmm`               | Gemm            | 带偏置矩阵乘法           |
-| `aten::mm`                  | Gemm            | 矩阵乘法（无偏置）         |
-| `aten::conv2d`              | Conv            | 2D卷积              |
-| `aten::max_pool2d`          | MaxPool         | 最大池化              |
-| `aten::adaptive_avg_pool2d` | AdaptiveAvgPool | 自适应平均池化           |
-| `aten::avg_pool2d`          | AdaptiveAvgPool | 平均池化              |
-| `aten::flatten`             | Flatten         | 张量展平              |
-| `aten::layer_norm`          | SkipLayerNorm   | 层归一化（skip自动合成）    |
-| `aten::gelu`                | BiasGelu        | GELU激活（偏置自动合成）    |
-| `aten::silu`                | BiasAct         | SiLU激活            |
-| `aten::softmax`             | Softmax         | Softmax           |
-| *（其他）*                      | Dummy           | 不支持的算子→占位符        |
-
-
-
