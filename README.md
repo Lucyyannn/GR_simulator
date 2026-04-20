@@ -295,12 +295,6 @@ echo '{"models":[{"name":"test_gemm","trace_path":"example/trace_tests/test_gemm
 | `test_layernorm_gelu.json`   | SkipLayerNorm + BiasGelu    | \[128,512]                    | 融合LN + GELU流水线 |
 | `test_pipeline.json`         | Linear → LN → GELU → Linear | \[128,512]                    | 多算子流水线         |
 
-### 单元测试
-
-```bash
-cd build
-./bin/Simulator_test
-```
 
 ### 结果解读
 
