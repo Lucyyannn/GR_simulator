@@ -9,10 +9,10 @@ GR\_simulator 是基于 [ONNXim](https://ieeexplore.ieee.org/document/10726822) 
 ## 目录
 
 - [系统架构图](#系统架构图)
-- [GR算子支持列表](#GR算子支持)
 - [环境配置](#环境配置)
 - [编译和执行](#编译和执行测试)
 - [Trace输入格式](#trace输入格式)
+- [GR算子支持列表](#GR算子支持)
 
 ***
 
@@ -93,65 +93,6 @@ GR\_simulator 是基于 [ONNXim](https://ieeexplore.ieee.org/document/10726822) 
 | **计算核心**    | SystolicWS / SystolicOS        | 脉动阵列，支持权重驻留或输出驻留数据流            |
 | **Trace前端** | TraceParser + TraceOpConverter | 解析PyTorch算子trace JSON并转换为NPU算子 |
 | **映射**      | MappingTable + 回退映射            | 层次化分块，支持自动映射生成                 |
-
-***
-
-## GR算子支持
-
-### 矩阵乘法类
-
-| NPU Operaion   | 类名       | 数据流  | PyTorch算子               | 功能描述         | 输入                               | 输出        | 精度                 | 动态形状 | 量化 |
-| --------- | -------- | ---- | ----------------------------- | ------------ | -------------------------------- | --------- | ------------------ | ---- | -- |
-| Gemm（线性层） | `GemmWS` | 权重驻留 | `aten::linear`, `aten::addmm` | 通用矩阵乘法（可选偏置） | A: \[N,K], B: \[K,M], bias: \[M] | C: \[N,M] | FP16 / BF16 / FP32 | ✅    | ❌  |
-| Gemm（矩阵乘） | `GemmWS` | 权重驻留 | `aten::mm`                    | 矩阵乘法（无偏置）    | A: \[N,K], B: \[K,M]             | C: \[N,M] | FP16 / BF16 / FP32 | ✅    | ❌  |
-| Gemm（OS）  | `GemmOS` | 输出驻留 | —                             | 输出驻留GEMM变体   | A: \[N,K], B: \[K,M]             | C: \[N,M] | FP16 / BF16 / FP32 | ✅    | ❌  |
-
-### 卷积类
-
-| NPU Operaion   | 类名       | 数据流  | PyTorch算子 | 功能描述                 | 输入                                       | 输出                    | 精度                 | 动态形状 | 量化 |
-| ---------- | -------- | ---- | --------------- | -------------------- | ---------------------------------------- | --------------------- | ------------------ | ---- | -- |
-| Conv2D     | `ConvWS` | 权重驻留 | `aten::conv2d`  | 2D卷积，支持融合激活/BN/残差/池化 | input: \[N,H,W,Ci], weight: \[Co,Ci,R,S] | output: \[N,H',W',Co] | FP16 / BF16 / FP32 | ✅    | ❌  |
-| Conv2D（OS） | `ConvOS` | 输出驻留 | —               | 输出驻留卷积变体             | input: \[N,H,W,Ci], weight: \[Co,Ci,R,S] | output: \[N,H',W',Co] | FP16 / BF16 / FP32 | ✅    | ❌  |
-
-**Conv2D支持的属性：** `kernel_shape`、`strides`、`pads`、`dilations`、`group`，融合 `activation`（ReLU/SiLU）、融合 `batchnorm`、融合 `skip_connection`、融合 `pool`（max/avg）。
-
-### 池化类
-
-| NPU Operaion   | 类名                | PyTorch算子             | 功能描述            | 输入         | 输出           | 精度                 | 动态形状 |
-| ----------------- | ----------------- | --------------------------- | --------------- | ---------- | ------------ | ------------------ | ---- |
-| MaxPool2D         | `MaxPool`         | `aten::max_pool2d`          | 空间维度最大池化        | \[N,H,W,C] | \[N,H',W',C] | FP16 / BF16 / FP32 | ✅    |
-| AdaptiveAvgPool2D | `AdaptiveAvgPool` | `aten::adaptive_avg_pool2d` | 自适应平均池化至目标输出尺寸  | \[N,H,W,C] | \[N,H',W',C] | FP16 / BF16 / FP32 | ✅    |
-| GlobalAvgPool     | `GlobalAvgPool`   | —                           | 全局平均池化（输出H=W=1） | \[N,H,W,C] | \[N,1,1,C]   | FP16 / BF16 / FP32 | ✅    |
-
-### 归一化类
-
-| NPU Operaion   | 类名               | PyTorch算子    | 功能描述                       | 输入                                                        | 输出               | 精度                 | 动态形状 |
-| -------------- | ---------------- | ------------------ | -------------------------- | --------------------------------------------------------- | ---------------- | ------------------ | ---- |
-| SkipLayerNorm  | `SkipLayerNorm`  | `aten::layer_norm` | 融合Skip + LayerNorm（BERT风格） | input: \[B,S,D], skip: \[B,S,D], weight: \[D], bias: \[D] | output: \[B,S,D] | FP16 / BF16 / FP32 | ✅    |
-| EmbedLayerNorm | `EmbedLayerNorm` | —                  | 融合Embedding + LayerNorm    | token\_ids, segment\_ids, position\_ids                   | output: \[B,S,D] | FP16 / BF16 / FP32 | ✅    |
-
-### 激活类
-
-| NPU Operaion   | 类名         | PyTorch算子            | 功能描述                       | 输入                          | 输出               | 精度                 | 动态形状 |
-| -------- | ---------- | -------------------------- | -------------------------- | --------------------------- | ---------------- | ------------------ | ---- |
-| BiasGelu | `BiasGelu` | `aten::gelu`               | 融合偏置 + GELU激活              | input: \[B,S,D], bias: \[D] | output: \[B,S,D] | FP16 / BF16 / FP32 | ✅    |
-| BiasAct  | `BiasAct`  | `aten::silu`, `aten::relu` | 融合偏置 + 通用激活（SiLU/ReLU/...） | input: \[B,S,D], bias: \[D] | output: \[B,S,D] | FP16 / BF16 / FP32 | ✅    |
-
-### 注意力类
-
-| NPU Operaion   | 类名          | PyTorch算子 | 功能描述                      | 输入                                      | 输出               | 精度                 | 动态形状 |
-| --------- | ----------- | --------------- | ------------------------- | --------------------------------------- | ---------------- | ------------------ | ---- |
-| Attention | `Attention` | —               | 多头自注意力，支持KV-cache和融合QKV投影 | Q: \[B,S,D], K: \[B,S,Dk], V: \[B,S,Dv] | output: \[B,S,D] | FP16 / BF16 / FP32 | ✅    |
-
-### 形状/工具类
-
-| NPU Operaion   | 类名              | PyTorch算子 | 功能描述             | 输入                                  | 输出          | 精度                 | 动态形状 |
-| ------------- | --------------- | --------------- | ---------------- | ----------------------------------- | ----------- | ------------------ | ---- |
-| Softmax       | `Softmax`       | `aten::softmax` | 沿指定维度Softmax     | \[B,S,D]                            | \[B,S,D]    | FP16 / BF16 / FP32 | ✅    |
-| Flatten       | `Flatten`       | `aten::flatten` | 从start\_dim起展平维度 | \[N,...]                            | \[N,...]    | FP16 / BF16 / FP32 | ✅    |
-| Concat        | `Concat`        | `aten::cat`     | 沿指定轴拼接张量         | tensors\[]                          | tensor      | FP16 / BF16 / FP32 | ✅    |
-| KVCacheConcat | `KVCacheConcat` | —               | 将新KV token与缓存拼接  | new\_kv: \[B,S,D], cache: \[B,S',D] | \[B,S+S',D] | FP16 / BF16 / FP32 | ✅    |
-| Dummy         | `Dummy`         | *（不支持的算子）*      | 不支持算子的占位符        | 任意                                  | 同输入形状       | 任意                 | ✅    |
 
 ***
 
@@ -343,3 +284,62 @@ echo '{"models":[{"name":"test_gemm","trace_path":"example/trace_tests/test_gemm
   ]
 }
 ```
+
+## GR算子支持
+
+### 矩阵乘法类
+
+| NPU Operaion   | 类名       | 数据流  | PyTorch算子               | 功能描述         | 输入                               | 输出        | 精度                 | 动态形状 | 量化 |
+| --------- | -------- | ---- | ----------------------------- | ------------ | -------------------------------- | --------- | ------------------ | ---- | -- |
+| Gemm（线性层） | `GemmWS` | 权重驻留 | `aten::linear`, `aten::addmm` | 通用矩阵乘法（可选偏置） | A: \[N,K], B: \[K,M], bias: \[M] | C: \[N,M] | FP16 / BF16 / FP32 | ✅    | ❌  |
+| Gemm（矩阵乘） | `GemmWS` | 权重驻留 | `aten::mm`                    | 矩阵乘法（无偏置）    | A: \[N,K], B: \[K,M]             | C: \[N,M] | FP16 / BF16 / FP32 | ✅    | ❌  |
+| Gemm（OS）  | `GemmOS` | 输出驻留 | —                             | 输出驻留GEMM变体   | A: \[N,K], B: \[K,M]             | C: \[N,M] | FP16 / BF16 / FP32 | ✅    | ❌  |
+
+### 卷积类
+
+| NPU Operaion   | 类名       | 数据流  | PyTorch算子 | 功能描述                 | 输入                                       | 输出                    | 精度                 | 动态形状 | 量化 |
+| ---------- | -------- | ---- | --------------- | -------------------- | ---------------------------------------- | --------------------- | ------------------ | ---- | -- |
+| Conv2D     | `ConvWS` | 权重驻留 | `aten::conv2d`  | 2D卷积，支持融合激活/BN/残差/池化 | input: \[N,H,W,Ci], weight: \[Co,Ci,R,S] | output: \[N,H',W',Co] | FP16 / BF16 / FP32 | ✅    | ❌  |
+| Conv2D（OS） | `ConvOS` | 输出驻留 | —               | 输出驻留卷积变体             | input: \[N,H,W,Ci], weight: \[Co,Ci,R,S] | output: \[N,H',W',Co] | FP16 / BF16 / FP32 | ✅    | ❌  |
+
+**Conv2D支持的属性：** `kernel_shape`、`strides`、`pads`、`dilations`、`group`，融合 `activation`（ReLU/SiLU）、融合 `batchnorm`、融合 `skip_connection`、融合 `pool`（max/avg）。
+
+### 池化类
+
+| NPU Operaion   | 类名                | PyTorch算子             | 功能描述            | 输入         | 输出           | 精度                 | 动态形状 |
+| ----------------- | ----------------- | --------------------------- | --------------- | ---------- | ------------ | ------------------ | ---- |
+| MaxPool2D         | `MaxPool`         | `aten::max_pool2d`          | 空间维度最大池化        | \[N,H,W,C] | \[N,H',W',C] | FP16 / BF16 / FP32 | ✅    |
+| AdaptiveAvgPool2D | `AdaptiveAvgPool` | `aten::adaptive_avg_pool2d` | 自适应平均池化至目标输出尺寸  | \[N,H,W,C] | \[N,H',W',C] | FP16 / BF16 / FP32 | ✅    |
+| GlobalAvgPool     | `GlobalAvgPool`   | —                           | 全局平均池化（输出H=W=1） | \[N,H,W,C] | \[N,1,1,C]   | FP16 / BF16 / FP32 | ✅    |
+
+### 归一化类
+
+| NPU Operaion   | 类名               | PyTorch算子    | 功能描述                       | 输入                                                        | 输出               | 精度                 | 动态形状 |
+| -------------- | ---------------- | ------------------ | -------------------------- | --------------------------------------------------------- | ---------------- | ------------------ | ---- |
+| SkipLayerNorm  | `SkipLayerNorm`  | `aten::layer_norm` | 融合Skip + LayerNorm（BERT风格） | input: \[B,S,D], skip: \[B,S,D], weight: \[D], bias: \[D] | output: \[B,S,D] | FP16 / BF16 / FP32 | ✅    |
+| EmbedLayerNorm | `EmbedLayerNorm` | —                  | 融合Embedding + LayerNorm    | token\_ids, segment\_ids, position\_ids                   | output: \[B,S,D] | FP16 / BF16 / FP32 | ✅    |
+
+### 激活类
+
+| NPU Operaion   | 类名         | PyTorch算子            | 功能描述                       | 输入                          | 输出               | 精度                 | 动态形状 |
+| -------- | ---------- | -------------------------- | -------------------------- | --------------------------- | ---------------- | ------------------ | ---- |
+| BiasGelu | `BiasGelu` | `aten::gelu`               | 融合偏置 + GELU激活              | input: \[B,S,D], bias: \[D] | output: \[B,S,D] | FP16 / BF16 / FP32 | ✅    |
+| BiasAct  | `BiasAct`  | `aten::silu`, `aten::relu` | 融合偏置 + 通用激活（SiLU/ReLU/...） | input: \[B,S,D], bias: \[D] | output: \[B,S,D] | FP16 / BF16 / FP32 | ✅    |
+
+### 注意力类
+
+| NPU Operaion   | 类名          | PyTorch算子 | 功能描述                      | 输入                                      | 输出               | 精度                 | 动态形状 |
+| --------- | ----------- | --------------- | ------------------------- | --------------------------------------- | ---------------- | ------------------ | ---- |
+| Attention | `Attention` | —               | 多头自注意力，支持KV-cache和融合QKV投影 | Q: \[B,S,D], K: \[B,S,Dk], V: \[B,S,Dv] | output: \[B,S,D] | FP16 / BF16 / FP32 | ✅    |
+
+### 形状/工具类
+
+| NPU Operaion   | 类名              | PyTorch算子 | 功能描述             | 输入                                  | 输出          | 精度                 | 动态形状 |
+| ------------- | --------------- | --------------- | ---------------- | ----------------------------------- | ----------- | ------------------ | ---- |
+| Softmax       | `Softmax`       | `aten::softmax` | 沿指定维度Softmax     | \[B,S,D]                            | \[B,S,D]    | FP16 / BF16 / FP32 | ✅    |
+| Flatten       | `Flatten`       | `aten::flatten` | 从start\_dim起展平维度 | \[N,...]                            | \[N,...]    | FP16 / BF16 / FP32 | ✅    |
+| Concat        | `Concat`        | `aten::cat`     | 沿指定轴拼接张量         | tensors\[]                          | tensor      | FP16 / BF16 / FP32 | ✅    |
+| KVCacheConcat | `KVCacheConcat` | —               | 将新KV token与缓存拼接  | new\_kv: \[B,S,D], cache: \[B,S',D] | \[B,S+S',D] | FP16 / BF16 / FP32 | ✅    |
+| Dummy         | `Dummy`         | *（不支持的算子）*      | 不支持算子的占位符        | 任意                                  | 同输入形状       | 任意                 | ✅    |
+
+***
