@@ -4,6 +4,7 @@
 
 #include "Simulator.h"
 #include "TraceModel.h"
+#include "benchmark/MemBenchmark.h"
 #include "helper/CommandLineParser.h"
 #include "operations/OperationFactory.h"
 
@@ -26,6 +27,10 @@ int main(int argc, char** argv) {
       "trace_file", "input trace file for language mode, default = input.csv");
   cmd_parser.add_command_line_option<std::string>(
       "trace_path", "Path for operator trace JSON file (trace mode)");
+  cmd_parser.add_command_line_option<std::string>(
+      "bench_config", "Path for mem_benchmark configuration JSON");
+  cmd_parser.add_command_line_option<std::string>(
+      "bench_output_dir", "Output directory for mem_benchmark CSV/chart inputs");
 
   try {
     cmd_parser.parse(argc, argv);
@@ -83,11 +88,42 @@ int main(int argc, char** argv) {
     language_mode = true;
   } else if (mode == "trace") {
     spdlog::info("Running in trace mode");
+  } else if (mode == "mem_bench") {
+    spdlog::info("Running in mem_bench mode");
   } else {
     spdlog::error("Invalid mode: {}", mode);
     return 1;
   }
 
+  if (mode == "mem_bench") {
+    std::string bench_config_path;
+    cmd_parser.set_if_defined("bench_config", &bench_config_path);
+    if (bench_config_path.empty()) {
+      spdlog::error("bench_config must be provided in mem_bench mode");
+      return 1;
+    }
+
+    json bench_json;
+    std::ifstream bench_config_file(bench_config_path);
+    if (!bench_config_file) {
+      spdlog::error("Error opening file: {}", bench_config_path);
+      return 1;
+    }
+    bench_config_file >> bench_json;
+    bench_config_file.close();
+
+    std::string bench_output_dir =
+        bench_json.value("output_dir", std::string("results/mem_benchmark"));
+    cmd_parser.set_if_defined("bench_output_dir", &bench_output_dir);
+
+    MemBenchmarkRunner runner(config, bench_json, bench_output_dir);
+    runner.run();
+
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> duration = end - start;
+    spdlog::info("Benchmark time: {:2f} seconds", duration.count());
+    return 0;
+  }
 
   std::string models_list_path;
   cmd_parser.set_if_defined("models_list", &models_list_path);
