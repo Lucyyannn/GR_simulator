@@ -69,6 +69,8 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
     scfg.ch_xfer_lat    = config.ssd.ch_xfer_lat;
     _ssd = std::make_unique<Ssd>(scfg, config.dram_freq);
   }
+  _storage_controller =
+      std::make_unique<StorageController>(config, _dram.get(), _ssd.get());
 
   // Create interconnect object
   if (config.icnt_type == IcntType::SIMPLE) {
@@ -131,7 +133,8 @@ void Simulator::cycle() {
   while (running()) {
     int model_id = 0;
 
-    set_cycle_mask();
+    uint64_t sim_time_ps = set_cycle_mask();
+    if (_storage_controller) _storage_controller->advance_to(sim_time_ps);
     // Core Cycle
     if (_cycle_mask & CORE_MASK) {
       /* Handle requested model */
@@ -161,7 +164,6 @@ void Simulator::cycle() {
     // DRAM cycle
     if (_cycle_mask & DRAM_MASK) {
       _dram->cycle();
-      if (_ssd) _ssd->cycle();
     }
     // Interconnect cycle
     if (_cycle_mask & ICNT_MASK) {
@@ -195,42 +197,31 @@ void Simulator::cycle() {
         if (!_icnt->is_empty(core_offset + mem_id)) {
           MemoryAccess* mreq = _icnt->top(core_offset + mem_id);
 
-          if (_ssd && _ssd->owns_address(mreq->dram_address)) {
-            uint64_t sim_ps = MAX(MAX(_icnt_time, _dram_time), _core_time);
-            _ssd->set_current_time_ps(sim_ps);
-            if (!_ssd->is_full(mreq)) {
-              _ssd->push(mreq);
-              _icnt->pop(core_offset + mem_id);
-              _nr_to_mem++;
-            }
-          } else if (!_dram->is_full(mem_id, mreq)) {
-            _dram->push(mem_id, mreq);
+          if (_storage_controller &&
+              _storage_controller->dispatch_request(mem_id, mreq, sim_time_ps)) {
             _icnt->pop(core_offset + mem_id);
             _nr_to_mem++;
           }
         }
-        // Pop response to ICNT from dram
-        if (!_dram->is_empty(mem_id) &&
-            !_icnt->is_full(core_offset + mem_id, _dram->top(mem_id))) {
-          _icnt->push(core_offset + mem_id, get_dest_node(_dram->top(mem_id)),
-                      _dram->top(mem_id));
-          _dram->pop(mem_id);
-          _nr_from_mem++;
-        }
       }
-      // Pop responses from SSD back into ICNT (use mem channel 0 as return port)
-      if (_ssd && !_ssd->is_empty()) {
+      int max_controller_responses = _n_memories + (_ssd ? 1 : 0);
+      for (int response_count = 0;
+           response_count < max_controller_responses &&
+           _storage_controller && _storage_controller->has_ready_response();
+           response_count++) {
         int core_offset = _n_cores * _noc_node_per_core;
-        MemoryAccess* sresp = _ssd->top();
-        uint32_t dest_node = get_dest_node(sresp);
-        spdlog::debug("[SSD-RESP] addr=0x{:x} spad=0x{:x} wr={} core={} ch_id={} dest_node={}",
-                      sresp->dram_address, sresp->spad_address,
-                      sresp->write, sresp->core_id,
-                      _dram->get_channel_id(sresp), dest_node);
-        if (!_icnt->is_full(core_offset + 0, sresp)) {
-          _icnt->push(core_offset + 0, dest_node, sresp);
-          _ssd->pop();
+        MemoryAccess* response = _storage_controller->top_ready_response();
+        response->return_time_ps = sim_time_ps;
+        uint32_t source_port =
+            response->target_medium == MemoryMedium::SSD ? 0
+                                                         : _dram->get_channel_id(response);
+        uint32_t dest_node = get_dest_node(response);
+        if (!_icnt->is_full(core_offset + source_port, response)) {
+          _icnt->push(core_offset + source_port, dest_node, response);
+          _storage_controller->pop_ready_response();
           _nr_from_mem++;
+        } else {
+          break;
         }
       }
       if (_icnt_interval!=0 && _icnt_cycle % _icnt_interval == 0) {
@@ -288,8 +279,12 @@ bool Simulator::running() {
     running = running || core->running();
   }
   running = running || _icnt->running();
-  running = running || _dram->running();
-  if (_ssd) running = running || _ssd->running();
+  if (_storage_controller)
+    running = running || _storage_controller->has_pending();
+  else {
+    running = running || _dram->running();
+    if (_ssd) running = running || _ssd->running();
+  }
   running = running || !_scheduler->empty();
   if(_language_mode) {
     running = running || _lang_scheduler->busy();
@@ -297,7 +292,7 @@ bool Simulator::running() {
   return running;
 }
 
-void Simulator::set_cycle_mask() {
+uint64_t Simulator::set_cycle_mask() {
   _cycle_mask = 0x0;
   uint64_t minimum_time = MIN3(_core_time, _dram_time, _icnt_time);
   if (_core_time <= minimum_time) {
@@ -312,6 +307,7 @@ void Simulator::set_cycle_mask() {
     _cycle_mask |= ICNT_MASK;
     _icnt_time += _icnt_period;
   }
+  return minimum_time;
 }
 
 uint32_t Simulator::get_dest_node(MemoryAccess *access) {

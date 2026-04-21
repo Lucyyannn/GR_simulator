@@ -6,6 +6,7 @@
 #include "Ssd.h"
 #include "Interconnect.h"
 #include "Model.h"
+#include "memory/StorageController.h"
 #include "scheduler/Scheduler.h"
 #include "scheduler/LanguageScheduler.h"
 #include <queue>
@@ -29,7 +30,7 @@ class Simulator {
  private:
   void cycle();
   bool running();
-  void set_cycle_mask();
+  uint64_t set_cycle_mask();
   void handle_model();
   uint32_t get_dest_node(MemoryAccess* access);
   SimulationConfig _config;
@@ -43,6 +44,7 @@ class Simulator {
   std::unique_ptr<Interconnect> _icnt;
   std::unique_ptr<Dram> _dram;
   std::unique_ptr<Ssd>  _ssd;    // FEMU-inspired storage (optional)
+  std::unique_ptr<StorageController> _storage_controller;
   std::unique_ptr<Scheduler> _scheduler;
   
   // period information (ps)
