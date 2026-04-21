@@ -41,6 +41,14 @@ SimpleInterconnect::~SimpleInterconnect() {
 
 
 bool SimpleInterconnect::running() {
+  for (int src = 0; src < _n_nodes; src++) {
+    for (int dest = 0; dest < _n_nodes; dest++) {
+      if (!_in_buffers[src][dest].empty()) return true;
+    }
+  }
+  for (int node = 0; node < _n_nodes; node++) {
+    if (!_out_buffers[node].empty()) return true;
+  }
   return false;
 }
 
@@ -112,6 +120,9 @@ Booksim2Interconnect::Booksim2Interconnect(SimulationConfig config) {
 }
 
 bool Booksim2Interconnect::running() {
+  for (uint32_t nid = 0; nid < _n_nodes; nid++) {
+    if (!_booksim->is_empty(nid, 0)) return true;
+  }
   return false;
 }
 

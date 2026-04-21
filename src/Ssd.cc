@@ -5,8 +5,7 @@
 Ssd::Ssd(const SsdConfig& cfg, uint32_t tick_freq_mhz)
     : _cfg(cfg),
       _tick_freq_mhz(tick_freq_mhz > 0 ? tick_freq_mhz : 1000),
-      _ns_per_cycle(1000.0 / (tick_freq_mhz > 0 ? tick_freq_mhz : 1000)),
-      _cycles(0),
+      _tick_period_ps((uint64_t)(1000000.0 / (tick_freq_mhz > 0 ? tick_freq_mhz : 1000))),
       _stat_ch_reads(cfg.nchs, 0),
       _stat_ch_writes(cfg.nchs, 0) {
   _channels.resize(_cfg.nchs);
@@ -37,16 +36,28 @@ bool Ssd::running() {
 }
 
 void Ssd::cycle() {
-  _cycles++;
-  while (!_pending.empty() && _pending.top().finish_cycle <= _cycles) {
+  _sim_time_ps += _tick_period_ps;
+  advance_to(_sim_time_ps);
+}
+
+void Ssd::advance_to(uint64_t now_ps) {
+  _sim_time_ps = std::max(_sim_time_ps, now_ps);
+  while (!_pending.empty() && _pending.top().finish_time_ps <= _sim_time_ps) {
     MemoryAccess* a = _pending.top().access;
+    uint64_t finish_time_ps = _pending.top().finish_time_ps;
     _pending.pop();
     a->request = false;
-    a->dram_finish_cycle = _cycles;
+    a->mem_finish_time_ps = finish_time_ps;
+    a->dram_finish_cycle = ps_to_tick_cycles(finish_time_ps);
     _finished.push(a);
-    spdlog::debug("[SSD] complete addr=0x{:x} wr={} finish_cycle={} pending={}",
-                  a->dram_address, a->write, _cycles, _pending.size());
+    spdlog::debug("[SSD] complete addr=0x{:x} wr={} finish_time_ps={} pending={}",
+                  a->dram_address, a->write, finish_time_ps, _pending.size());
   }
+}
+
+uint64_t Ssd::next_event_time_ps() const {
+  if (_pending.empty()) return UINT64_MAX;
+  return _pending.top().finish_time_ps;
 }
 
 void Ssd::address_to_ch_lun(addr_type addr, uint32_t& ch, uint32_t& lun) const {
@@ -115,14 +126,21 @@ void Ssd::push(MemoryAccess* req) {
    * the simulator didn't set the time (keeps the module usable in unit
    * tests / stand-alone mode).  */
   uint64_t stime_ns = (_now_ps != UINT64_MAX) ? (_now_ps / 1000ULL)
-                                              : cycles_to_ns(_cycles);
+                                              : (_sim_time_ps / 1000ULL);
   SsdCmd cmd = req->write ? SsdCmd::NAND_WRITE : SsdCmd::NAND_READ;
   uint64_t lat_ns = ssd_advance_status(ch, lun, cmd, stime_ns);
+  uint64_t finish_time_ps = ((_now_ps != UINT64_MAX) ? _now_ps : _sim_time_ps) +
+                            lat_ns * 1000ULL;
+  if (finish_time_ps <= _sim_time_ps) {
+    finish_time_ps = _sim_time_ps + std::max<uint64_t>(_tick_period_ps, 1);
+  }
 
-  cycle_type finish = _cycles + ns_to_cycles(lat_ns);
-  if (finish <= _cycles) finish = _cycles + 1;
+  req->target_medium = MemoryMedium::SSD;
+  req->mem_enter_time_ps = (_now_ps != UINT64_MAX) ? _now_ps : _sim_time_ps;
+  if (req->issue_time_ps == 0) req->issue_time_ps = req->mem_enter_time_ps;
+  if (req->logical_size_bytes == 0) req->logical_size_bytes = req->size;
 
-  _pending.push({finish, req});
+  _pending.push({finish_time_ps, req});
 
   if (req->write) {
     _stat_writes++;
@@ -140,10 +158,10 @@ void Ssd::push(MemoryAccess* req) {
 
   spdlog::debug(
       "[SSD] push addr=0x{:x} wr={} ch={} lun={} core={} spad=0x{:x} "
-      "stime={:.1f}ns lat={:.1f}ns finish_cycle={} pending={}",
+      "stime={:.1f}ns lat={:.1f}ns finish_time_ps={} pending={}",
       req->dram_address, req->write, ch, lun, req->core_id,
       req->spad_address, (double)stime_ns, (double)lat_ns,
-      finish, _pending.size());
+      finish_time_ps, _pending.size());
 }
 
 bool Ssd::is_empty() { return _finished.empty(); }

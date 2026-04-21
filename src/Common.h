@@ -32,6 +32,12 @@ using json = nlohmann::json;
 typedef uint64_t addr_type;
 typedef uint64_t cycle_type;
 
+enum class MemoryMedium {
+  UNKNOWN = 0,
+  DRAM = 1,
+  SSD = 2,
+};
+
 typedef struct {
   uint32_t id;
   addr_type dram_address;
@@ -44,6 +50,17 @@ typedef struct {
   cycle_type dram_enter_cycle;
   cycle_type dram_finish_cycle;
   int buffer_id;
+  addr_type aux_address = 0;
+  uint64_t issue_time_ps = 0;
+  uint64_t mem_enter_time_ps = 0;
+  uint64_t mem_finish_time_ps = 0;
+  uint64_t return_time_ps = 0;
+  uint64_t logical_size_bytes = 0;
+  uint64_t macro_request_id = 0;
+  MemoryMedium source_medium = MemoryMedium::UNKNOWN;
+  MemoryMedium target_medium = MemoryMedium::UNKNOWN;
+  MemoryMedium destination_medium = MemoryMedium::UNKNOWN;
+  bool controller_generated = false;
 } MemoryAccess;
 
 enum class Opcode {

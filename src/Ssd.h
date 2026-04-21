@@ -76,7 +76,9 @@ class Ssd {
 
   /* Lifecycle (mirrors Dram) */
   bool running();
-  void cycle();                        // advance one SSD-domain cycle (DRAM-rate)
+  void cycle();                        // legacy tick wrapper around advance_to()
+  void advance_to(uint64_t now_ps);
+  uint64_t next_event_time_ps() const;
   void print_stat();
 
   void set_current_time_ps(uint64_t ps) { _now_ps = ps; }
@@ -111,29 +113,26 @@ class Ssd {
   void address_to_ch_lun(addr_type addr, uint32_t& ch, uint32_t& lun) const;
 
   /* ns <-> NPU cycle conversion */
-  uint64_t cycles_to_ns(cycle_type c) const {
-    return (uint64_t)((double)c * _ns_per_cycle);
-  }
-  cycle_type ns_to_cycles(uint64_t ns) const {
-    return (cycle_type)((double)ns / _ns_per_cycle);
+  uint64_t ps_to_tick_cycles(uint64_t ps) const {
+    return _tick_period_ps == 0 ? 0 : (ps / _tick_period_ps);
   }
 
   SsdConfig _cfg;
   uint32_t  _tick_freq_mhz;
-  double    _ns_per_cycle;  // = 1000 / tick_freq_mhz (DRAM freq)
-  cycle_type _cycles;       // local cycle counter (DRAM-domain)
+  uint64_t  _tick_period_ps;
+  uint64_t  _sim_time_ps = 0;
   /* Simulator-injected wall-time (picoseconds). UINT64_MAX = "not set",
-   * in which case push() falls back to cycles_to_ns(_cycles). */
+   * in which case push() falls back to the internal SSD wall time. */
   uint64_t   _now_ps = UINT64_MAX;
 
   std::vector<SsdChannelState> _channels;
 
   /* Pending requests keyed by completion cycle (monotone counter) */
   struct PendingReq {
-    cycle_type finish_cycle;
+    uint64_t finish_time_ps;
     MemoryAccess* access;
     bool operator>(const PendingReq& o) const {
-      return finish_cycle > o.finish_cycle;
+      return finish_time_ps > o.finish_time_ps;
     }
   };
   std::priority_queue<PendingReq, std::vector<PendingReq>,

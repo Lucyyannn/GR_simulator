@@ -1,5 +1,7 @@
 #include "Dram.h"
 
+#include <algorithm>
+
 #include "helper/HelperFunctions.h"
 #include "Hashing.h"
 
@@ -12,12 +14,20 @@ uint32_t Dram::get_channel_id(MemoryAccess* access) {
   return channel_id;
 }
 
+void Dram::advance_to(uint64_t now_ps) {
+  while (running() && _time_ps <= now_ps) {
+    cycle();
+    _time_ps += _period_ps;
+  }
+}
+
 /* FIXME: Simple DRAM has bugs */
 SimpleDram::SimpleDram(SimulationConfig config)
     : _latency(config.dram_latency) {
   _cycles = 0;
   _config = config;
   _n_ch = config.dram_channels;
+  _period_ps = 1000000 / std::max<uint32_t>(config.dram_freq, 1);
   _waiting_queue.resize(_n_ch);
   _response_queue.resize(_n_ch);
 }
@@ -35,7 +45,7 @@ SimpleDram::~SimpleDram() {
   }
 }
 
-bool SimpleDram::running() { return false; }
+bool SimpleDram::running() { return _inflight_requests > 0; }
 
 void SimpleDram::cycle() {
   for (uint32_t ch = 0; ch < _n_ch; ch++) {
@@ -58,6 +68,7 @@ void SimpleDram::push(uint32_t cid, MemoryAccess* request) {
   _last_finish_cycle = entity.first;
   entity.second = request;
   _waiting_queue[cid].push(entity);
+  _inflight_requests++;
 }
 
 bool SimpleDram::is_empty(uint32_t cid) { return _response_queue[cid].empty(); }
@@ -70,6 +81,7 @@ MemoryAccess* SimpleDram::top(uint32_t cid) {
 void SimpleDram::pop(uint32_t cid) {
   assert(!is_empty(cid));
   _response_queue[cid].pop();
+  _inflight_requests--;
 }
 
 DramRamulator::DramRamulator(SimulationConfig config)
@@ -78,6 +90,7 @@ DramRamulator::DramRamulator(SimulationConfig config)
   _n_ch = config.dram_channels;
   _config = config;
   _cycles = 0;
+  _period_ps = 1000000 / std::max<uint32_t>(config.dram_freq, 1);
   _total_processed_requests.resize(_n_ch);
   _processed_requests.resize(_n_ch);
   for (int ch = 0; ch < _n_ch; ch++) {
@@ -105,7 +118,7 @@ DramRamulator::~DramRamulator() {
   }
 }
 
-bool DramRamulator::running() { return false; }
+bool DramRamulator::running() { return _inflight_requests > 0; }
 
 void DramRamulator::cycle() {
   _mem->tick();
@@ -136,6 +149,7 @@ void DramRamulator::push(uint32_t cid, MemoryAccess* request) {
   assert(request->size == atomic_bytes);
   request->request = false;
   _mem->push(cid, target_addr, request->write, request->core_id, request);
+  _inflight_requests++;
 }
 
 bool DramRamulator::is_empty(uint32_t cid) {
@@ -145,6 +159,7 @@ bool DramRamulator::is_empty(uint32_t cid) {
     if (acc->write) {
       _mem->pop(cid);
       _processed_requests[cid]++;
+      _inflight_requests--;
       delete acc;
     } else {
       break;
@@ -162,6 +177,7 @@ void DramRamulator::pop(uint32_t cid) {
   assert(!is_empty(cid));
   _mem->pop(cid);
   _processed_requests[cid]++;
+  _inflight_requests--;
 }
 
 void DramRamulator::print_stat() {
@@ -181,6 +197,7 @@ DramRamulator2::DramRamulator2(SimulationConfig config) {
   _n_ch = config.dram_channels;
   _req_size = config.dram_req_size;
   _config = config;
+  _period_ps = 1000000 / std::max<uint32_t>(config.dram_freq, 1);
   _mem.resize(_n_ch);
   for (int ch = 0; ch < _n_ch; ch++) {
     _mem[ch] = std::make_unique<NDPSim::Ramulator2>(
@@ -193,8 +210,8 @@ DramRamulator2::DramRamulator2(SimulationConfig config) {
 DramRamulator2::~DramRamulator2() {
 }
 
-bool DramRamulator2::running() { 
-  return false;
+bool DramRamulator2::running() {
+  return _inflight_requests > 0;
 }
 
 void DramRamulator2::cycle() {
@@ -222,6 +239,7 @@ void DramRamulator2::push(uint32_t cid, MemoryAccess* request) {
   mf->request = true;
   mf->origin_data = request;
   _mem[cid]->push(mf);
+  _inflight_requests++;
 }
 
 bool DramRamulator2::is_empty(uint32_t cid) {
@@ -244,6 +262,7 @@ void DramRamulator2::pop(uint32_t cid) {
   NDPSim::mem_fetch* mf = _mem[cid]->return_queue_pop();
   // origin_data (MemoryAccess*) is owned by Core after top(); caller must
   // have already forwarded it - delete the wrapper only
+  _inflight_requests--;
   delete mf;
 }
 

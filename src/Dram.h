@@ -1,5 +1,6 @@
 #ifndef DRAM_H
 #define DRAM_H
+#include <algorithm>
 #include <robin_hood.h>
 #include <cstdint>
 #include <queue>
@@ -15,18 +16,27 @@ class Dram {
   virtual ~Dram() = default;
   virtual bool running() = 0;
   virtual void cycle() = 0;
+  virtual void advance_to(uint64_t now_ps);
   virtual bool is_full(uint32_t cid, MemoryAccess* request) = 0;
   virtual void push(uint32_t cid, MemoryAccess* request) = 0;
   virtual bool is_empty(uint32_t cid) = 0;
   virtual MemoryAccess* top(uint32_t cid) = 0;
   virtual void pop(uint32_t cid) = 0;
   uint32_t get_channel_id(MemoryAccess* request);
+  uint64_t next_event_time_ps() {
+    return running() ? (_time_ps + std::max<uint64_t>(_period_ps, 1))
+                     : UINT64_MAX;
+  }
+  uint64_t current_time_ps() const { return _time_ps; }
   virtual void print_stat() {}
 
  protected:
   SimulationConfig _config;
   uint32_t _n_ch;
   cycle_type _cycles;
+  uint64_t _period_ps = 0;
+  uint64_t _time_ps = 0;
+  uint64_t _inflight_requests = 0;
 };
 
 class SimpleDram : public Dram {
