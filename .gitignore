@@ -1,11 +1,10 @@
 models/*
 model_lists/*
-build/*
-build_host/*
+build/
 logs/*
-docs/*
-!docs/架构升级方案.md
-cache/*
+docs/
+cache/
 .continue/*
 AGENTS.md
 .codex
+detail.csv

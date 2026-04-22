@@ -2,71 +2,40 @@
 #define SSD_H
 
 #include <robin_hood.h>
+
 #include <cstdint>
+#include <deque>
+#include <memory>
 #include <queue>
 #include <vector>
-#include <memory>
 
 #include "Common.h"
 
-/**
- * @brief FEMU BlackBox-SSD inspired storage latency model.
- *
- * This module reproduces the core timing behavior of FEMU's bbssd
- * `ssd_advance_status()` (extern/femu/bbssd/ftl.c), including the
- * per-LUN `next_lun_avail_time` and per-channel `next_ch_avail_time`
- * bookkeeping that captures channel/LUN-level concurrency. The full
- * FTL (page mapping, GC, FDP, rte_ring, pqueue ...) is intentionally
- * elided to avoid pulling in QEMU dependencies; LBA -> (ch,lun) is a
- * simple stripe mapping, sufficient for NPU-centric workloads that
- * page DNN weights/KV-cache between SSD and DRAM.
- *
- * Interface is deliberately aligned with Dram (see Dram.h) so that
- * Simulator integrates it in the same push/top/pop style.
- */
-
-/* NAND op type mirroring bbssd/ftl.h */
 enum class SsdCmd {
-    NAND_READ = 0,
-    NAND_WRITE = 1,
-    NAND_ERASE = 2,
+  NAND_READ = 0,
+  NAND_WRITE = 1,
+  NAND_ERASE = 2,
 };
 
-/* Knobs inherited from FEMU `BbCtrlParams` (extern/femu/nvme.h) */
 struct SsdConfig {
-    /* Address space (global NPU-visible) */
-    uint64_t address_base = 0x800000000ULL;    // where SSD region starts
-    uint64_t capacity_bytes = (1ULL << 40);    // 1TB default
+  uint64_t address_base = 0x800000000ULL;
+  uint64_t capacity_bytes = (1ULL << 40);
 
-    /* Geometry */
-    int secsz           = 512;
-    int secs_per_pg     = 8;       // -> 4KB page
-    int pgs_per_blk     = 256;
-    int blks_per_pl     = 256;
-    int pls_per_lun     = 1;
-    int luns_per_ch     = 8;
-    int nchs            = 8;
+  int secsz = 512;
+  int secs_per_pg = 8;
+  int pgs_per_blk = 256;
+  int blks_per_pl = 256;
+  int pls_per_lun = 1;
+  int luns_per_ch = 8;
+  int nchs = 8;
 
-    /* Latencies in ns (FEMU defaults from ftl.h) */
-    int pg_rd_lat       = 40000;    // 40us
-    int pg_wr_lat       = 200000;   // 200us
-    int blk_er_lat      = 2000000;  // 2ms
-    int ch_xfer_lat     = 0;        // channel transfer
-};
+  int pg_rd_lat = 40000;
+  int pg_wr_lat = 200000;
+  int blk_er_lat = 2000000;
+  int ch_xfer_lat = 0;
 
-/**
- * @brief Minimal subset of FEMU ssd structures for latency modelling.
- *
- * We keep only `next_lun_avail_time` and `next_ch_avail_time` -- these are
- * the state used by ssd_advance_status() in bbssd/ftl.c.
- */
-struct SsdLunState {
-    uint64_t next_lun_avail_time = 0;
-};
-
-struct SsdChannelState {
-    uint64_t next_ch_avail_time = 0;
-    std::vector<SsdLunState> luns;
+  int gc_thres_pcent = 75;
+  int gc_thres_pcent_high = 95;
 };
 
 class Ssd {
@@ -74,24 +43,19 @@ class Ssd {
   explicit Ssd(const SsdConfig& cfg, uint32_t tick_freq_mhz);
   ~Ssd();
 
-  /* Lifecycle (mirrors Dram) */
   bool running();
-  void cycle();                        // legacy tick wrapper around advance_to()
+  void cycle();
   void advance_to(uint64_t now_ps);
   uint64_t next_event_time_ps() const;
   void print_stat();
 
   void set_current_time_ps(uint64_t ps) { _now_ps = ps; }
 
-  /* Address routing */
   bool owns_address(addr_type addr) const {
     return addr >= _cfg.address_base &&
-           addr <  _cfg.address_base + _cfg.capacity_bytes;
+           addr < _cfg.address_base + _cfg.capacity_bytes;
   }
 
-  /* Request path (analogous to Dram::push / top / pop, but the Simulator
-     keeps SSD requests in a single virtual queue because SSD only has one
-     "port" from the NoC-side perspective). */
   bool is_full(MemoryAccess* request);
   void push(MemoryAccess* request);
 
@@ -99,50 +63,214 @@ class Ssd {
   MemoryAccess* top();
   void pop();
 
-  /* Stats */
-  uint64_t total_reads()  const { return _stat_reads; }
+  uint64_t total_reads() const { return _stat_reads; }
   uint64_t total_writes() const { return _stat_writes; }
 
  private:
-  /* === Core algorithm: direct port of FEMU bbssd/ftl.c
-         ssd_advance_status() (NAND_READ / NAND_WRITE paths) === */
-  uint64_t ssd_advance_status(uint32_t ch, uint32_t lun,
-                              SsdCmd cmd, uint64_t cmd_stime_ns);
+  enum NandStatus : uint8_t {
+    SEC_FREE = 0,
+    SEC_INVALID = 1,
+    SEC_VALID = 2,
+    PG_FREE = 0,
+    PG_INVALID = 1,
+    PG_VALID = 2,
+  };
 
-  /* LBA -> (ch, lun) stripe mapping (no full FTL) */
-  void address_to_ch_lun(addr_type addr, uint32_t& ch, uint32_t& lun) const;
+  struct Ppa {
+    int ch = -1;
+    int lun = -1;
+    int pl = -1;
+    int blk = -1;
+    int pg = -1;
+    int sec = 0;
+    bool mapped = false;
+  };
 
-  /* ns <-> NPU cycle conversion */
-  uint64_t ps_to_tick_cycles(uint64_t ps) const {
-    return _tick_period_ps == 0 ? 0 : (ps / _tick_period_ps);
-  }
+  struct NandPage {
+    uint8_t status = PG_FREE;
+  };
 
-  SsdConfig _cfg;
-  uint32_t  _tick_freq_mhz;
-  uint64_t  _tick_period_ps;
-  uint64_t  _sim_time_ps = 0;
-  /* Simulator-injected wall-time (picoseconds). UINT64_MAX = "not set",
-   * in which case push() falls back to the internal SSD wall time. */
-  uint64_t   _now_ps = UINT64_MAX;
+  struct NandBlock {
+    std::vector<NandPage> pages;
+    int ipc = 0;
+    int vpc = 0;
+    int erase_cnt = 0;
+    int wp = 0;
+  };
 
-  std::vector<SsdChannelState> _channels;
+  struct NandPlane {
+    std::vector<NandBlock> blocks;
+  };
 
-  /* Pending requests keyed by completion cycle (monotone counter) */
-  struct PendingReq {
-    uint64_t finish_time_ps;
-    MemoryAccess* access;
-    bool operator>(const PendingReq& o) const {
-      return finish_time_ps > o.finish_time_ps;
+  struct NandLun {
+    std::vector<NandPlane> planes;
+    uint64_t next_lun_avail_time = 0;
+    bool busy = false;
+    uint64_t gc_endtime = 0;
+  };
+
+  struct SsdChannelState {
+    std::vector<NandLun> luns;
+    uint64_t next_ch_avail_time = 0;
+    bool busy = false;
+    uint64_t gc_endtime = 0;
+  };
+
+  struct Line {
+    enum class State : uint8_t {
+      FREE = 0,
+      ACTIVE = 1,
+      VICTIM = 2,
+      FULL = 3,
+    };
+
+    int id = 0;
+    int ipc = 0;
+    int vpc = 0;
+    State state = State::FREE;
+  };
+
+  struct WritePointer {
+    int line_id = -1;
+    int ch = 0;
+    int lun = 0;
+    int pg = 0;
+    int blk = 0;
+    int pl = 0;
+  };
+
+  struct HostRequest {
+    uint64_t id = 0;
+    bool write = false;
+    bool trim = false;
+    uint64_t issue_time_ps = 0;
+    addr_type base_addr = 0;
+    uint64_t size_bytes = 0;
+    uint64_t slba = 0;
+    uint32_t nlb = 0;
+    std::vector<MemoryAccess*> waiters;
+  };
+
+  struct FrontendMerge {
+    uint64_t issue_time_ps = 0;
+    addr_type page_addr = 0;
+    bool write = false;
+    std::vector<MemoryAccess*> waiters;
+  };
+
+  struct Completion {
+    uint64_t finish_time_ps = 0;
+    std::shared_ptr<HostRequest> request;
+
+    bool operator>(const Completion& other) const {
+      return finish_time_ps > other.finish_time_ps;
     }
   };
-  std::priority_queue<PendingReq, std::vector<PendingReq>,
-                      std::greater<PendingReq>> _pending;
-  std::queue<MemoryAccess*> _finished;
 
-  /* Capacity backpressure */
+  void init_geometry();
+  void init_lines();
+  void init_write_pointer();
+
+  uint64_t sector_bytes() const;
+  uint64_t page_bytes() const;
+  uint64_t page_key(addr_type page_addr, bool write) const;
+  addr_type align_page_address(addr_type addr) const;
+  uint64_t current_time_ps() const;
+  uint64_t current_time_ns() const;
+  uint64_t ps_to_tick_cycles(uint64_t ps) const;
+
+  bool should_route_through_host_frontend(const MemoryAccess* request) const;
+  std::shared_ptr<HostRequest> make_host_request(addr_type base_addr,
+                                                 uint64_t size_bytes,
+                                                 bool write,
+                                                 uint64_t issue_time_ps);
+  void enqueue_host_request(const std::shared_ptr<HostRequest>& request);
+  void flush_frontend_merges(uint64_t now_ps);
+  void process_queued_host_requests(uint64_t now_ps);
+  void complete_finished_requests(uint64_t now_ps);
+  void run_background_gc(uint64_t now_ps);
+
+  bool valid_lpn(uint64_t lpn) const;
+  bool valid_ppa(const Ppa& ppa) const;
+  bool mapped_ppa(const Ppa& ppa) const;
+  uint64_t ppa_to_pgidx(const Ppa& ppa) const;
+  Ppa get_maptbl_ent(uint64_t lpn) const;
+  void set_maptbl_ent(uint64_t lpn, const Ppa& ppa);
+  uint64_t get_rmap_ent(const Ppa& ppa) const;
+  void set_rmap_ent(uint64_t lpn, const Ppa& ppa);
+
+  NandLun& get_lun(const Ppa& ppa);
+  const NandLun& get_lun(const Ppa& ppa) const;
+  NandBlock& get_blk(const Ppa& ppa);
+  NandPage& get_pg(const Ppa& ppa);
+  Line& get_line(const Ppa& ppa);
+
+  uint64_t ssd_advance_status(const Ppa& ppa, SsdCmd cmd, uint64_t cmd_stime_ns);
+
+  void mark_page_valid(const Ppa& ppa);
+  void mark_page_invalid(const Ppa& ppa);
+  void mark_block_free(const Ppa& ppa);
+
+  Ppa get_new_page() const;
+  Line* get_next_free_line();
+  void advance_write_pointer();
+
+  bool should_gc() const;
+  bool should_gc_high() const;
+  Line* select_victim_line(bool force);
+  void gc_read_page(const Ppa& ppa, uint64_t now_ns);
+  void gc_write_page(const Ppa& old_ppa, uint64_t now_ns);
+  void clean_one_block(Ppa ppa, uint64_t now_ns);
+  void mark_line_free(const Ppa& ppa);
+  int do_gc(bool force, uint64_t now_ns);
+
+  uint64_t process_read(const HostRequest& request, uint64_t issue_time_ns);
+  uint64_t process_write(const HostRequest& request, uint64_t issue_time_ns);
+  uint64_t process_trim(const HostRequest& request, uint64_t issue_time_ns);
+  void finalize_host_request(const std::shared_ptr<HostRequest>& request,
+                             uint64_t finish_time_ps);
+
+  SsdConfig _cfg;
+  uint32_t _tick_freq_mhz = 0;
+  uint64_t _tick_period_ps = 0;
+  uint64_t _sim_time_ps = 0;
+  uint64_t _now_ps = UINT64_MAX;
+  uint64_t _next_host_request_id = 1;
   uint32_t _max_inflight = 4096;
 
-  /* Stats */
+  int _secs_per_blk = 0;
+  int _secs_per_pl = 0;
+  int _secs_per_lun = 0;
+  int _secs_per_ch = 0;
+  int _tt_secs = 0;
+  int _pgs_per_pl = 0;
+  int _pgs_per_lun = 0;
+  int _pgs_per_ch = 0;
+  int _tt_pgs = 0;
+  int _blks_per_lun = 0;
+  int _blks_per_ch = 0;
+  int _tt_blks = 0;
+  int _blks_per_line = 0;
+  int _pgs_per_line = 0;
+  int _secs_per_line = 0;
+  int _tt_lines = 0;
+  int _tt_luns = 0;
+  int _gc_thres_lines = 0;
+  int _gc_thres_lines_high = 0;
+
+  std::vector<SsdChannelState> _channels;
+  std::vector<Ppa> _maptbl;
+  std::vector<uint64_t> _rmap;
+  std::vector<Line> _lines;
+  std::deque<int> _free_lines;
+  WritePointer _wp;
+
+  robin_hood::unordered_flat_map<uint64_t, FrontendMerge> _frontend_merges;
+  std::deque<std::shared_ptr<HostRequest>> _to_ftl;
+  std::priority_queue<Completion, std::vector<Completion>, std::greater<Completion>>
+      _pending_completions;
+  std::queue<MemoryAccess*> _finished;
+
   uint64_t _stat_reads = 0;
   uint64_t _stat_writes = 0;
   uint64_t _stat_total_read_lat_ns = 0;
@@ -151,6 +279,7 @@ class Ssd {
   uint64_t _stat_min_lat_ns = UINT64_MAX;
   uint64_t _stat_max_read_lat_ns = 0;
   uint64_t _stat_max_write_lat_ns = 0;
+  uint64_t _stat_gc_runs = 0;
   std::vector<uint64_t> _stat_ch_reads;
   std::vector<uint64_t> _stat_ch_writes;
 };

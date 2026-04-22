@@ -153,22 +153,31 @@ void MemBenchmarkRunner::run_case(uint64_t case_id,
   auto dram = create_dram();
   auto ssd = create_ssd();
   StorageController controller(_config, dram.get(), ssd.get());
+  uint64_t measurement_start_ps = 0;
+
+  if (bench_case.medium == BenchmarkMedium::SSD && !bench_case.write) {
+    measurement_start_ps = precondition_case(controller, bench_case);
+  }
 
   std::vector<MacroStats> macro_stats(bench_case.burst_count);
   std::deque<ScheduledAccess> pending_issues;
   if (bench_case.issue_mode == BenchmarkIssueMode::BACK_TO_BACK) {
     for (uint32_t macro_id = 0; macro_id < bench_case.burst_count; macro_id++) {
-      seed_macro_requests(bench_case, macro_id, 0, pending_issues, macro_stats);
+      seed_macro_requests(bench_case, macro_id, measurement_start_ps, pending_issues,
+                          macro_stats);
     }
   } else {
-    seed_macro_requests(bench_case, 0, 0, pending_issues, macro_stats);
+    seed_macro_requests(bench_case, 0, measurement_start_ps, pending_issues,
+                        macro_stats);
   }
 
   uint32_t next_serialized_macro = 1;
   uint64_t completed_macros = 0;
   uint64_t subrequests_per_macro =
-      round_up(bench_case.access_size_bytes, _config.dram_req_size) /
-      _config.dram_req_size;
+      bench_case.medium == BenchmarkMedium::SSD
+          ? 1
+          : round_up(bench_case.access_size_bytes, _config.dram_req_size) /
+                _config.dram_req_size;
   uint64_t total_subrequests =
       subrequests_per_macro * static_cast<uint64_t>(bench_case.burst_count);
 
@@ -221,7 +230,10 @@ void MemBenchmarkRunner::run_case(uint64_t case_id,
 
     while (!pending_issues.empty() && pending_issues.front().issue_time_ps <= now_ps) {
       ScheduledAccess scheduled = pending_issues.front();
-      if (!controller.dispatch_request(0, scheduled.request, now_ps)) break;
+      uint32_t preferred_port =
+          bench_case.medium == BenchmarkMedium::DRAM ? _config.dram_channels : 0;
+      if (!controller.dispatch_request(preferred_port, scheduled.request, now_ps))
+        break;
       pending_issues.pop_front();
     }
 
@@ -268,7 +280,10 @@ void MemBenchmarkRunner::run_case(uint64_t case_id,
   double p50_latency_ns = percentile(macro_latencies_ns, 0.50);
   double p95_latency_ns = percentile(macro_latencies_ns, 0.95);
   double p99_latency_ns = percentile(macro_latencies_ns, 0.99);
-  double total_time_ns = static_cast<double>(final_return_ps) / 1000.0;
+  double total_time_ns =
+      final_return_ps >= measurement_start_ps
+          ? static_cast<double>(final_return_ps - measurement_start_ps) / 1000.0
+          : 0.0;
   double total_bytes = static_cast<double>(bench_case.access_size_bytes) *
                        static_cast<double>(bench_case.burst_count);
   double bandwidth_gbps =
@@ -298,6 +313,67 @@ void MemBenchmarkRunner::run_case(uint64_t case_id,
       issue_mode_to_string(bench_case.issue_mode), avg_latency_ns, max_latency_ns);
 }
 
+uint64_t MemBenchmarkRunner::precondition_case(StorageController& controller,
+                                               const MemBenchmarkCase& bench_case) const {
+  std::deque<ScheduledAccess> pending_issues;
+  pending_issues.clear();
+  for (uint32_t macro_id = 0; macro_id < bench_case.burst_count; macro_id++) {
+    auto* access = new MemoryAccess();
+    access->id = generate_mem_access_id();
+    access->dram_address =
+        next_address(BenchmarkMedium::SSD, macro_id, 0,
+                     bench_case.access_size_bytes, bench_case.address_pattern);
+    access->spad_address = 0;
+    access->size = bench_case.access_size_bytes;
+    access->write = true;
+    access->request = true;
+    access->core_id = 0;
+    access->buffer_id = 0;
+    access->issue_time_ps = 0;
+    access->logical_size_bytes = bench_case.access_size_bytes;
+    access->macro_request_id = macro_id;
+    access->source_medium = MemoryMedium::UNKNOWN;
+    access->target_medium = MemoryMedium::SSD;
+    access->ssd_host_request = true;
+    pending_issues.push_back({0, access});
+  }
+
+  uint64_t now_ps = 0;
+  while (!pending_issues.empty() || controller.has_pending() ||
+         controller.has_ready_response()) {
+    controller.advance_to(now_ps);
+
+    while (controller.has_ready_response()) {
+      MemoryAccess* response = controller.top_ready_response();
+      controller.pop_ready_response();
+      delete response;
+    }
+
+    while (!pending_issues.empty() && pending_issues.front().issue_time_ps <= now_ps) {
+      ScheduledAccess scheduled = pending_issues.front();
+      uint32_t preferred_port =
+          bench_case.medium == BenchmarkMedium::DRAM ? _config.dram_channels : 0;
+      if (!controller.dispatch_request(preferred_port, scheduled.request, now_ps))
+        break;
+      pending_issues.pop_front();
+    }
+
+    if (pending_issues.empty() && !controller.has_pending() &&
+        !controller.has_ready_response()) {
+      break;
+    }
+
+    uint64_t next_issue_ps = std::numeric_limits<uint64_t>::max();
+    if (!pending_issues.empty()) next_issue_ps = pending_issues.front().issue_time_ps;
+    uint64_t next_event_ps = controller.next_event_time_ps();
+    uint64_t next_ps = std::min(next_issue_ps, next_event_ps);
+    if (next_ps == std::numeric_limits<uint64_t>::max()) break;
+    if (next_ps <= now_ps) next_ps = now_ps + 1;
+    now_ps = next_ps;
+  }
+  return now_ps;
+}
+
 void MemBenchmarkRunner::seed_macro_requests(
     const MemBenchmarkCase& bench_case, uint32_t macro_request_id,
     uint64_t issue_time_ps, std::deque<ScheduledAccess>& pending_issues,
@@ -305,8 +381,10 @@ void MemBenchmarkRunner::seed_macro_requests(
   MacroStats& macro = macro_stats.at(macro_request_id);
   macro.issue_time_ps = issue_time_ps;
   uint64_t subrequest_count =
-      round_up(bench_case.access_size_bytes, _config.dram_req_size) /
-      _config.dram_req_size;
+      bench_case.medium == BenchmarkMedium::SSD
+          ? 1
+          : round_up(bench_case.access_size_bytes, _config.dram_req_size) /
+                _config.dram_req_size;
   macro.total_subrequests = subrequest_count;
   for (uint32_t subrequest_id = 0; subrequest_id < subrequest_count; subrequest_id++) {
     auto* access = new MemoryAccess();
@@ -315,7 +393,9 @@ void MemBenchmarkRunner::seed_macro_requests(
                                         subrequest_id, bench_case.access_size_bytes,
                                         bench_case.address_pattern);
     access->spad_address = 0;
-    access->size = _config.dram_req_size;
+    access->size = bench_case.medium == BenchmarkMedium::SSD
+                       ? bench_case.access_size_bytes
+                       : _config.dram_req_size;
     access->write = bench_case.write;
     access->request = true;
     access->core_id = 0;
@@ -327,6 +407,7 @@ void MemBenchmarkRunner::seed_macro_requests(
     access->target_medium = bench_case.medium == BenchmarkMedium::SSD
                                 ? MemoryMedium::SSD
                                 : MemoryMedium::DRAM;
+    access->ssd_host_request = bench_case.medium == BenchmarkMedium::SSD;
     pending_issues.push_back({issue_time_ps, access});
   }
 }
@@ -404,13 +485,17 @@ uint64_t MemBenchmarkRunner::next_address(BenchmarkMedium medium,
                                           uint64_t access_size_bytes,
                                           const std::string& address_pattern) const {
   uint64_t base_addr = medium == BenchmarkMedium::SSD ? _config.ssd.address_base : 0;
-  uint64_t macro_stride = round_up(access_size_bytes, _config.dram_req_size);
+  uint64_t macro_stride =
+      medium == BenchmarkMedium::SSD
+          ? round_up(access_size_bytes, static_cast<uint64_t>(_config.ssd.secsz))
+          : round_up(access_size_bytes, _config.dram_req_size);
   if (address_pattern != "contiguous") {
     throw std::runtime_error(
         fmt::format("Unsupported address pattern {}", address_pattern));
   }
   return base_addr + macro_request_id * macro_stride +
-         subrequest_id * _config.dram_req_size;
+         subrequest_id * (medium == BenchmarkMedium::SSD ? macro_stride
+                                                         : _config.dram_req_size);
 }
 
 std::string MemBenchmarkRunner::medium_to_string(BenchmarkMedium medium) const {

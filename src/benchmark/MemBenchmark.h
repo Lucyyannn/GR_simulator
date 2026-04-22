@@ -55,6 +55,8 @@ class MemBenchmarkRunner {
   std::vector<MemBenchmarkCase> expand_cases() const;
   void run_case(uint64_t case_id, const MemBenchmarkCase& bench_case,
                 std::ofstream& summary_csv, std::ofstream& detail_csv);
+  uint64_t precondition_case(StorageController& controller,
+                             const MemBenchmarkCase& bench_case) const;
   void seed_macro_requests(const MemBenchmarkCase& bench_case,
                            uint32_t macro_request_id, uint64_t issue_time_ps,
                            std::deque<ScheduledAccess>& pending_issues,

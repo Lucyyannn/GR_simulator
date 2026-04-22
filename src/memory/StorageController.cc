@@ -7,21 +7,6 @@ StorageController::StorageController(SimulationConfig config, Dram* dram,
                                      Ssd* ssd)
     : _config(config), _dram(dram), _ssd(ssd) {}
 
-uint64_t StorageController::ssd_page_bytes() const {
-  uint64_t page_bytes = static_cast<uint64_t>(_config.ssd.secsz) *
-                        static_cast<uint64_t>(_config.ssd.secs_per_pg);
-  return page_bytes > 0 ? page_bytes : PAGE_SIZE;
-}
-
-addr_type StorageController::align_ssd_page_address(addr_type addr) const {
-  uint64_t page_bytes = ssd_page_bytes();
-  if (page_bytes == 0) return addr;
-  if (addr < _config.ssd.address_base) return addr - (addr % page_bytes);
-
-  uint64_t offset = addr - _config.ssd.address_base;
-  return _config.ssd.address_base + (offset / page_bytes) * page_bytes;
-}
-
 void StorageController::advance_to(uint64_t now_ps) {
   _last_advanced_ps = std::max(_last_advanced_ps, now_ps);
   if (_dram) _dram->advance_to(now_ps);
@@ -89,9 +74,6 @@ bool StorageController::route_to_device(uint32_t preferred_port,
   if (request->logical_size_bytes == 0) request->logical_size_bytes = request->size;
 
   if (medium == MemoryMedium::SSD) {
-    if (!request->controller_generated) {
-      return dispatch_ssd_page_request(request, now_ps);
-    }
     if (_ssd == nullptr || _ssd->is_full(request)) return false;
     _ssd->set_current_time_ps(now_ps);
     _ssd->push(request);
@@ -104,51 +86,6 @@ bool StorageController::route_to_device(uint32_t preferred_port,
                                              : _dram->get_channel_id(request);
   if (_dram->is_full(channel, request)) return false;
   _dram->push(channel, request);
-  return true;
-}
-
-bool StorageController::dispatch_ssd_page_request(MemoryAccess* request,
-                                                  uint64_t now_ps) {
-  if (_ssd == nullptr) return false;
-
-  request->target_medium = MemoryMedium::SSD;
-  request->mem_enter_time_ps = now_ps;
-  if (request->issue_time_ps == 0) request->issue_time_ps = now_ps;
-  if (request->logical_size_bytes == 0) request->logical_size_bytes = request->size;
-
-  addr_type page_addr = align_ssd_page_address(request->dram_address);
-  std::pair<addr_type, bool> key{page_addr, request->write};
-  auto active_it = _active_ssd_page_lookup.find(key);
-  if (active_it != _active_ssd_page_lookup.end()) {
-    _active_ssd_page_requests[active_it->second].waiters.push_back(request);
-    return true;
-  }
-
-  auto* page_request = new MemoryAccess();
-  page_request->id = generate_mem_access_id();
-  page_request->dram_address = page_addr;
-  page_request->size = ssd_page_bytes();
-  page_request->write = request->write;
-  page_request->request = true;
-  page_request->core_id = request->core_id;
-  page_request->issue_time_ps = request->issue_time_ps;
-  page_request->mem_enter_time_ps = now_ps;
-  page_request->logical_size_bytes = page_request->size;
-  page_request->target_medium = MemoryMedium::SSD;
-  page_request->controller_generated = true;
-
-  if (_ssd->is_full(page_request)) {
-    delete page_request;
-    return false;
-  }
-
-  _ssd->set_current_time_ps(now_ps);
-  _ssd->push(page_request);
-  _active_ssd_page_lookup[key] = page_request->id;
-  _active_ssd_page_requests[page_request->id] =
-      ActiveSsdPageRequest{.page_addr = page_addr,
-                           .write = request->write,
-                           .waiters = {request}};
   return true;
 }
 
@@ -185,29 +122,9 @@ void StorageController::handle_completed_access(uint64_t now_ps,
     return;
   }
 
-  if (response->macro_request_id == 0) {
-    auto page_it = _active_ssd_page_requests.find(response->id);
-    if (page_it != _active_ssd_page_requests.end()) {
-      std::pair<addr_type, bool> key{page_it->second.page_addr,
-                                     page_it->second.write};
-      _active_ssd_page_lookup.erase(key);
-      for (MemoryAccess* waiter : page_it->second.waiters) {
-        waiter->request = false;
-        waiter->target_medium = MemoryMedium::SSD;
-        waiter->mem_finish_time_ps =
-            response->mem_finish_time_ps != 0 ? response->mem_finish_time_ps
-                                              : now_ps;
-        _ready_responses.push_back(waiter);
-      }
-      _active_ssd_page_requests.erase(page_it);
-    }
-    delete response;
-    return;
-  }
-
   auto migration_it = _active_migrations.find(response->macro_request_id);
   if (migration_it == _active_migrations.end()) {
-    delete response;
+    _ready_responses.push_back(response);
     return;
   }
 

@@ -40,12 +40,6 @@ class StorageController {
                                     uint64_t now_ps);
 
  private:
-  struct ActiveSsdPageRequest {
-    addr_type page_addr = 0;
-    bool write = false;
-    std::vector<MemoryAccess*> waiters;
-  };
-
   struct ActiveMigration {
     MigrationRequest request;
     uint64_t next_offset = 0;
@@ -56,9 +50,6 @@ class StorageController {
 
   bool route_to_device(uint32_t preferred_port, MemoryAccess* request,
                        MemoryMedium medium, uint64_t now_ps);
-  bool dispatch_ssd_page_request(MemoryAccess* request, uint64_t now_ps);
-  uint64_t ssd_page_bytes() const;
-  addr_type align_ssd_page_address(addr_type addr) const;
   void drain_dram_responses(uint64_t now_ps);
   void drain_ssd_responses(uint64_t now_ps);
   void handle_completed_access(uint64_t now_ps, MemoryAccess* response);
@@ -71,7 +62,5 @@ class StorageController {
   uint64_t _next_migration_id = 1;
   std::deque<MemoryAccess*> _ready_responses;
   std::queue<MemoryAccess*> _retry_queue;
-  std::map<std::pair<addr_type, bool>, uint64_t> _active_ssd_page_lookup;
-  std::map<uint64_t, ActiveSsdPageRequest> _active_ssd_page_requests;
   std::map<uint64_t, ActiveMigration> _active_migrations;
 };

@@ -61,6 +61,7 @@ typedef struct {
   MemoryMedium target_medium = MemoryMedium::UNKNOWN;
   MemoryMedium destination_medium = MemoryMedium::UNKNOWN;
   bool controller_generated = false;
+  bool ssd_host_request = false;
 } MemoryAccess;
 
 enum class Opcode {
