@@ -68,6 +68,10 @@ class MemBenchmarkRunner {
   std::unique_ptr<Ssd> create_ssd() const;
 
   uint64_t round_up(uint64_t value, uint64_t alignment) const;
+  uint64_t benchmark_seed() const;
+  uint64_t benchmark_window_bytes(BenchmarkMedium medium) const;
+  uint64_t random_512b_index_base(BenchmarkMedium medium, uint32_t macro_request_id,
+                                  uint64_t access_size_bytes) const;
   uint64_t next_address(BenchmarkMedium medium, uint32_t macro_request_id,
                         uint32_t subrequest_id, uint64_t access_size_bytes,
                         const std::string& address_pattern) const;

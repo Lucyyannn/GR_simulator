@@ -479,23 +479,65 @@ uint64_t MemBenchmarkRunner::round_up(uint64_t value, uint64_t alignment) const 
   return remainder == 0 ? value : (value + alignment - remainder);
 }
 
+uint64_t MemBenchmarkRunner::benchmark_seed() const {
+  return _bench_config.value("random_seed", static_cast<uint64_t>(20260422));
+}
+
+uint64_t MemBenchmarkRunner::benchmark_window_bytes(BenchmarkMedium medium) const {
+  uint64_t default_window = 64ULL * 1024ULL * 1024ULL;
+  uint64_t configured =
+      _bench_config.value("random_window_bytes", default_window);
+  if (medium == BenchmarkMedium::SSD) {
+    return std::min<uint64_t>(configured, _config.ssd.capacity_bytes);
+  }
+  return configured;
+}
+
+uint64_t MemBenchmarkRunner::random_512b_index_base(
+    BenchmarkMedium medium, uint32_t macro_request_id,
+    uint64_t access_size_bytes) const {
+  uint64_t align_bytes = static_cast<uint64_t>(_config.ssd.secsz);
+  uint64_t window_bytes = benchmark_window_bytes(medium);
+  if (window_bytes <= access_size_bytes) return 0;
+
+  uint64_t max_start = window_bytes - access_size_bytes;
+  uint64_t slot_count = max_start / align_bytes + 1;
+
+  uint64_t seed = benchmark_seed();
+  uint64_t mix = seed ^ (access_size_bytes + 0x9e3779b97f4a7c15ULL);
+  mix ^= static_cast<uint64_t>(macro_request_id) * 0xbf58476d1ce4e5b9ULL;
+  mix ^= static_cast<uint64_t>(medium == BenchmarkMedium::SSD ? 0x94d049bb133111ebULL
+                                                              : 0x2545f4914f6cdd1dULL);
+  uint64_t slot = slot_count > 0 ? mix % slot_count : 0;
+  return slot * align_bytes;
+}
+
 uint64_t MemBenchmarkRunner::next_address(BenchmarkMedium medium,
                                           uint32_t macro_request_id,
                                           uint32_t subrequest_id,
                                           uint64_t access_size_bytes,
                                           const std::string& address_pattern) const {
   uint64_t base_addr = medium == BenchmarkMedium::SSD ? _config.ssd.address_base : 0;
-  uint64_t macro_stride =
-      medium == BenchmarkMedium::SSD
-          ? round_up(access_size_bytes, static_cast<uint64_t>(_config.ssd.secsz))
-          : round_up(access_size_bytes, _config.dram_req_size);
-  if (address_pattern != "contiguous") {
-    throw std::runtime_error(
-        fmt::format("Unsupported address pattern {}", address_pattern));
+  if (address_pattern == "contiguous") {
+    uint64_t macro_stride =
+        medium == BenchmarkMedium::SSD
+            ? round_up(access_size_bytes, static_cast<uint64_t>(_config.ssd.secsz))
+            : round_up(access_size_bytes, _config.dram_req_size);
+    return base_addr + macro_request_id * macro_stride +
+           subrequest_id * (medium == BenchmarkMedium::SSD ? macro_stride
+                                                           : _config.dram_req_size);
   }
-  return base_addr + macro_request_id * macro_stride +
-         subrequest_id * (medium == BenchmarkMedium::SSD ? macro_stride
-                                                         : _config.dram_req_size);
+
+  if (address_pattern == "random_512b_index") {
+    uint64_t macro_base =
+        random_512b_index_base(medium, macro_request_id, access_size_bytes);
+    return base_addr + macro_base +
+           subrequest_id * (medium == BenchmarkMedium::SSD ? 0
+                                                           : _config.dram_req_size);
+  }
+
+  throw std::runtime_error(
+      fmt::format("Unsupported address pattern {}", address_pattern));
 }
 
 std::string MemBenchmarkRunner::medium_to_string(BenchmarkMedium medium) const {
