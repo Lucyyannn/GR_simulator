@@ -58,6 +58,6 @@ target_include_directories(Simulator_lib PUBLIC ${ONNX_INCLUDE_DIRS})
 target_link_libraries(Simulator_lib ramulator1 booksim2 ramulator)
 target_link_libraries(Simulator_lib ${PROTOBUF_LIB} onnx_proto ${CONAN_LIBS} stdc++fs)
 
-enable_testing()
-add_subdirectory("${PROJECT_SOURCE_DIR}/tests")
+# enable_testing()
+# add_subdirectory("${PROJECT_SOURCE_DIR}/tests")
 

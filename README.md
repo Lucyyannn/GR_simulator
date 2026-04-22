@@ -2,7 +2,7 @@
 
 [![Docker Image CI](https://github.com/PSAL-POSTECH/ONNXim/actions/workflows/docker-image.yml/badge.svg)](https://github.com/PSAL-POSTECH/ONNXim/actions/workflows/docker-image.yml)
 
-GR\_simulator 是基于 [ONNXim](https://ieeexplore.ieee.org/document/10726822) 扩展的NPU仿真器，可支持 **生成式推荐模型（GR）** 工作负载（如 HSTU）的多种算子。支持三种输入模式——ONNX算子图、语言模型trace、**算子trace**——可在多核NPU上进行周期精确的 DRAM/NoC/SSD 仿真。
+GR\_simulator 是基于 [ONNXim](https://ieeexplore.ieee.org/document/10726822) 扩展的NPU仿真器，可支持 **生成式推荐模型（GR）** 工作负载（如 HSTU）的多种算子。当前支持三种运行模式：ONNX算子图、语言模型trace、**算子trace**，可在多核NPU上进行周期精确的 DRAM/NoC/SSD 仿真。
 
 ***
 
@@ -10,6 +10,7 @@ GR\_simulator 是基于 [ONNXim](https://ieeexplore.ieee.org/document/10726822) 
 
 - [系统架构图](#系统架构图)
 - [环境配置](#环境配置)
+- [前端模式](#前端模式)
 - [编译和执行](#编译和执行测试)
 - [Trace输入格式](#trace输入格式)
 - [GR算子支持列表](#GR算子支持)
@@ -96,6 +97,7 @@ GR\_simulator 是基于 [ONNXim](https://ieeexplore.ieee.org/document/10726822) 
 
 ***
 
+
 ## 环境配置
 
 ### 1. Docker方式（推荐）
@@ -124,7 +126,7 @@ docker run -it \
 # 在容器内安装相关依赖并构建目标
 (docker) mkdir -p build && cd build
 (docker) conan install .. --build=missing
-(docker) cmake .. -DCMAKE_BUILD_TYPE=Release
+(docker) cmake 
 (docker) make -j$(nproc)
 ```
 
@@ -156,6 +158,82 @@ docker run -it \
 
 ***
 
+## 前端模式
+
+当前代码一共有 **4 种运行模式**，其中前 3 种是模型前端，最后 1 种是存储前端：
+
+| 模式 | CLI参数 | 入口结构 | 输入 | 说明 |
+| --- | --- | --- | --- | --- |
+| ONNX图前端 | `--mode default` | `main.cc` → `Model` → `OperationFactory::create_operation()` | `models/<name>/<name>.onnx` + `.mapping` | 兼容 ONNXim 的默认图前端 |
+| 语言模型前端 | `--mode language` | `main.cc` → `LanguageModel` → `LangScheduler` | `example/language_models.json` + `traces/*.csv` | 面向自回归 LLM 请求流 |
+| 算子Trace前端 | `--mode trace` | `main.cc` → `TraceParser` → `TraceOpConverter` → `TraceModel` | JSON 算子trace | 新增前端，面向 PyTorch / GR 算子级trace |
+| 存储微基准前端 | `--mode mem_bench` | `main.cc` → `MemBenchmarkRunner` → `StorageController` | benchmark JSON | 新增前端，面向 DRAM / SSD 独立访存测试 |
+
+### 新增前端1：算子Trace
+
+代码结构：
+
+- `src/frontend/trace/TraceParser.*`：解析 JSON trace，生成 `TraceGraph`
+- `src/frontend/trace/TraceOpConverter.*`：把 `aten::*` 算子映射为仿真器内部算子属性
+- `src/TraceModel.*`：注册输入/权重张量，构建 `Operation`，初始化 tiles
+- `src/operations/OperationFactory.cc`：`create_from_trace()` 将 trace 算子落到 `GemmWS`、`ConvWS/OS`、`Softmax`、`SkipLayerNorm` 等实现
+
+使用方法：
+
+```bash
+./build/bin/Simulator \
+  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd_fast.json \
+  --models_list ./example/trace_models_list.json \
+  --mode trace
+```
+
+`models_list` 中每个模型项至少包含：
+
+```json
+{
+  "name": "test_gemm",
+  "trace_path": "example/trace_tests/test_gemm.json"
+}
+```
+
+### 新增前端2：mem_bench
+
+代码结构：
+
+- `src/benchmark/MemBenchmark.*`：展开 case、生成访存请求、统计 latency/bandwidth
+- `src/memory/StorageController.*`：统一路由到 DRAM 或 SSD，并汇聚响应
+- `scripts/plot_mem_benchmark.py`：把 CSV 结果画成图表
+- `configs/mem_benchmark_default.json`：默认测试矩阵
+
+使用方法：
+
+```bash
+./build/bin/Simulator \
+  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd_fast.json \
+  --mode mem_bench \
+  --bench_config ./configs/mem_benchmark_default.json \
+  --bench_output_dir ./results/mem_benchmark_fast
+```
+
+`bench_config` 支持的核心字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `media` | 测试介质，支持 `dram` / `ssd` |
+| `access_types` | 访问类型，支持 `read` / `write` |
+| `sizes_bytes` | 宏请求大小列表 |
+| `burst_counts` | 并发 burst 数量 |
+| `issue_modes` | 发射模式，支持 `back_to_back` / `serialized` |
+| `address_pattern` | 当前支持 `contiguous` |
+
+输出结果：
+
+- `summary.csv`：每个 case 的平均/P50/P95/P99/最大延迟与带宽
+- `detail.csv`：每个子请求的 issue / enter / finish / return 时间戳
+- 图表：通过 `scripts/plot_mem_benchmark.py` 读取 CSV 生成
+
+***
+
 ## 编译和执行测试
 
 ### 编译
@@ -164,7 +242,7 @@ docker run -it \
 cd /path/to/GR_simulator
 mkdir -p build && cd build
 conan install .. --build=missing
-cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake .. 
 make -j$(nproc)
 ```
 
@@ -196,16 +274,28 @@ make -j$(nproc)
   --mode trace
 ```
 
+#### 模式4：存储微基准（mem_bench）
+
+```bash
+./build/bin/Simulator \
+  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd_fast.json \
+  --mode mem_bench \
+  --bench_config ./configs/mem_benchmark_default.json \
+  --bench_output_dir ./results/mem_benchmark_fast
+```
+
 **命令行参数：**
 
 | 参数              | 说明                                                 | 默认值         |
 | --------------- | -------------------------------------------------- | ----------- |
 | `--config`      | 硬件配置JSON文件路径                                       | *必填*        |
-| `--models_list` | 模型列表JSON文件路径                                       | *必填*        |
-| `--mode`        | 输入模式：`default` / `language` / `trace`              | `default`   |
+| `--models_list` | 模型列表JSON文件路径；`mem_bench` 模式下不需要                    | *模型模式必填*   |
+| `--mode`        | 运行模式：`default` / `language` / `trace` / `mem_bench` | `default`   |
 | `--log_level`   | 日志级别：`trace` / `debug` / `info` / `warn` / `error` | `info`      |
 | `--trace_file`  | LLM请求trace文件（language模式）                           | `input.csv` |
 | `--trace_path`  | 算子trace JSON路径（trace模式）                            | —           |
+| `--bench_config` | `mem_bench` 配置文件路径                                | —           |
+| `--bench_output_dir` | `mem_bench` 输出目录                             | `results/mem_benchmark` |
 
 ### 运行Trace测试
 
