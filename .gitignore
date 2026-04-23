@@ -1,10 +1,11 @@
 models/*
 model_lists/*
 build/
-logs/*
+logs/
 docs/
 cache/
 .continue/*
 AGENTS.md
+PLAN.md
 .codex
 detail.csv

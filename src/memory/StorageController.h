@@ -4,6 +4,7 @@
 #include <deque>
 #include <map>
 #include <queue>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -40,6 +41,31 @@ class StorageController {
                                     uint64_t now_ps);
 
  private:
+  struct SsdWriteStreamKey {
+    bool controller_generated = false;
+    uint32_t core_id = 0;
+    uint64_t macro_request_id = 0;
+    addr_type page_addr = 0;
+
+    bool operator<(const SsdWriteStreamKey& other) const {
+      return std::tie(controller_generated, core_id,
+                      macro_request_id, page_addr) <
+             std::tie(other.controller_generated, other.core_id,
+                      other.macro_request_id, other.page_addr);
+    }
+  };
+
+  struct PendingSsdWrite {
+    addr_type page_addr = 0;
+    uint64_t created_time_ps = 0;
+    uint64_t last_update_ps = 0;
+    std::vector<MemoryAccess*> waiters;
+  };
+
+  struct SsdAggregateContext {
+    std::vector<MemoryAccess*> waiters;
+  };
+
   struct ActiveMigration {
     MigrationRequest request;
     uint64_t next_offset = 0;
@@ -50,6 +76,19 @@ class StorageController {
 
   bool route_to_device(uint32_t preferred_port, MemoryAccess* request,
                        MemoryMedium medium, uint64_t now_ps);
+  bool route_to_ssd(MemoryAccess* request, uint64_t now_ps);
+  bool handle_ssd_read(MemoryAccess* request, uint64_t now_ps);
+  bool handle_ssd_write(MemoryAccess* request, uint64_t now_ps);
+  void flush_pending_ssd_writes(uint64_t now_ps, bool force);
+  bool flush_pending_ssd_write_key(const SsdWriteStreamKey& key, uint64_t now_ps);
+  bool dispatch_ssd_aggregate(MemoryAccess* aggregate, uint64_t now_ps);
+  void complete_ssd_aggregate(uint64_t now_ps, MemoryAccess* response);
+  uint64_t ssd_page_bytes() const;
+  addr_type ssd_page_addr(addr_type addr) const;
+  uint64_t ssd_write_idle_timeout_ps() const;
+  SsdWriteStreamKey make_ssd_write_stream_key(const MemoryAccess* request) const;
+  bool same_ssd_write_stream(const SsdWriteStreamKey& lhs,
+                             const SsdWriteStreamKey& rhs) const;
   void drain_dram_responses(uint64_t now_ps);
   void drain_ssd_responses(uint64_t now_ps);
   void handle_completed_access(uint64_t now_ps, MemoryAccess* response);
@@ -63,4 +102,8 @@ class StorageController {
   std::deque<MemoryAccess*> _ready_responses;
   std::queue<MemoryAccess*> _retry_queue;
   std::map<uint64_t, ActiveMigration> _active_migrations;
+  std::map<SsdWriteStreamKey, PendingSsdWrite> _pending_ssd_writes;
+  std::map<uint64_t, SsdAggregateContext> _ssd_write_aggregates;
+  std::map<addr_type, uint64_t> _ssd_inflight_read_pages;
+  std::map<uint64_t, SsdAggregateContext> _ssd_read_aggregates;
 };

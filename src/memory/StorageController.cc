@@ -14,6 +14,7 @@ void StorageController::advance_to(uint64_t now_ps) {
   drain_dram_responses(now_ps);
   drain_ssd_responses(now_ps);
   service_migrations(now_ps);
+  flush_pending_ssd_writes(now_ps, false);
 }
 
 bool StorageController::dispatch_request(uint32_t preferred_port,
@@ -39,7 +40,8 @@ void StorageController::pop_ready_response() {
 
 bool StorageController::has_pending() const {
   return !_ready_responses.empty() || !_retry_queue.empty() ||
-         !_active_migrations.empty() || (_dram && _dram->running()) ||
+         !_active_migrations.empty() || !_pending_ssd_writes.empty() ||
+         !_ssd_inflight_read_pages.empty() || (_dram && _dram->running()) ||
          (_ssd && _ssd->running());
 }
 
@@ -48,6 +50,12 @@ uint64_t StorageController::next_event_time_ps() const {
   uint64_t next_ps = std::numeric_limits<uint64_t>::max();
   if (_dram) next_ps = std::min(next_ps, _dram->next_event_time_ps());
   if (_ssd) next_ps = std::min(next_ps, _ssd->next_event_time_ps());
+  if (!_pending_ssd_writes.empty()) {
+    uint64_t timeout_ps = ssd_write_idle_timeout_ps();
+    for (const auto& [_, pending] : _pending_ssd_writes) {
+      next_ps = std::min(next_ps, pending.last_update_ps + timeout_ps);
+    }
+  }
   if (!_retry_queue.empty() || !_active_migrations.empty()) {
     next_ps = std::min(next_ps, _last_advanced_ps);
   }
@@ -74,10 +82,7 @@ bool StorageController::route_to_device(uint32_t preferred_port,
   if (request->logical_size_bytes == 0) request->logical_size_bytes = request->size;
 
   if (medium == MemoryMedium::SSD) {
-    if (_ssd == nullptr || _ssd->is_full(request)) return false;
-    _ssd->set_current_time_ps(now_ps);
-    _ssd->push(request);
-    return true;
+    return route_to_ssd(request, now_ps);
   }
 
   if (_dram == nullptr) return false;
@@ -87,6 +92,235 @@ bool StorageController::route_to_device(uint32_t preferred_port,
   if (_dram->is_full(channel, request)) return false;
   _dram->push(channel, request);
   return true;
+}
+
+bool StorageController::route_to_ssd(MemoryAccess* request, uint64_t now_ps) {
+  if (_ssd == nullptr) return false;
+  if (request->ssd_host_request) {
+    if (_ssd->is_full(request)) return false;
+    _ssd->set_current_time_ps(now_ps);
+    _ssd->push(request);
+    return true;
+  }
+
+  if (request->write) {
+    return handle_ssd_write(request, now_ps);
+  }
+  return handle_ssd_read(request, now_ps);
+}
+
+bool StorageController::handle_ssd_read(MemoryAccess* request, uint64_t now_ps) {
+  addr_type page_addr = ssd_page_addr(request->dram_address);
+  auto inflight_it = _ssd_inflight_read_pages.find(page_addr);
+  if (inflight_it != _ssd_inflight_read_pages.end()) {
+    _ssd_read_aggregates[inflight_it->second].waiters.push_back(request);
+    return true;
+  }
+
+  auto* aggregate = new MemoryAccess();
+  aggregate->id = generate_mem_access_id();
+  aggregate->dram_address = page_addr;
+  aggregate->spad_address = request->spad_address;
+  aggregate->size = ssd_page_bytes();
+  aggregate->logical_size_bytes = ssd_page_bytes();
+  aggregate->write = false;
+  aggregate->request = true;
+  aggregate->core_id = request->core_id;
+  aggregate->buffer_id = request->buffer_id;
+  aggregate->issue_time_ps = request->issue_time_ps;
+  aggregate->mem_enter_time_ps = now_ps;
+  aggregate->ssd_host_request = true;
+  aggregate->target_medium = MemoryMedium::SSD;
+
+  if (!dispatch_ssd_aggregate(aggregate, now_ps)) {
+    delete aggregate;
+    return false;
+  }
+
+  _ssd_inflight_read_pages[page_addr] = aggregate->id;
+  _ssd_read_aggregates[aggregate->id].waiters.push_back(request);
+  return true;
+}
+
+bool StorageController::handle_ssd_write(MemoryAccess* request, uint64_t now_ps) {
+  SsdWriteStreamKey key = make_ssd_write_stream_key(request);
+  auto it = _pending_ssd_writes.find(key);
+
+  if (it == _pending_ssd_writes.end()) {
+    size_t active_pages = 0;
+    bool have_oldest = false;
+    SsdWriteStreamKey oldest_key;
+    uint64_t oldest_created_ps = std::numeric_limits<uint64_t>::max();
+    for (const auto& [existing_key, pending] : _pending_ssd_writes) {
+      if (!same_ssd_write_stream(existing_key, key)) continue;
+      active_pages++;
+      if (!have_oldest || pending.created_time_ps < oldest_created_ps) {
+        have_oldest = true;
+        oldest_key = existing_key;
+        oldest_created_ps = pending.created_time_ps;
+      }
+    }
+    if (active_pages >= 4 && have_oldest) {
+      if (!flush_pending_ssd_write_key(oldest_key, now_ps)) return false;
+    }
+
+    PendingSsdWrite pending;
+    pending.page_addr = key.page_addr;
+    pending.created_time_ps = now_ps;
+    pending.last_update_ps = now_ps;
+    pending.waiters.push_back(request);
+    _pending_ssd_writes.emplace(key, std::move(pending));
+  } else {
+    it->second.last_update_ps = now_ps;
+    it->second.waiters.push_back(request);
+  }
+
+  if (_pending_ssd_writes[key].waiters.size() * _config.dram_req_size >=
+      ssd_page_bytes()) {
+    flush_pending_ssd_writes(now_ps, false);
+  }
+  return true;
+}
+
+void StorageController::flush_pending_ssd_writes(uint64_t now_ps, bool force) {
+  if (_ssd == nullptr || _pending_ssd_writes.empty()) return;
+
+  std::vector<SsdWriteStreamKey> flush_keys;
+  uint64_t timeout_ps = ssd_write_idle_timeout_ps();
+  for (const auto& [key, pending] : _pending_ssd_writes) {
+    if (pending.waiters.empty()) {
+      flush_keys.push_back(key);
+      continue;
+    }
+    bool timed_out = pending.last_update_ps + timeout_ps <= now_ps;
+    bool page_full =
+        pending.waiters.size() * _config.dram_req_size >= ssd_page_bytes();
+    if (force || timed_out || page_full) flush_keys.push_back(key);
+  }
+
+  for (const auto& key : flush_keys) {
+    flush_pending_ssd_write_key(key, now_ps);
+  }
+}
+
+bool StorageController::flush_pending_ssd_write_key(const SsdWriteStreamKey& key,
+                                                    uint64_t now_ps) {
+  auto it = _pending_ssd_writes.find(key);
+  if (it == _pending_ssd_writes.end()) return true;
+  if (it->second.waiters.empty()) {
+    _pending_ssd_writes.erase(it);
+    return true;
+  }
+
+  auto* aggregate = new MemoryAccess();
+  aggregate->id = generate_mem_access_id();
+  aggregate->dram_address = it->second.page_addr;
+  aggregate->spad_address = it->second.waiters.front()->spad_address;
+  aggregate->size = ssd_page_bytes();
+  aggregate->logical_size_bytes = ssd_page_bytes();
+  aggregate->write = true;
+  aggregate->request = true;
+  aggregate->core_id = it->second.waiters.front()->core_id;
+  aggregate->buffer_id = 0;
+  aggregate->issue_time_ps = it->second.waiters.front()->issue_time_ps;
+  aggregate->mem_enter_time_ps = now_ps;
+  aggregate->ssd_host_request = true;
+  aggregate->target_medium = MemoryMedium::SSD;
+
+  if (!dispatch_ssd_aggregate(aggregate, now_ps)) {
+    delete aggregate;
+    return false;
+  }
+
+  SsdAggregateContext context;
+  context.waiters = std::move(it->second.waiters);
+  _ssd_write_aggregates.emplace(aggregate->id, std::move(context));
+  _pending_ssd_writes.erase(it);
+  return true;
+}
+
+bool StorageController::dispatch_ssd_aggregate(MemoryAccess* aggregate,
+                                               uint64_t now_ps) {
+  if (_ssd == nullptr || _ssd->is_full(aggregate)) return false;
+  _ssd->set_current_time_ps(now_ps);
+  _ssd->push(aggregate);
+  return true;
+}
+
+void StorageController::complete_ssd_aggregate(uint64_t now_ps,
+                                               MemoryAccess* response) {
+  auto write_it = _ssd_write_aggregates.find(response->id);
+  if (write_it != _ssd_write_aggregates.end()) {
+    auto waiters = std::move(write_it->second.waiters);
+    _ssd_write_aggregates.erase(write_it);
+    for (MemoryAccess* waiter : waiters) {
+      waiter->request = false;
+      waiter->ssd_host_request = false;
+      waiter->target_medium = MemoryMedium::SSD;
+      waiter->mem_finish_time_ps = response->mem_finish_time_ps;
+      waiter->dram_finish_cycle = response->dram_finish_cycle;
+      handle_completed_access(now_ps, waiter);
+    }
+    delete response;
+    return;
+  }
+
+  addr_type page_addr = ssd_page_addr(response->dram_address);
+  auto read_page_it = _ssd_inflight_read_pages.find(page_addr);
+  if (read_page_it == _ssd_inflight_read_pages.end() ||
+      read_page_it->second != response->id) {
+    return;
+  }
+
+  auto read_ctx_it = _ssd_read_aggregates.find(response->id);
+  if (read_ctx_it == _ssd_read_aggregates.end()) return;
+  auto waiters = std::move(read_ctx_it->second.waiters);
+  _ssd_read_aggregates.erase(read_ctx_it);
+  _ssd_inflight_read_pages.erase(read_page_it);
+  for (MemoryAccess* waiter : waiters) {
+    waiter->request = false;
+    waiter->ssd_host_request = false;
+    waiter->target_medium = MemoryMedium::SSD;
+    waiter->mem_finish_time_ps = response->mem_finish_time_ps;
+    waiter->dram_finish_cycle = response->dram_finish_cycle;
+    handle_completed_access(now_ps, waiter);
+  }
+  delete response;
+}
+
+uint64_t StorageController::ssd_page_bytes() const {
+  return static_cast<uint64_t>(_config.ssd.secsz) * _config.ssd.secs_per_pg;
+}
+
+addr_type StorageController::ssd_page_addr(addr_type addr) const {
+  uint64_t page_bytes = ssd_page_bytes();
+  if (page_bytes == 0 || !_ssd || !_ssd->owns_address(addr)) return addr;
+  uint64_t offset = addr - _config.ssd.address_base;
+  return _config.ssd.address_base + (offset / page_bytes) * page_bytes;
+}
+
+uint64_t StorageController::ssd_write_idle_timeout_ps() const {
+  uint64_t icnt_period = _config.icnt_freq > 0 ? 1000000ULL / _config.icnt_freq : 1000ULL;
+  uint64_t page_segments = std::max<uint64_t>(1, ssd_page_bytes() /
+                                                     std::max<uint64_t>(_config.dram_req_size, 1));
+  return std::max<uint64_t>(1, page_segments) * icnt_period;
+}
+
+StorageController::SsdWriteStreamKey StorageController::make_ssd_write_stream_key(
+    const MemoryAccess* request) const {
+  SsdWriteStreamKey key;
+  key.controller_generated = request->controller_generated;
+  key.core_id = request->core_id;
+  key.macro_request_id = request->macro_request_id;
+  key.page_addr = ssd_page_addr(request->dram_address);
+  return key;
+}
+
+bool StorageController::same_ssd_write_stream(
+    const SsdWriteStreamKey& lhs, const SsdWriteStreamKey& rhs) const {
+  return lhs.controller_generated == rhs.controller_generated &&
+         lhs.core_id == rhs.core_id &&
+         lhs.macro_request_id == rhs.macro_request_id;
 }
 
 void StorageController::drain_dram_responses(uint64_t now_ps) {
@@ -111,6 +345,11 @@ void StorageController::drain_ssd_responses(uint64_t now_ps) {
     response->target_medium = MemoryMedium::SSD;
     if (response->mem_finish_time_ps == 0)
       response->mem_finish_time_ps = now_ps;
+    if (_ssd_write_aggregates.find(response->id) != _ssd_write_aggregates.end() ||
+        _ssd_read_aggregates.find(response->id) != _ssd_read_aggregates.end()) {
+      complete_ssd_aggregate(now_ps, response);
+      continue;
+    }
     handle_completed_access(now_ps, response);
   }
 }
@@ -221,4 +460,5 @@ void StorageController::service_migrations(uint64_t now_ps) {
       migration.next_offset += chunk;
     }
   }
+
 }
