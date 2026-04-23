@@ -8,6 +8,14 @@
 
 namespace fs = std::filesystem;
 
+namespace {
+
+double ps_to_us(uint64_t ps) {
+  return static_cast<double>(ps) / 1e6;
+}
+
+}  // namespace
+
 Simulator::Simulator(SimulationConfig config, bool language_mode)
     : _config(config), _core_cycles(0), _language_mode(language_mode) {
   // Create dram object
@@ -134,6 +142,7 @@ void Simulator::cycle() {
     int model_id = 0;
 
     uint64_t sim_time_ps = set_cycle_mask();
+    _last_sim_time_ps = sim_time_ps;
     if (_storage_controller) _storage_controller->advance_to(sim_time_ps);
     // Core Cycle
     if (_cycle_mask & CORE_MASK) {
@@ -164,6 +173,7 @@ void Simulator::cycle() {
     // DRAM cycle
     if (_cycle_mask & DRAM_MASK) {
       _dram->cycle();
+      _dram_cycles++;
     }
     // Interconnect cycle
     if (_cycle_mask & ICNT_MASK) {
@@ -237,7 +247,7 @@ void Simulator::cycle() {
       _icnt->cycle();
     }
   }
-  spdlog::info("Simulation Finished at {} cycle {} us", _core_cycles, _core_cycles / (_config.core_freq) );
+  print_simulation_time_summary();
   /* Print simulation stats */
   for (int core_id = 0; core_id < _n_cores; core_id++) {
     _cores[core_id]->print_stats();
@@ -324,4 +334,24 @@ const double Simulator::get_tile_ops() {
     return 0.0;
   else
     return _tile_timestamp.size() / duration.count();
+}
+
+void Simulator::print_simulation_time_summary() const {
+  const uint64_t core_time_ps = _core_cycles * _core_period;
+  const uint64_t icnt_time_ps = _icnt_cycle * _icnt_period;
+  const uint64_t dram_time_ps = _dram_cycles * _dram_period;
+  const uint64_t global_time_ps =
+      std::max({core_time_ps, icnt_time_ps, dram_time_ps, _last_sim_time_ps});
+
+  spdlog::info("Simulation Finished: global_sim_time={:.6f} us",
+               ps_to_us(global_time_ps));
+  spdlog::info(
+      "[SIM-TIME] core: cycles={} freq={} MHz sim_time={:.6f} us",
+      _core_cycles, _config.core_freq, ps_to_us(core_time_ps));
+  spdlog::info(
+      "[SIM-TIME] icnt: cycles={} freq={} MHz sim_time={:.6f} us",
+      _icnt_cycle, _config.icnt_freq, ps_to_us(icnt_time_ps));
+  spdlog::info(
+      "[SIM-TIME] mem: cycles={} freq={} MHz sim_time={:.6f} us",
+      _dram_cycles, _config.dram_freq, ps_to_us(dram_time_ps));
 }

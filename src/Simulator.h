@@ -33,6 +33,7 @@ class Simulator {
   uint64_t set_cycle_mask();
   void handle_model();
   uint32_t get_dest_node(MemoryAccess* access);
+  void print_simulation_time_summary() const;
   SimulationConfig _config;
   uint32_t _n_cores;
   uint32_t _noc_node_per_core;
@@ -59,6 +60,8 @@ class Simulator {
   addr_type _dram_ch_stride_size;
 
   uint64_t _core_cycles;
+  uint64_t _dram_cycles = 0;
+  uint64_t _last_sim_time_ps = 0;
 
   uint32_t _cycle_mask;
   bool _single_run;

@@ -121,7 +121,7 @@ int main(int argc, char** argv) {
 
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> duration = end - start;
-    spdlog::info("Benchmark time: {:2f} seconds", duration.count());
+    spdlog::info("Wall-clock runtime: {:2f} seconds", duration.count());
     return 0;
   }
 
@@ -196,8 +196,7 @@ int main(int argc, char** argv) {
   /* Simulation time measurement */
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> duration = end - start;
-  spdlog::info("Simulation time: {:2f} seconds", duration.count());
-  spdlog::info("Total tile: {}, simulated tile per seconds(TPS): {:3f}",
-    simulator->get_number_tile(), simulator->get_tile_ops());
+  spdlog::info("Wall-clock runtime: {:2f} seconds", duration.count());
+  //spdlog::info("Total tile: {}, simulated tile per seconds(TPS): {:3f}",simulator->get_number_tile(), simulator->get_tile_ops());
   return 0;
 }
