@@ -247,7 +247,6 @@ void Simulator::cycle() {
       _icnt->cycle();
     }
   }
-  print_simulation_time_summary();
   /* Print simulation stats */
   for (int core_id = 0; core_id < _n_cores; core_id++) {
     _cores[core_id]->print_stats();
@@ -336,22 +335,20 @@ const double Simulator::get_tile_ops() {
     return _tile_timestamp.size() / duration.count();
 }
 
-void Simulator::print_simulation_time_summary() const {
+void Simulator::print_simulation_time_summary(double wall_clock_seconds) const {
   const uint64_t core_time_ps = _core_cycles * _core_period;
   const uint64_t icnt_time_ps = _icnt_cycle * _icnt_period;
   const uint64_t dram_time_ps = _dram_cycles * _dram_period;
   const uint64_t global_time_ps =
       std::max({core_time_ps, icnt_time_ps, dram_time_ps, _last_sim_time_ps});
 
-  spdlog::info("Simulation Finished: global_sim_time={:.6f} us",
-               ps_to_us(global_time_ps));
   spdlog::info(
-      "[SIM-TIME] core: cycles={} freq={} MHz sim_time={:.6f} us",
-      _core_cycles, _config.core_freq, ps_to_us(core_time_ps));
-  spdlog::info(
-      "[SIM-TIME] icnt: cycles={} freq={} MHz sim_time={:.6f} us",
-      _icnt_cycle, _config.icnt_freq, ps_to_us(icnt_time_ps));
-  spdlog::info(
-      "[SIM-TIME] mem: cycles={} freq={} MHz sim_time={:.6f} us",
-      _dram_cycles, _config.dram_freq, ps_to_us(dram_time_ps));
+      "simulation time : {:.6f} us | cycles: core={}, icnt={}, mem={}",
+      ps_to_us(global_time_ps), 
+       _core_cycles, _icnt_cycle, _dram_cycles);
+  spdlog::info("wall-clock={:.6f} s",wall_clock_seconds);
+}
+
+void Simulator::print_final_summary(double wall_clock_seconds) const {
+  print_simulation_time_summary(wall_clock_seconds);
 }

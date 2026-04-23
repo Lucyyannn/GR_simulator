@@ -22,6 +22,7 @@ class Simulator {
   void register_language_model(json info, std::unique_ptr<LanguageModel> model);
   void finish_language_model(uint32_t model_id);
   void run_simulator();
+  void print_final_summary(double wall_clock_seconds) const;
   const double get_tile_ops();
   const size_t get_number_tile() { return _tile_timestamp.size(); }
   // void run_offline(std::string model_name, uint32_t sample_count);
@@ -33,7 +34,7 @@ class Simulator {
   uint64_t set_cycle_mask();
   void handle_model();
   uint32_t get_dest_node(MemoryAccess* access);
-  void print_simulation_time_summary() const;
+  void print_simulation_time_summary(double wall_clock_seconds) const;
   SimulationConfig _config;
   uint32_t _n_cores;
   uint32_t _noc_node_per_core;
