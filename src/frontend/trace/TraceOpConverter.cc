@@ -51,6 +51,8 @@ ConvertedOp TraceOpConverter::convert(const OpEntry& entry) {
     return convert_silu(entry);
   if (name == "aten::softmax" || name == "softmax")
     return convert_softmax(entry);
+  if (name == "aten::embedding" || name == "embedding")
+    return convert_embedding(entry);
 
   spdlog::debug("[TraceOpConverter] Unknown op '{}' -> Dummy", name);
   return convert_dummy(entry);
@@ -265,6 +267,25 @@ ConvertedOp TraceOpConverter::convert_silu(const OpEntry& entry) {
   if (!entry.outputs.empty())
     act.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   return act;
+}
+
+ConvertedOp TraceOpConverter::convert_embedding(const OpEntry& entry) {
+  ConvertedOp embedding;
+  embedding.optype = "Embedding";
+  embedding.attrs = entry.attrs;
+
+  if (!entry.inputs.empty())
+    embedding.attrs["weight_shape"] = shape_to_str(entry.inputs[0].shape);
+  if (entry.inputs.size() >= 2) {
+    embedding.attrs["indices_shape"] = shape_to_str(entry.inputs[1].shape);
+    embedding.attrs["indices_dtype"] = entry.inputs[1].dtype;
+  }
+  if (!entry.outputs.empty()) {
+    embedding.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    embedding.attrs["output_name"] = entry.outputs[0].name;
+  }
+
+  return embedding;
 }
 
 ConvertedOp TraceOpConverter::convert_softmax(const OpEntry& entry) {

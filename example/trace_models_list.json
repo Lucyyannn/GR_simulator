@@ -35,6 +35,10 @@
     {
       "name": "test_pipeline",
       "trace_path": "example/trace_tests/test_pipeline.json"
+    },
+    {
+      "name": "test_embedding",
+      "trace_path": "example/trace_tests/test_embedding.json"
     }
   ]
 }

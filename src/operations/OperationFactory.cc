@@ -11,6 +11,7 @@
 #include "Operation.h"
 #include "Attention.h"
 #include "Dummy.h"
+#include "Embedding.h"
 #include "EmbedLayerNorm.h"
 #include "SkipLayerNorm.h"
 #include "BiasGelu.h"
@@ -48,6 +49,8 @@ std::unique_ptr<Operation> OperationFactory::create_operation(
     return std::make_unique<Attention>(_config, model, node_proto, target_core);
   } else if (node_proto.op_type() == "Cast") {
     return std::make_unique<Dummy>(_config, model, node_proto, target_core);
+  } else if (node_proto.op_type() == "Gather" || node_proto.op_type() == "Embedding") {
+    return std::make_unique<Embedding>(_config, model, node_proto, target_core);
   } else if (node_proto.op_type() == "EmbedLayerNormalization") {
     return std::make_unique<EmbedLayerNorm>(_config, model, node_proto, target_core);
   } else if (node_proto.op_type() == "SkipLayerNormalization") {
@@ -123,6 +126,8 @@ std::unique_ptr<Operation> OperationFactory::create_from_trace(
     return std::make_unique<GlobalAvgPool>(_config, model, entry.name, attrs, target_core);
   } else if (optype == "Flatten") {
     return std::make_unique<Flatten>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "Embedding") {
+    return std::make_unique<Embedding>(_config, model, entry.name, attrs, target_core);
   } else if (optype == "SkipLayerNorm") {
     return std::make_unique<SkipLayerNorm>(_config, model, entry.name, attrs, target_core);
   } else if (optype == "BiasGelu") {

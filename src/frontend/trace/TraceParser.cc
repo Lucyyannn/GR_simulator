@@ -11,9 +11,20 @@ namespace {
 std::string json_array_to_string(const nlohmann::json& arr) {
   if (!arr.is_array() || arr.empty())
     return "";
-  std::string result = std::to_string(arr[0].get<uint32_t>());
+  std::string result;
+  if (arr[0].is_number_integer())
+    result = std::to_string(arr[0].get<int64_t>());
+  else if (arr[0].is_number_float())
+    result = std::to_string(arr[0].get<double>());
+  else
+    result = arr[0].get<std::string>();
   for (size_t i = 1; i < arr.size(); i++)
-    result += "," + std::to_string(arr[i].get<uint32_t>());
+    if (arr[i].is_number_integer())
+      result += "," + std::to_string(arr[i].get<int64_t>());
+    else if (arr[i].is_number_float())
+      result += "," + std::to_string(arr[i].get<double>());
+    else
+      result += "," + arr[i].get<std::string>();
   return result;
 }
 
