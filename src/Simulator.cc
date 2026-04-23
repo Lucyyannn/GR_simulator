@@ -127,6 +127,7 @@ void Simulator::handle_model() {
     _models.pop_back();
 
     launch_model->initialize_model(_weight_table[launch_model->get_name()]);
+    launch_model->prefill_ssd_tensors(_ssd.get());
     launch_model->set_request_time(_core_time);
     spdlog::info("Schedule model: {} at {} us", launch_model->get_name(), _core_time);
     _scheduler->schedule_model(std::move(launch_model), 1);

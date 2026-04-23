@@ -58,6 +58,7 @@ class Ssd {
 
   bool is_full(MemoryAccess* request);
   void push(MemoryAccess* request);
+  void prefill_range(addr_type base_addr, uint64_t size_bytes);
 
   bool is_empty();
   MemoryAccess* top();

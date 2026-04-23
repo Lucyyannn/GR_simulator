@@ -17,6 +17,8 @@ class TraceModel : public Model {
   virtual void initialize_weight(
       std::vector<std::unique_ptr<Tensor>>& weight_table) override;
 
+  virtual void prefill_ssd_tensors(Ssd* ssd) override;
+
  private:
   std::string _trace_path;
   trace_frontend::TraceGraph _graph;

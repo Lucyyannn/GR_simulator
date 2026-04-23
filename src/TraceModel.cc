@@ -1,4 +1,5 @@
 #include "TraceModel.h"
+#include "Ssd.h"
 #include "operations/OperationFactory.h"
 #include "frontend/trace/TraceParser.h"
 #include "frontend/trace/TraceOpConverter.h"
@@ -148,4 +149,24 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
   std::chrono::duration<double> duration = end - start;
   spdlog::info("[TraceModel] {} initialization time: {:2f} seconds, {} ops, {} runnable",
                _name, duration.count(), _operation_map.size(), _executable_layer.size());
+}
+
+void TraceModel::prefill_ssd_tensors(Ssd* ssd) {
+  if (ssd == nullptr) return;
+
+  uint64_t prefilled_tensors = 0;
+  uint64_t prefilled_bytes = 0;
+  for (const auto& [_, tensor] : _tensor_map) {
+    if (tensor == nullptr) continue;
+    if (!ssd->owns_address(tensor->get_address())) continue;
+    ssd->prefill_range(tensor->get_address(), tensor->get_size());
+    prefilled_tensors++;
+    prefilled_bytes += tensor->get_size();
+  }
+
+  if (prefilled_tensors > 0) {
+    spdlog::info(
+        "[TraceModel] {} prefilling {} SSD tensors ({} bytes) without timing",
+        _name, prefilled_tensors, prefilled_bytes);
+  }
 }

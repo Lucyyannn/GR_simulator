@@ -170,6 +170,8 @@ void Model::initialize_weight(std::vector<std::unique_ptr<Tensor>>& weight_table
   }
 }
 
+void Model::prefill_ssd_tensors(Ssd* /*ssd*/) {}
+
 
 void Model::set_layer_finish(uint32_t id) {
   _operation_map[id]->set_finish();

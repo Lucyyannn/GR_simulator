@@ -228,6 +228,40 @@ void Ssd::push(MemoryAccess* request) {
   enqueue_host_request(host_request);
 }
 
+void Ssd::prefill_range(addr_type base_addr, uint64_t size_bytes) {
+  if (size_bytes == 0 || !owns_address(base_addr)) return;
+
+  auto request = make_host_request(base_addr, size_bytes, true, 0);
+  uint64_t start_lpn = request->slba / std::max<uint64_t>(_cfg.secs_per_pg, 1);
+  uint64_t end_lpn =
+      (request->slba + std::max<uint32_t>(request->nlb, 1U) - 1) /
+      std::max<uint64_t>(_cfg.secs_per_pg, 1);
+
+  for (uint64_t lpn = start_lpn; lpn <= end_lpn; lpn++) {
+    if (!valid_lpn(lpn)) break;
+
+    while (_wp.line_id < 0) {
+      Line* next = get_next_free_line();
+      if (next == nullptr) return;
+      _wp.line_id = next->id;
+      _wp.blk = next->id;
+      _wp.ch = _wp.lun = _wp.pg = _wp.pl = 0;
+    }
+
+    Ppa old_ppa = get_maptbl_ent(lpn);
+    if (mapped_ppa(old_ppa) && valid_ppa(old_ppa)) {
+      mark_page_invalid(old_ppa);
+      set_rmap_ent(kInvalidLpn, old_ppa);
+    }
+
+    Ppa new_ppa = get_new_page();
+    set_maptbl_ent(lpn, new_ppa);
+    set_rmap_ent(lpn, new_ppa);
+    mark_page_valid(new_ppa);
+    advance_write_pointer();
+  }
+}
+
 void Ssd::flush_frontend_merges(uint64_t now_ps) {
   std::vector<uint64_t> ready_keys;
   ready_keys.reserve(_frontend_merges.size());

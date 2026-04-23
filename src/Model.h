@@ -6,6 +6,9 @@
 #include "operations/Operation.h"
 #include "Tensor.h"
 #include "Mapping.h"
+
+class Ssd;
+
 class Model {
   public:
     Model(std::string onnx_path, json model_config, SimulationConfig config, std::string name, MappingTable& map);
@@ -35,6 +38,7 @@ class Model {
 
     virtual void initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_table);
     virtual void initialize_weight(std::vector<std::unique_ptr<Tensor>>& weight_table);
+    virtual void prefill_ssd_tensors(Ssd* ssd);
   protected:
 
     uint32_t _id;
