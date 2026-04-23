@@ -37,6 +37,14 @@ Scheduler::Scheduler(SimulationConfig config, const cycle_type* core_cycle, cons
     _core_executable_tile_queue[i] = std::deque<std::unique_ptr<Tile>>();
 }
 
+bool Scheduler::preserve_small_layer_core_ids(uint32_t layer_id, size_t available_cores) const {
+  auto it = _active_layers_map.find(layer_id);
+  if (it == _active_layers_map.end()) {
+    return false;
+  }
+  return it->second.total_tiles < available_cores;
+}
+
 void Scheduler::schedule_model(std::unique_ptr<Model> model,
                                uint32_t sample_size) {
   _request_queue.push_back(Request{.request_id = generate_id(),
@@ -62,6 +70,8 @@ void Scheduler::issue_tile_per_core(std::vector<uint32_t>& allowed_cpu, int offs
     if (tile->core_id == -1) { // -1 is global id
       core_id += _core_rr_id;
       _core_rr_id = _core_rr_id + 1; // increase with round robin
+    } else if (preserve_small_layer_core_ids(tile->layer_id, allowed_cpu.size())) {
+      core_id = tile->core_id;
     } else {
       core_id = tile->core_id + _nr_layer;
     }
@@ -83,6 +93,8 @@ void Scheduler::issue_tile_per_core() {
     if (tile->core_id == -1) { // -1 is global id
       tile->core_id = _core_rr_id % _config.num_cores;
       _core_rr_id++; // increase with round robin
+    } else if (preserve_small_layer_core_ids(tile->layer_id, _config.num_cores)) {
+      tile->core_id = tile->core_id % _config.num_cores;
     } else {
       tile->core_id = (tile->core_id + _nr_layer) % _config.num_cores;
     }

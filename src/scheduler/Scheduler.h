@@ -49,6 +49,7 @@ class Scheduler {
     void* _simulator;
     robin_hood::unordered_map<uint32_t, LayerStat> _layer_stat_map;
     robin_hood::unordered_map<uint32_t, LayerStat> _active_layers_map;
+    bool preserve_small_layer_core_ids(uint32_t layer_id, size_t available_cores) const;
     virtual void refresh_status();
     uint32_t count_active_layers();
     uint32_t cpu_to_partition(uint32_t cpu);
