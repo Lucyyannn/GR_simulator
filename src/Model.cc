@@ -93,7 +93,7 @@ void Model::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_table)
       input_dim.push_back(channel);
     }
 
-    auto input_tensor = std::make_unique<Tensor>(_root_node_id, input_name, input_dim, _config.precision * 16, true);
+    auto input_tensor = std::make_unique<Tensor>(_root_node_id, input_name, input_dim, _config.precision, true);
     int id = input_tensor->get_id();
     input_tensor->set_produced();
     _tensor_map[id] = std::move(input_tensor);

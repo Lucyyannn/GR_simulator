@@ -66,7 +66,7 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
       if (!find_tensor(inp.name)) {
         std::vector<uint32_t> dims = inp.shape;
         auto tensor = std::make_unique<Tensor>(
-            _root_node_id, inp.name, dims, _config.precision * 16, true);
+            _root_node_id, inp.name, dims, _config.precision, true);
         tensor->set_produced();
         _tensor_map[tensor->get_id()] = std::move(tensor);
       }
