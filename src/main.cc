@@ -69,14 +69,8 @@ int main(int argc, char** argv) {
   SimulationConfig config = initialize_config(config_json);
   OperationFactory::initialize(config);
 
-  /* Apply SSD tensor-placement policy before any Model is loaded. */
-  if (config.ssd.enabled && config.ssd.place_threshold_bytes > 0) {
-    set_ssd_placement_policy(config.ssd.place_threshold_bytes,
-                             config.ssd.address_base);
-    spdlog::info(
-        "[CONFIG] SSD placement policy: tensors >= {} bytes mapped to 0x{:x}",
-        config.ssd.place_threshold_bytes, config.ssd.address_base);
-  }
+  configure_tensor_placement_policy(config);
+  spdlog::info("[CONFIG] Tensor placement policy configured");
 
   std::string mode = "default";
   bool language_mode = false;

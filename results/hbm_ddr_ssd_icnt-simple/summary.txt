@@ -1,0 +1,6 @@
+ddr read cases=48 avg_of_avg_ns=9042.298
+ddr write cases=48 avg_of_avg_ns=9057.921
+hbm read cases=48 avg_of_avg_ns=188.326
+hbm write cases=48 avg_of_avg_ns=178.879
+ssd read cases=48 avg_of_avg_ns=79583.333
+ssd write cases=48 avg_of_avg_ns=239583.333

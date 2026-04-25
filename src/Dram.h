@@ -22,6 +22,10 @@ class Dram {
   virtual bool is_empty(uint32_t cid) = 0;
   virtual MemoryAccess* top(uint32_t cid) = 0;
   virtual void pop(uint32_t cid) = 0;
+  virtual bool owns_address(addr_type addr) const {
+    return addr >= _address_base &&
+           addr < _address_base + _capacity_bytes;
+  }
   uint32_t get_channel_id(MemoryAccess* request);
   uint64_t next_event_time_ps() {
     return running() ? (_time_ps + std::max<uint64_t>(_period_ps, 1))
@@ -37,6 +41,10 @@ class Dram {
   uint64_t _period_ps = 0;
   uint64_t _time_ps = 0;
   uint64_t _inflight_requests = 0;
+  uint64_t _issued_requests = 0;
+  uint64_t _address_base = 0;
+  uint64_t _capacity_bytes = 0;
+  uint32_t _address_req_size = 32;
 };
 
 class SimpleDram : public Dram {
@@ -82,10 +90,12 @@ class DramRamulator : public Dram {
   std::vector<uint64_t> _processed_requests;
 };
 
-class DramRamulator2 : public Dram {
+class Ramulator2Memory : public Dram {
  public:
-  DramRamulator2(SimulationConfig config);
-  ~DramRamulator2() override;
+  Ramulator2Memory(const SimulationConfig& config,
+                   const TieredMemoryConfig& tier_config,
+                   std::string device_name);
+  ~Ramulator2Memory() override;
   virtual bool running() override;
   virtual void cycle() override;
   virtual bool is_full(uint32_t cid, MemoryAccess* request) override;
@@ -95,10 +105,17 @@ class DramRamulator2 : public Dram {
   virtual void pop(uint32_t cid) override;
   virtual void print_stat() override;
 
- private:
+ protected:
+  TieredMemoryConfig _tier_config;
+  std::string _device_name;
   std::vector<std::unique_ptr<NDPSim::Ramulator2>> _mem;
   int _tx_ch_log2;
   int _tx_log2;
   int _req_size;
+};
+
+class Ddr : public Ramulator2Memory {
+ public:
+  explicit Ddr(const SimulationConfig& config);
 };
 #endif

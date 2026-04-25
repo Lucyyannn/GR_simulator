@@ -114,15 +114,15 @@
   },
 
   "placement" : {
-    "policy" : "hbm",
+    "policy" : "ddr",
     "ssd_threshold_bytes" : 1048576
   },
 
-  "icnt_type" : "simple",
+  "icnt_type" : "booksim2",
   "icnt_latency" : 1,
   "icnt_freq" : 1000,
-  "icnt_injection_ports_per_core" : 16,
-  "icnt_config_path" : "../configs/booksim2_configs/fly_c64_m32.icnt",
+  "icnt_injection_ports_per_core" : 1,
+  "icnt_config_path" : "../configs/booksim2_configs/fly_c4_m16.icnt",
 
   "ssd" : {
     "enabled"               : true,

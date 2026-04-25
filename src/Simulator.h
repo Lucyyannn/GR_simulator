@@ -3,6 +3,7 @@
 #include "Common.h"
 #include "Core.h"
 #include "Dram.h"
+#include "Hbm.h"
 #include "Ssd.h"
 #include "Interconnect.h"
 #include "Model.h"
@@ -44,7 +45,8 @@ class Simulator {
   // Components
   std::vector<std::unique_ptr<Core>> _cores;
   std::unique_ptr<Interconnect> _icnt;
-  std::unique_ptr<Dram> _dram;
+  std::unique_ptr<Dram> _hbm;
+  std::unique_ptr<Ddr> _ddr;
   std::unique_ptr<Ssd>  _ssd;    // FEMU-inspired storage (optional)
   std::unique_ptr<StorageController> _storage_controller;
   std::unique_ptr<Scheduler> _scheduler;
@@ -52,16 +54,16 @@ class Simulator {
   // period information (ps)
   uint64_t _core_period;
   uint64_t _icnt_period;
-  uint64_t _dram_period;
+  uint64_t _mem_period;
   //
   uint64_t _core_time;
   uint64_t _icnt_time;
-  uint64_t _dram_time;
+  uint64_t _mem_time;
 
-  addr_type _dram_ch_stride_size;
+  addr_type _hbm_ch_stride_size;
 
   uint64_t _core_cycles;
-  uint64_t _dram_cycles = 0;
+  uint64_t _mem_cycles = 0;
   uint64_t _last_sim_time_ps = 0;
 
   uint32_t _cycle_mask;

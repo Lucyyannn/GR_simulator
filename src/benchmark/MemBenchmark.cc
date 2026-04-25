@@ -83,7 +83,7 @@ std::vector<MemBenchmarkCase> MemBenchmarkRunner::expand_cases() const {
   std::vector<uint64_t> burst_values = parse_uint64_list(
       _bench_config, "burst_counts", {1, 2, 4, 8, 16, 32, 64, 128});
   std::vector<std::string> medium_values = parse_string_list(
-      _bench_config, "media", {"dram", "ssd"});
+      _bench_config, "media", {"hbm", "ddr", "ssd"});
   std::vector<std::string> access_values = parse_string_list(
       _bench_config, "access_types", {"read", "write"});
   std::vector<std::string> issue_mode_values = parse_string_list(
@@ -94,8 +94,14 @@ std::vector<MemBenchmarkCase> MemBenchmarkRunner::expand_cases() const {
   std::vector<MemBenchmarkCase> cases;
   for (const std::string& medium_name : medium_values) {
     BenchmarkMedium medium;
-    if (medium_name == "dram") {
-      medium = BenchmarkMedium::DRAM;
+    if (medium_name == "hbm") {
+      medium = BenchmarkMedium::HBM;
+    } else if (medium_name == "ddr") {
+      if (!_config.ddr.enabled) {
+        spdlog::warn("[mem_bench] Skip DDR cases because DDR is disabled");
+        continue;
+      }
+      medium = BenchmarkMedium::DDR;
     } else if (medium_name == "ssd") {
       if (!_config.ssd.enabled) {
         spdlog::warn("[mem_bench] Skip SSD cases because SSD is disabled");
@@ -150,9 +156,10 @@ void MemBenchmarkRunner::run_case(uint64_t case_id,
                                   const MemBenchmarkCase& bench_case,
                                   std::ofstream& summary_csv,
                                   std::ofstream& detail_csv) {
-  auto dram = create_dram();
+  auto hbm = create_hbm();
+  auto ddr = create_ddr();
   auto ssd = create_ssd();
-  StorageController controller(_config, dram.get(), ssd.get());
+  StorageController controller(_config, hbm.get(), ddr.get(), ssd.get());
   uint64_t measurement_start_ps = 0;
 
   if (bench_case.medium == BenchmarkMedium::SSD && !bench_case.write) {
@@ -176,8 +183,12 @@ void MemBenchmarkRunner::run_case(uint64_t case_id,
   uint64_t subrequests_per_macro =
       bench_case.medium == BenchmarkMedium::SSD
           ? 1
-          : round_up(bench_case.access_size_bytes, _config.dram_req_size) /
-                _config.dram_req_size;
+          : round_up(
+                bench_case.access_size_bytes,
+                bench_case.medium == BenchmarkMedium::HBM ? _config.hbm.req_size
+                                                          : _config.ddr.req_size) /
+                (bench_case.medium == BenchmarkMedium::HBM ? _config.hbm.req_size
+                                                           : _config.ddr.req_size);
   uint64_t total_subrequests =
       subrequests_per_macro * static_cast<uint64_t>(bench_case.burst_count);
 
@@ -230,8 +241,9 @@ void MemBenchmarkRunner::run_case(uint64_t case_id,
 
     while (!pending_issues.empty() && pending_issues.front().issue_time_ps <= now_ps) {
       ScheduledAccess scheduled = pending_issues.front();
-      uint32_t preferred_port =
-          bench_case.medium == BenchmarkMedium::DRAM ? _config.dram_channels : 0;
+      uint32_t preferred_port = 0;
+      if (bench_case.medium == BenchmarkMedium::HBM)
+        preferred_port = _config.hbm.channels;
       if (!controller.dispatch_request(preferred_port, scheduled.request, now_ps))
         break;
       pending_issues.pop_front();
@@ -351,8 +363,9 @@ uint64_t MemBenchmarkRunner::precondition_case(StorageController& controller,
 
     while (!pending_issues.empty() && pending_issues.front().issue_time_ps <= now_ps) {
       ScheduledAccess scheduled = pending_issues.front();
-      uint32_t preferred_port =
-          bench_case.medium == BenchmarkMedium::DRAM ? _config.dram_channels : 0;
+      uint32_t preferred_port = 0;
+      if (bench_case.medium == BenchmarkMedium::HBM)
+        preferred_port = _config.hbm.channels;
       if (!controller.dispatch_request(preferred_port, scheduled.request, now_ps))
         break;
       pending_issues.pop_front();
@@ -383,8 +396,12 @@ void MemBenchmarkRunner::seed_macro_requests(
   uint64_t subrequest_count =
       bench_case.medium == BenchmarkMedium::SSD
           ? 1
-          : round_up(bench_case.access_size_bytes, _config.dram_req_size) /
-                _config.dram_req_size;
+          : round_up(
+                bench_case.access_size_bytes,
+                bench_case.medium == BenchmarkMedium::HBM ? _config.hbm.req_size
+                                                          : _config.ddr.req_size) /
+                (bench_case.medium == BenchmarkMedium::HBM ? _config.hbm.req_size
+                                                           : _config.ddr.req_size);
   macro.total_subrequests = subrequest_count;
   for (uint32_t subrequest_id = 0; subrequest_id < subrequest_count; subrequest_id++) {
     auto* access = new MemoryAccess();
@@ -395,7 +412,8 @@ void MemBenchmarkRunner::seed_macro_requests(
     access->spad_address = 0;
     access->size = bench_case.medium == BenchmarkMedium::SSD
                        ? bench_case.access_size_bytes
-                       : _config.dram_req_size;
+                       : (bench_case.medium == BenchmarkMedium::HBM ? _config.hbm.req_size
+                                                                    : _config.ddr.req_size);
     access->write = bench_case.write;
     access->request = true;
     access->core_id = 0;
@@ -406,7 +424,9 @@ void MemBenchmarkRunner::seed_macro_requests(
     access->source_medium = MemoryMedium::UNKNOWN;
     access->target_medium = bench_case.medium == BenchmarkMedium::SSD
                                 ? MemoryMedium::SSD
-                                : MemoryMedium::DRAM;
+                                : (bench_case.medium == BenchmarkMedium::HBM
+                                       ? MemoryMedium::HBM
+                                       : MemoryMedium::DDR);
     access->ssd_host_request = bench_case.medium == BenchmarkMedium::SSD;
     pending_issues.push_back({issue_time_ps, access});
   }
@@ -429,7 +449,7 @@ void MemBenchmarkRunner::write_detail_header(std::ofstream& detail_csv) const {
       << "device_latency_ns,end_to_end_latency_ns\n";
 }
 
-std::unique_ptr<Dram> MemBenchmarkRunner::create_dram() const {
+std::unique_ptr<Dram> MemBenchmarkRunner::create_hbm() const {
   SimulationConfig config = _config;
   char* onnxim_path_env = std::getenv("ONNXIM_HOME");
   std::string onnxim_path =
@@ -445,13 +465,29 @@ std::unique_ptr<Dram> MemBenchmarkRunner::create_dram() const {
     return std::make_unique<DramRamulator>(config);
   }
   if (config.dram_type == DramType::RAMULATOR2) {
-    config.dram_config_path = fs::path(onnxim_path)
+    config.hbm.config_path = fs::path(onnxim_path)
                                   .append("configs")
-                                  .append(config.dram_config_path)
+                                  .append(config.hbm.config_path)
                                   .string();
-    return std::make_unique<DramRamulator2>(config);
+    return std::make_unique<Hbm>(config);
   }
-  throw std::runtime_error("Unsupported dram type for mem_bench");
+  throw std::runtime_error("Unsupported HBM type for mem_bench");
+}
+
+std::unique_ptr<Dram> MemBenchmarkRunner::create_ddr() const {
+  if (!_config.ddr.enabled) return nullptr;
+  SimulationConfig config = _config;
+  char* onnxim_path_env = std::getenv("ONNXIM_HOME");
+  std::string onnxim_path =
+      onnxim_path_env != nullptr ? std::string(onnxim_path_env) : std::string("./");
+  if (config.ddr.type == DramType::RAMULATOR2) {
+    config.ddr.config_path = fs::path(onnxim_path)
+                                 .append("configs")
+                                 .append(config.ddr.config_path)
+                                 .string();
+    return std::make_unique<Ddr>(config);
+  }
+  throw std::runtime_error("Unsupported DDR type for mem_bench");
 }
 
 std::unique_ptr<Ssd> MemBenchmarkRunner::create_ssd() const {
@@ -470,7 +506,7 @@ std::unique_ptr<Ssd> MemBenchmarkRunner::create_ssd() const {
   ssd_config.pg_wr_lat = _config.ssd.pg_wr_lat;
   ssd_config.blk_er_lat = _config.ssd.blk_er_lat;
   ssd_config.ch_xfer_lat = _config.ssd.ch_xfer_lat;
-  return std::make_unique<Ssd>(ssd_config, _config.dram_freq);
+  return std::make_unique<Ssd>(ssd_config, _config.hbm.freq);
 }
 
 uint64_t MemBenchmarkRunner::round_up(uint64_t value, uint64_t alignment) const {
@@ -490,6 +526,12 @@ uint64_t MemBenchmarkRunner::benchmark_window_bytes(BenchmarkMedium medium) cons
   if (medium == BenchmarkMedium::SSD) {
     return std::min<uint64_t>(configured, _config.ssd.capacity_bytes);
   }
+  if (medium == BenchmarkMedium::HBM) {
+    return std::min<uint64_t>(configured, _config.hbm.capacity_bytes);
+  }
+  if (medium == BenchmarkMedium::DDR) {
+    return std::min<uint64_t>(configured, _config.ddr.capacity_bytes);
+  }
   return configured;
 }
 
@@ -506,8 +548,11 @@ uint64_t MemBenchmarkRunner::random_512b_index_base(
   uint64_t seed = benchmark_seed();
   uint64_t mix = seed ^ (access_size_bytes + 0x9e3779b97f4a7c15ULL);
   mix ^= static_cast<uint64_t>(macro_request_id) * 0xbf58476d1ce4e5b9ULL;
-  mix ^= static_cast<uint64_t>(medium == BenchmarkMedium::SSD ? 0x94d049bb133111ebULL
-                                                              : 0x2545f4914f6cdd1dULL);
+  mix ^= static_cast<uint64_t>(
+      medium == BenchmarkMedium::SSD
+          ? 0x94d049bb133111ebULL
+          : (medium == BenchmarkMedium::DDR ? 0x2545f4914f6cdd1dULL
+                                            : 0xda942042e4dd58b5ULL));
   uint64_t slot = slot_count > 0 ? mix % slot_count : 0;
   return slot * align_bytes;
 }
@@ -517,15 +562,25 @@ uint64_t MemBenchmarkRunner::next_address(BenchmarkMedium medium,
                                           uint32_t subrequest_id,
                                           uint64_t access_size_bytes,
                                           const std::string& address_pattern) const {
-  uint64_t base_addr = medium == BenchmarkMedium::SSD ? _config.ssd.address_base : 0;
+  uint64_t base_addr = 0;
+  uint64_t req_size = _config.hbm.req_size;
+  if (medium == BenchmarkMedium::HBM) {
+    base_addr = _config.hbm.address_base;
+    req_size = _config.hbm.req_size;
+  } else if (medium == BenchmarkMedium::DDR) {
+    base_addr = _config.ddr.address_base;
+    req_size = _config.ddr.req_size;
+  } else {
+    base_addr = _config.ssd.address_base;
+  }
   if (address_pattern == "contiguous") {
     uint64_t macro_stride =
         medium == BenchmarkMedium::SSD
             ? round_up(access_size_bytes, static_cast<uint64_t>(_config.ssd.secsz))
-            : round_up(access_size_bytes, _config.dram_req_size);
+            : round_up(access_size_bytes, req_size);
     return base_addr + macro_request_id * macro_stride +
            subrequest_id * (medium == BenchmarkMedium::SSD ? macro_stride
-                                                           : _config.dram_req_size);
+                                                           : req_size);
   }
 
   if (address_pattern == "random_512b_index") {
@@ -533,7 +588,7 @@ uint64_t MemBenchmarkRunner::next_address(BenchmarkMedium medium,
         random_512b_index_base(medium, macro_request_id, access_size_bytes);
     return base_addr + macro_base +
            subrequest_id * (medium == BenchmarkMedium::SSD ? 0
-                                                           : _config.dram_req_size);
+                                                           : req_size);
   }
 
   throw std::runtime_error(
@@ -541,7 +596,9 @@ uint64_t MemBenchmarkRunner::next_address(BenchmarkMedium medium,
 }
 
 std::string MemBenchmarkRunner::medium_to_string(BenchmarkMedium medium) const {
-  return medium == BenchmarkMedium::SSD ? "ssd" : "dram";
+  if (medium == BenchmarkMedium::HBM) return "hbm";
+  if (medium == BenchmarkMedium::DDR) return "ddr";
+  return "ssd";
 }
 
 std::string MemBenchmarkRunner::issue_mode_to_string(

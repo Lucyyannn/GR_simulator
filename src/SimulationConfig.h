@@ -11,6 +11,13 @@ enum class DramType { SIMPLE, RAMULATOR1, RAMULATOR2 };
 
 enum class IcntType { SIMPLE, BOOKSIM2 };
 
+enum class TensorPlacementPolicy {
+  HBM = 0,
+  DDR = 1,
+  SSD = 2,
+  SIZE_THRESHOLD = 3,
+};
+
 struct CoreConfig {
   CoreType core_type;
   uint32_t core_width;
@@ -39,9 +46,6 @@ struct CoreConfig {
 
 struct SsdSimConfig {
   bool enabled = false;
-  /* Placement policy: tensors >= `place_threshold_bytes` are pinned in SSD.
-     Set to 0 to disable size-based placement (no tensors in SSD). */
-  uint64_t place_threshold_bytes = 0;
   uint64_t address_base = 0x800000000ULL;   // 32GB
   uint64_t capacity_bytes = (1ULL << 40);   // 1TB
   int secsz = 512;
@@ -57,6 +61,26 @@ struct SsdSimConfig {
   int ch_xfer_lat = 0;
 };
 
+struct TieredMemoryConfig {
+  bool enabled = false;
+  DramType type = DramType::RAMULATOR2;
+  uint32_t freq = 0;
+  uint32_t channels = 0;
+  uint32_t req_size = 32;
+  uint32_t latency = 0;
+  uint32_t size_gb = 0;
+  uint32_t nbl = 1;
+  uint32_t print_interval = 0;
+  std::string config_path;
+  uint64_t address_base = 0;
+  uint64_t capacity_bytes = 0;
+};
+
+struct PlacementConfig {
+  TensorPlacementPolicy policy = TensorPlacementPolicy::SIZE_THRESHOLD;
+  uint64_t ssd_threshold_bytes = 0;
+};
+
 struct SimulationConfig {
   /* Core config */
   uint32_t num_cores;
@@ -64,10 +88,17 @@ struct SimulationConfig {
   uint32_t core_print_interval;
   struct CoreConfig *core_config;
 
+  /* Tensor placement policy */
+  PlacementConfig placement;
+
+  /* HBM / DDR / SSD hierarchy */
+  TieredMemoryConfig hbm;
+  TieredMemoryConfig ddr;
+
   /* SSD config (FEMU-inspired black-box SSD) */
   SsdSimConfig ssd;
 
-  /* DRAM config */
+  /* Legacy HBM aliases preserved for compatibility with existing code paths. */
   DramType dram_type;
   uint32_t dram_freq;
   uint32_t dram_channels;
@@ -102,8 +133,19 @@ struct SimulationConfig {
    */
   std::map<uint32_t, std::vector<uint32_t>> partiton_map;
 
+  uint64_t req_size_for(TensorPlacementPolicy policy) const {
+    if (policy == TensorPlacementPolicy::DDR && ddr.req_size > 0)
+      return ddr.req_size;
+    return hbm.req_size > 0 ? hbm.req_size : dram_req_size;
+  }
+
   uint64_t align_address(uint64_t addr) {
-    return addr - (addr % dram_req_size);
+    const uint64_t req_size = hbm.req_size > 0 ? hbm.req_size : dram_req_size;
+    return req_size == 0 ? addr : (addr - (addr % req_size));
+  }
+
+  uint64_t align_address(uint64_t addr, uint64_t req_size) const {
+    return req_size == 0 ? addr : (addr - (addr % req_size));
   }
 
   float max_systolic_flops(uint32_t id) {
@@ -114,8 +156,16 @@ struct SimulationConfig {
     return (core_config[id].vector_process_bit >> 3) / precision * 2 * core_freq / 1000; // GFLOPS
   }
 
+  float max_hbm_bandwidth() const {
+    return hbm.freq * hbm.channels * hbm.req_size / std::max(hbm.nbl, 1u) / 1000.0f;
+  }
+
+  float max_ddr_bandwidth() const {
+    return ddr.freq * ddr.channels * ddr.req_size / std::max(ddr.nbl, 1u) / 1000.0f;
+  }
+
   float max_dram_bandwidth() {
-    return dram_freq * dram_channels * dram_req_size / dram_nbl / 1000; // GB/s
+    return max_hbm_bandwidth();
   }
 
 };

@@ -3,15 +3,17 @@
 #include <algorithm>
 #include <limits>
 
-StorageController::StorageController(SimulationConfig config, Dram* dram,
-                                     Ssd* ssd)
-    : _config(config), _dram(dram), _ssd(ssd) {}
+StorageController::StorageController(SimulationConfig config, Dram* hbm,
+                                     Dram* ddr, Ssd* ssd)
+    : _config(config), _hbm(hbm), _ddr(ddr), _ssd(ssd) {}
 
 void StorageController::advance_to(uint64_t now_ps) {
   _last_advanced_ps = std::max(_last_advanced_ps, now_ps);
-  if (_dram) _dram->advance_to(now_ps);
+  if (_hbm) _hbm->advance_to(now_ps);
+  if (_ddr) _ddr->advance_to(now_ps);
   if (_ssd) _ssd->advance_to(now_ps);
-  drain_dram_responses(now_ps);
+  drain_device_responses(now_ps, _hbm, MemoryMedium::HBM, _config.hbm.channels);
+  drain_device_responses(now_ps, _ddr, MemoryMedium::DDR, _config.ddr.channels);
   drain_ssd_responses(now_ps);
   service_migrations(now_ps);
   flush_pending_ssd_writes(now_ps, false);
@@ -21,9 +23,12 @@ bool StorageController::dispatch_request(uint32_t preferred_port,
                                          MemoryAccess* request,
                                          uint64_t now_ps) {
   if (request == nullptr) return false;
-  MemoryMedium medium = MemoryMedium::DRAM;
+
+  MemoryMedium medium = MemoryMedium::HBM;
   if (_ssd && _ssd->owns_address(request->dram_address)) {
     medium = MemoryMedium::SSD;
+  } else if (_ddr && _ddr->owns_address(request->dram_address)) {
+    medium = MemoryMedium::DDR;
   }
   return route_to_device(preferred_port, request, medium, now_ps);
 }
@@ -41,14 +46,15 @@ void StorageController::pop_ready_response() {
 bool StorageController::has_pending() const {
   return !_ready_responses.empty() || !_retry_queue.empty() ||
          !_active_migrations.empty() || !_pending_ssd_writes.empty() ||
-         !_ssd_inflight_read_pages.empty() || (_dram && _dram->running()) ||
-         (_ssd && _ssd->running());
+         !_ssd_inflight_read_pages.empty() || (_hbm && _hbm->running()) ||
+         (_ddr && _ddr->running()) || (_ssd && _ssd->running());
 }
 
 uint64_t StorageController::next_event_time_ps() const {
   if (!_ready_responses.empty()) return _last_advanced_ps;
   uint64_t next_ps = std::numeric_limits<uint64_t>::max();
-  if (_dram) next_ps = std::min(next_ps, _dram->next_event_time_ps());
+  if (_hbm) next_ps = std::min(next_ps, _hbm->next_event_time_ps());
+  if (_ddr) next_ps = std::min(next_ps, _ddr->next_event_time_ps());
   if (_ssd) next_ps = std::min(next_ps, _ssd->next_event_time_ps());
   if (!_pending_ssd_writes.empty()) {
     uint64_t timeout_ps = ssd_write_idle_timeout_ps();
@@ -72,6 +78,19 @@ uint64_t StorageController::submit_migration_request(
   return req.id;
 }
 
+Dram* StorageController::device_for_medium(MemoryMedium medium) const {
+  switch (medium) {
+    case MemoryMedium::HBM:
+      return _hbm;
+    case MemoryMedium::DDR:
+      return _ddr;
+    case MemoryMedium::SSD:
+    case MemoryMedium::UNKNOWN:
+    default:
+      return nullptr;
+  }
+}
+
 bool StorageController::route_to_device(uint32_t preferred_port,
                                         MemoryAccess* request,
                                         MemoryMedium medium,
@@ -85,12 +104,14 @@ bool StorageController::route_to_device(uint32_t preferred_port,
     return route_to_ssd(request, now_ps);
   }
 
-  if (_dram == nullptr) return false;
+  Dram* device = device_for_medium(medium);
+  if (device == nullptr) return false;
+  uint32_t channel_count =
+      medium == MemoryMedium::HBM ? _config.hbm.channels : _config.ddr.channels;
   uint32_t channel =
-      preferred_port < _config.dram_channels ? preferred_port
-                                             : _dram->get_channel_id(request);
-  if (_dram->is_full(channel, request)) return false;
-  _dram->push(channel, request);
+      preferred_port < channel_count ? preferred_port : device->get_channel_id(request);
+  if (device->is_full(channel, request)) return false;
+  device->push(channel, request);
   return true;
 }
 
@@ -175,7 +196,7 @@ bool StorageController::handle_ssd_write(MemoryAccess* request, uint64_t now_ps)
     it->second.waiters.push_back(request);
   }
 
-  if (_pending_ssd_writes[key].waiters.size() * _config.dram_req_size >=
+  if (_pending_ssd_writes[key].waiters.size() * _config.hbm.req_size >=
       ssd_page_bytes()) {
     flush_pending_ssd_writes(now_ps, false);
   }
@@ -194,7 +215,7 @@ void StorageController::flush_pending_ssd_writes(uint64_t now_ps, bool force) {
     }
     bool timed_out = pending.last_update_ps + timeout_ps <= now_ps;
     bool page_full =
-        pending.waiters.size() * _config.dram_req_size >= ssd_page_bytes();
+        pending.waiters.size() * _config.hbm.req_size >= ssd_page_bytes();
     if (force || timed_out || page_full) flush_keys.push_back(key);
   }
 
@@ -301,8 +322,8 @@ addr_type StorageController::ssd_page_addr(addr_type addr) const {
 
 uint64_t StorageController::ssd_write_idle_timeout_ps() const {
   uint64_t icnt_period = _config.icnt_freq > 0 ? 1000000ULL / _config.icnt_freq : 1000ULL;
-  uint64_t page_segments = std::max<uint64_t>(1, ssd_page_bytes() /
-                                                     std::max<uint64_t>(_config.dram_req_size, 1));
+  uint64_t req_size = std::max<uint64_t>(_config.hbm.req_size, 1);
+  uint64_t page_segments = std::max<uint64_t>(1, ssd_page_bytes() / req_size);
   return std::max<uint64_t>(1, page_segments) * icnt_period;
 }
 
@@ -323,13 +344,15 @@ bool StorageController::same_ssd_write_stream(
          lhs.macro_request_id == rhs.macro_request_id;
 }
 
-void StorageController::drain_dram_responses(uint64_t now_ps) {
-  if (_dram == nullptr) return;
-  for (uint32_t ch = 0; ch < _config.dram_channels; ch++) {
-    while (!_dram->is_empty(ch)) {
-      MemoryAccess* response = _dram->top(ch);
-      _dram->pop(ch);
-      response->target_medium = MemoryMedium::DRAM;
+void StorageController::drain_device_responses(uint64_t now_ps, Dram* device,
+                                               MemoryMedium medium,
+                                               uint32_t channel_count) {
+  if (device == nullptr) return;
+  for (uint32_t ch = 0; ch < channel_count; ch++) {
+    while (!device->is_empty(ch)) {
+      MemoryAccess* response = device->top(ch);
+      device->pop(ch);
+      response->target_medium = medium;
       if (response->mem_finish_time_ps == 0)
         response->mem_finish_time_ps = now_ps;
       handle_completed_access(now_ps, response);
@@ -383,10 +406,10 @@ void StorageController::handle_completed_access(uint64_t now_ps,
     write_request->destination_medium = response->destination_medium;
     write_request->controller_generated = true;
 
-    uint32_t preferred_port = _config.dram_channels;
-    if (response->destination_medium == MemoryMedium::DRAM && _dram) {
-      preferred_port = _dram->get_channel_id(write_request);
-    }
+    uint32_t preferred_port = std::numeric_limits<uint32_t>::max();
+    Dram* dst_device = device_for_medium(response->destination_medium);
+    if (dst_device != nullptr) preferred_port = dst_device->get_channel_id(write_request);
+
     if (route_to_device(preferred_port, write_request,
                         response->destination_medium, now_ps)) {
       migration.inflight_writes++;
@@ -411,10 +434,9 @@ void StorageController::service_migrations(uint64_t now_ps) {
   size_t retry_count = _retry_queue.size();
   while (retry_count-- > 0 && !_retry_queue.empty()) {
     MemoryAccess* retry = _retry_queue.front();
-    uint32_t preferred_port = _config.dram_channels;
-    if (retry->target_medium == MemoryMedium::DRAM && _dram) {
-      preferred_port = _dram->get_channel_id(retry);
-    }
+    uint32_t preferred_port = std::numeric_limits<uint32_t>::max();
+    Dram* target_device = device_for_medium(retry->target_medium);
+    if (target_device != nullptr) preferred_port = target_device->get_channel_id(retry);
     if (!route_to_device(preferred_port, retry, retry->target_medium, now_ps))
       break;
 
@@ -431,7 +453,7 @@ void StorageController::service_migrations(uint64_t now_ps) {
   for (auto& [migration_id, migration] : _active_migrations) {
     while (migration.next_offset < migration.request.bytes) {
       uint64_t chunk =
-          std::min<uint64_t>(_config.dram_req_size,
+          std::min<uint64_t>(_config.hbm.req_size,
                              migration.request.bytes - migration.next_offset);
       auto* read_request = new MemoryAccess();
       read_request->id = generate_mem_access_id();
@@ -446,10 +468,9 @@ void StorageController::service_migrations(uint64_t now_ps) {
       read_request->destination_medium = migration.request.dst_medium;
       read_request->controller_generated = true;
 
-      uint32_t preferred_port = _config.dram_channels;
-      if (migration.request.src_medium == MemoryMedium::DRAM && _dram) {
-        preferred_port = _dram->get_channel_id(read_request);
-      }
+      uint32_t preferred_port = std::numeric_limits<uint32_t>::max();
+      Dram* src_device = device_for_medium(migration.request.src_medium);
+      if (src_device != nullptr) preferred_port = src_device->get_channel_id(read_request);
       if (!route_to_device(preferred_port, read_request,
                            migration.request.src_medium, now_ps)) {
         delete read_request;
@@ -460,5 +481,4 @@ void StorageController::service_migrations(uint64_t now_ps) {
       migration.next_offset += chunk;
     }
   }
-
 }

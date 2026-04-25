@@ -167,7 +167,7 @@ docker run -it \
 | ONNX图前端 | `--mode default` | `main.cc` → `Model` → `OperationFactory::create_operation()` | `models/<name>/<name>.onnx` + `.mapping` | 兼容 ONNXim 的默认图前端 |
 | 语言模型前端 | `--mode language` | `main.cc` → `LanguageModel` → `LangScheduler` | `example/language_models.json` + `traces/*.csv` | 面向自回归 LLM 请求流 |
 | 算子Trace前端 | `--mode trace` | `main.cc` → `TraceParser` → `TraceOpConverter` → `TraceModel` | JSON 算子trace | 新增前端，面向 PyTorch / GR 算子级trace |
-| 存储微基准前端 | `--mode mem_bench` | `main.cc` → `MemBenchmarkRunner` → `StorageController` | benchmark JSON | 新增前端，面向 DRAM / SSD 独立访存测试 |
+| 存储微基准前端 | `--mode mem_bench` | `main.cc` → `MemBenchmarkRunner` → `StorageController` | benchmark JSON | 新增前端，面向 HBM / DDR / SSD 独立访存测试 |
 
 ### 新增前端1：算子Trace
 
@@ -182,7 +182,7 @@ docker run -it \
 
 ```bash
 ./build/bin/Simulator \
-  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd_fast.json \
+  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd.json \
   --models_list ./example/trace_models_list.json \
   --mode trace
 ```
@@ -201,7 +201,7 @@ docker run -it \
 代码结构：
 
 - `src/benchmark/MemBenchmark.*`：展开 case、生成访存请求、统计 latency/bandwidth
-- `src/memory/StorageController.*`：统一路由到 DRAM 或 SSD，并汇聚响应
+- `src/memory/StorageController.*`：统一路由到 HBM / DDR / SSD，并汇聚响应
 - `scripts/plot_mem_benchmark.py`：把 CSV 结果画成图表
 - `configs/mem_benchmark_default.json`：默认测试矩阵
 
@@ -209,17 +209,17 @@ docker run -it \
 
 ```bash
 ./build/bin/Simulator \
-  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd_fast.json \
+  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd.json \
   --mode mem_bench \
   --bench_config ./configs/mem_benchmark_default.json \
-  --bench_output_dir ./results/mem_benchmark_fast
+  --bench_output_dir ./results/hbmddrssd/mem_bench
 ```
 
 `bench_config` 支持的核心字段：
 
 | 字段 | 说明 |
 | --- | --- |
-| `media` | 测试介质，支持 `dram` / `ssd` |
+| `media` | 测试介质，支持 `hbm` / `ddr` / `ssd` |
 | `access_types` | 访问类型，支持 `read` / `write` |
 | `sizes_bytes` | 宏请求大小列表 |
 | `burst_counts` | 并发 burst 数量 |
@@ -269,7 +269,7 @@ make -j$(nproc)
 
 ```bash
 ./build/bin/Simulator \
-  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd_fast.json \
+  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd.json \
   --models_list ./example/trace_models_list.json \
   --mode trace
 ```
@@ -278,10 +278,10 @@ make -j$(nproc)
 
 ```bash
 ./build/bin/Simulator \
-  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd_fast.json \
+  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd.json \
   --mode mem_bench \
   --bench_config ./configs/mem_benchmark_default.json \
-  --bench_output_dir ./results/mem_benchmark_fast
+  --bench_output_dir ./results/hbmddrssd/mem_bench
 ```
 
 **命令行参数：**
@@ -295,7 +295,7 @@ make -j$(nproc)
 | `--trace_file`  | LLM请求trace文件（language模式）                           | `input.csv` |
 | `--trace_path`  | 算子trace JSON路径（trace模式）                            | —           |
 | `--bench_config` | `mem_bench` 配置文件路径                                | —           |
-| `--bench_output_dir` | `mem_bench` 输出目录                             | `results/mem_benchmark` |
+| `--bench_output_dir` | `mem_bench` 输出目录                             | `results/hbmddrssd/mem_bench` |
 
 ### 运行Trace测试
 
@@ -306,7 +306,7 @@ make -j$(nproc)
 echo '{"models":[{"name":"test_gemm","trace_path":"example/trace_tests/test_gemm.json"}]}' > /tmp/test.json
 
 ./build/bin/Simulator \
-  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd_fast.json \
+  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd.json \
   --mode trace \
   --models_list /tmp/test.json \
   --log_level info

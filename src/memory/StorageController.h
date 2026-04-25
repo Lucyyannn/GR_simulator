@@ -10,6 +10,7 @@
 
 #include "../Common.h"
 #include "../Dram.h"
+#include "../Hbm.h"
 #include "../Ssd.h"
 
 struct MigrationRequest {
@@ -24,7 +25,7 @@ struct MigrationRequest {
 
 class StorageController {
  public:
-  StorageController(SimulationConfig config, Dram* dram, Ssd* ssd);
+  StorageController(SimulationConfig config, Dram* hbm, Dram* ddr, Ssd* ssd);
 
   void advance_to(uint64_t now_ps);
   bool dispatch_request(uint32_t preferred_port, MemoryAccess* request,
@@ -74,6 +75,7 @@ class StorageController {
     uint64_t inflight_writes = 0;
   };
 
+  Dram* device_for_medium(MemoryMedium medium) const;
   bool route_to_device(uint32_t preferred_port, MemoryAccess* request,
                        MemoryMedium medium, uint64_t now_ps);
   bool route_to_ssd(MemoryAccess* request, uint64_t now_ps);
@@ -89,13 +91,15 @@ class StorageController {
   SsdWriteStreamKey make_ssd_write_stream_key(const MemoryAccess* request) const;
   bool same_ssd_write_stream(const SsdWriteStreamKey& lhs,
                              const SsdWriteStreamKey& rhs) const;
-  void drain_dram_responses(uint64_t now_ps);
+  void drain_device_responses(uint64_t now_ps, Dram* device,
+                              MemoryMedium medium, uint32_t channel_count);
   void drain_ssd_responses(uint64_t now_ps);
   void handle_completed_access(uint64_t now_ps, MemoryAccess* response);
   void service_migrations(uint64_t now_ps);
 
   SimulationConfig _config;
-  Dram* _dram = nullptr;
+  Dram* _hbm = nullptr;
+  Dram* _ddr = nullptr;
   Ssd* _ssd = nullptr;
   uint64_t _last_advanced_ps = 0;
   uint64_t _next_migration_id = 1;

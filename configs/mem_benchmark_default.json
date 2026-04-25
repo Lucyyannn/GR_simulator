@@ -1,6 +1,6 @@
 {
-  "output_dir": "results/mem_benchmark_fast",
-  "media": ["dram", "ssd"],
+  "output_dir": "results/hbmddrssd/mem_bench",
+  "media": ["hbm", "ddr", "ssd"],
   "access_types": ["read", "write"],
   "sizes_bytes": [512, 1024, 2048, 4096, 8192, 16384],
   "burst_counts": [1, 2, 4, 8, 16, 32, 64, 128],

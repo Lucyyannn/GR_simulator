@@ -114,8 +114,8 @@
   },
 
   "placement" : {
-    "policy" : "hbm",
-    "ssd_threshold_bytes" : 1048576
+    "policy" : "ssd",
+    "ssd_threshold_bytes" : 0
   },
 
   "icnt_type" : "simple",

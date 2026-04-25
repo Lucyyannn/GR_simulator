@@ -23,18 +23,20 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
   for (int i=0; i<config.num_cores;i++)
     spdlog::info("[Core {}] Systolic Array Throughput: {} GFLOPS, Spad size: {} KB, Accumulator size: {} KB",
       i, config.max_systolic_flops(i), config.core_config[i].spad_size, config.core_config[i].accum_spad_size);
-  spdlog::info("DRAM Bandwidth {} GB/s", config.max_dram_bandwidth());
+  spdlog::info("HBM Bandwidth {} GB/s", config.max_hbm_bandwidth());
+  if (config.ddr.enabled)
+    spdlog::info("DDR Bandwidth {} GB/s", config.max_ddr_bandwidth());
   _core_period = 1000000 / (config.core_freq);
   _icnt_period = 1000000 / (config.icnt_freq);
-  _dram_period = 1000000 / (config.dram_freq);
+  _mem_period = 1000000 / std::max<uint32_t>(config.hbm.freq, 1);
   _core_time = 0;
-  _dram_time = 0;
+  _mem_time = 0;
   _icnt_time = 0;
   char* onnxim_path_env = std::getenv("ONNXIM_HOME");
   std::string onnxim_path = onnxim_path_env != NULL?
   std::string(onnxim_path_env) : std::string("./");
   if (config.dram_type == DramType::SIMPLE) {
-    _dram = std::make_unique<SimpleDram>(config);
+    _hbm = std::make_unique<SimpleDram>(config);
   } else if (config.dram_type == DramType::RAMULATOR1) {
     std::string ramulator_config = fs::path(onnxim_path)
                                        .append("configs")
@@ -42,17 +44,27 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
                                        .string();
     spdlog::info("Ramulator config: {}", ramulator_config);
     config.dram_config_path = ramulator_config;
-    _dram = std::make_unique<DramRamulator>(config);
+    _hbm = std::make_unique<DramRamulator>(config);
   } 
   else if (config.dram_type == DramType::RAMULATOR2) 
   {
-    std::string ramulator_config = fs::path(onnxim_path)
+    std::string hbm_config_path = fs::path(onnxim_path)
                                        .append("configs")
-                                       .append(config.dram_config_path)
+                                       .append(config.hbm.config_path)
                                        .string();
-    spdlog::info("Ramulator2 config: {}", ramulator_config);
-    config.dram_config_path = ramulator_config;
-    _dram = std::make_unique<DramRamulator2>(config);
+    spdlog::info("HBM Ramulator2 config: {}", hbm_config_path);
+    config.hbm.config_path = hbm_config_path;
+    config.dram_config_path = hbm_config_path;
+    _hbm = std::make_unique<Hbm>(config);
+    if (config.ddr.enabled) {
+      std::string ddr_config_path = fs::path(onnxim_path)
+                                        .append("configs")
+                                        .append(config.ddr.config_path)
+                                        .string();
+      spdlog::info("DDR Ramulator2 config: {}", ddr_config_path);
+      config.ddr.config_path = ddr_config_path;
+      _ddr = std::make_unique<Ddr>(config);
+    }
   } 
   else {
     spdlog::error("[Configuration] Invalid DRAM type...!");
@@ -75,10 +87,10 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
     scfg.pg_wr_lat      = config.ssd.pg_wr_lat;
     scfg.blk_er_lat     = config.ssd.blk_er_lat;
     scfg.ch_xfer_lat    = config.ssd.ch_xfer_lat;
-    _ssd = std::make_unique<Ssd>(scfg, config.dram_freq);
+    _ssd = std::make_unique<Ssd>(scfg, config.hbm.freq);
   }
   _storage_controller =
-      std::make_unique<StorageController>(config, _dram.get(), _ssd.get());
+      std::make_unique<StorageController>(config, _hbm.get(), _ddr.get(), _ssd.get());
 
   // Create interconnect object
   if (config.icnt_type == IcntType::SIMPLE) {
@@ -94,9 +106,9 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
   // Create core objects
   _cores.resize(config.num_cores);
   _n_cores = config.num_cores;
-  _n_memories = config.dram_channels;
+  _n_memories = config.hbm.channels;
   _noc_node_per_core = config.icnt_injection_ports_per_core;
-  _memory_req_size = config.dram_req_size;
+  _memory_req_size = config.hbm.req_size;
   for (int core_index = 0; core_index < _n_cores; core_index++) {
     _cores[core_index] = Core::create(core_index, config);
   }
@@ -173,8 +185,7 @@ void Simulator::cycle() {
 
     // DRAM cycle
     if (_cycle_mask & DRAM_MASK) {
-      _dram->cycle();
-      _dram_cycles++;
+      _mem_cycles++;
     }
     // Interconnect cycle
     if (_cycle_mask & ICNT_MASK) {
@@ -223,9 +234,10 @@ void Simulator::cycle() {
         int core_offset = _n_cores * _noc_node_per_core;
         MemoryAccess* response = _storage_controller->top_ready_response();
         response->return_time_ps = sim_time_ps;
-        uint32_t source_port =
-            response->target_medium == MemoryMedium::SSD ? 0
-                                                         : _dram->get_channel_id(response);
+        uint32_t source_port = 0;
+        if (response->target_medium == MemoryMedium::HBM && _hbm) {
+          source_port = _hbm->get_channel_id(response);
+        }
         uint32_t dest_node = get_dest_node(response);
         if (!_icnt->is_full(core_offset + source_port, response)) {
           _icnt->push(core_offset + source_port, dest_node, response);
@@ -253,7 +265,8 @@ void Simulator::cycle() {
     _cores[core_id]->print_stats();
   }
   _icnt->print_stats();
-  _dram->print_stat();
+  if (_hbm) _hbm->print_stat();
+  if (_ddr) _ddr->print_stat();
   if (_ssd) _ssd->print_stat();
 }
 
@@ -292,7 +305,8 @@ bool Simulator::running() {
   if (_storage_controller)
     running = running || _storage_controller->has_pending();
   else {
-    running = running || _dram->running();
+    if (_hbm) running = running || _hbm->running();
+    if (_ddr) running = running || _ddr->running();
     if (_ssd) running = running || _ssd->running();
   }
   running = running || !_scheduler->empty();
@@ -304,14 +318,14 @@ bool Simulator::running() {
 
 uint64_t Simulator::set_cycle_mask() {
   _cycle_mask = 0x0;
-  uint64_t minimum_time = MIN3(_core_time, _dram_time, _icnt_time);
+  uint64_t minimum_time = MIN3(_core_time, _mem_time, _icnt_time);
   if (_core_time <= minimum_time) {
     _cycle_mask |= CORE_MASK;
     _core_time += _core_period;
   }
-  if (_dram_time <= minimum_time) {
+  if (_mem_time <= minimum_time) {
     _cycle_mask |= DRAM_MASK;
-    _dram_time += _dram_period;
+    _mem_time += _mem_period;
   }
   if (_icnt_time <= minimum_time) {
     _cycle_mask |= ICNT_MASK;
@@ -322,9 +336,16 @@ uint64_t Simulator::set_cycle_mask() {
 
 uint32_t Simulator::get_dest_node(MemoryAccess *access) {
   if (access->request) {
-    return _config.num_cores * _config.icnt_injection_ports_per_core + _dram->get_channel_id(access);
+    uint32_t port = 0;
+    if (_hbm && _hbm->owns_address(access->dram_address))
+      port = _hbm->get_channel_id(access);
+    return _config.num_cores * _config.icnt_injection_ports_per_core + port;
   } else {
-    return access->core_id * _config.icnt_injection_ports_per_core + (_dram->get_channel_id(access) % _config.icnt_injection_ports_per_core);
+    uint32_t source_port = 0;
+    if (access->target_medium == MemoryMedium::HBM && _hbm)
+      source_port = _hbm->get_channel_id(access);
+    return access->core_id * _config.icnt_injection_ports_per_core +
+           (source_port % _config.icnt_injection_ports_per_core);
   }
 }
 
@@ -339,14 +360,14 @@ const double Simulator::get_tile_ops() {
 void Simulator::print_simulation_time_summary(double wall_clock_seconds) const {
   const uint64_t core_time_ps = _core_cycles * _core_period;
   const uint64_t icnt_time_ps = _icnt_cycle * _icnt_period;
-  const uint64_t dram_time_ps = _dram_cycles * _dram_period;
+  const uint64_t dram_time_ps = _mem_cycles * _mem_period;
   const uint64_t global_time_ps =
       std::max({core_time_ps, icnt_time_ps, dram_time_ps, _last_sim_time_ps});
 
   spdlog::info(
       "simulation time : {:.6f} us | cycles: core={}, icnt={}, mem={}",
       ps_to_us(global_time_ps), 
-       _core_cycles, _icnt_cycle, _dram_cycles);
+       _core_cycles, _icnt_cycle, _mem_cycles);
   spdlog::info("wall-clock={:.6f} s",wall_clock_seconds);
 }
 

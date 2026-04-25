@@ -34,8 +34,9 @@ typedef uint64_t cycle_type;
 
 enum class MemoryMedium {
   UNKNOWN = 0,
-  DRAM = 1,
-  SSD = 2,
+  HBM = 1,
+  DDR = 2,
+  SSD = 3,
 };
 
 typedef struct {
@@ -147,15 +148,17 @@ uint32_t generate_id();
 uint32_t generate_mem_access_id();
 addr_type allocate_address(uint32_t size);
 
-/* Placement-aware allocator. When `place_in_ssd` is true, the returned
- * address lies in the SSD region [ssd_base, ssd_base + capacity). Uses an
- * internal monotonically-increasing cursor for each region. */
+addr_type allocate_address_in_medium(uint32_t size, MemoryMedium medium);
+void configure_tensor_placement_policy(const SimulationConfig& config);
+MemoryMedium default_tensor_medium(uint32_t size);
+uint64_t get_medium_base(MemoryMedium medium);
+uint64_t get_medium_capacity(MemoryMedium medium);
+
+/* Backward-compatible helpers retained for older code paths and docs. */
 addr_type allocate_address_placed(uint32_t size, bool place_in_ssd,
                                   uint64_t ssd_base = 0x800000000ULL);
-
-/* Global toggle set by Model loading based on SimulationConfig.ssd.
- * Tensors whose `size >= threshold` are routed to SSD region. */
-void set_ssd_placement_policy(uint64_t threshold_bytes, uint64_t ssd_base, uint64_t capacity_bytes = (1ULL << 40));
+void set_ssd_placement_policy(uint64_t threshold_bytes, uint64_t ssd_base,
+                              uint64_t capacity_bytes = (1ULL << 40));
 uint64_t get_ssd_capacity();
 bool should_place_in_ssd(uint32_t size);
 uint64_t get_ssd_base();

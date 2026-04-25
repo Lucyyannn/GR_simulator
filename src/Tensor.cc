@@ -108,14 +108,14 @@ void Tensor::allocate_tensor(int precision) {
     size *= dim;
   }
   uint32_t total_bytes = size * precision;
-  /* Route large tensors (e.g., weights) to SSD region if policy enables. */
-  bool place_ssd = should_place_in_ssd(total_bytes);
-  _address = allocate_address_placed(total_bytes, place_ssd, get_ssd_base());
+  MemoryMedium medium = default_tensor_medium(total_bytes);
+  _address = allocate_address_in_medium(total_bytes, medium);
   _size = total_bytes;
-  if (place_ssd) {
-    spdlog::debug("[TENSOR] {} ({} B) placed in SSD at 0x{:x}",
-                  _name, total_bytes, _address);
-  }
+  const char* medium_name = "HBM";
+  if (medium == MemoryMedium::DDR) medium_name = "DDR";
+  if (medium == MemoryMedium::SSD) medium_name = "SSD";
+  spdlog::debug("[TENSOR] {} ({} B) placed in {} at 0x{:x}",
+                _name, total_bytes, medium_name, _address);
 }
 
 void Tensor::print_tensor() {

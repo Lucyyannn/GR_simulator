@@ -8,13 +8,15 @@
 
 #include "../Common.h"
 #include "../Dram.h"
+#include "../Hbm.h"
 #include "../Ssd.h"
 #include "../SimulationConfig.h"
 #include "../memory/StorageController.h"
 
 enum class BenchmarkMedium {
-  DRAM = 0,
-  SSD = 1,
+  HBM = 0,
+  DDR = 1,
+  SSD = 2,
 };
 
 enum class BenchmarkIssueMode {
@@ -23,7 +25,7 @@ enum class BenchmarkIssueMode {
 };
 
 struct MemBenchmarkCase {
-  BenchmarkMedium medium = BenchmarkMedium::DRAM;
+  BenchmarkMedium medium = BenchmarkMedium::HBM;
   bool write = false;
   uint64_t access_size_bytes = 512;
   uint32_t burst_count = 1;
@@ -64,7 +66,8 @@ class MemBenchmarkRunner {
   void write_summary_header(std::ofstream& summary_csv) const;
   void write_detail_header(std::ofstream& detail_csv) const;
 
-  std::unique_ptr<Dram> create_dram() const;
+  std::unique_ptr<Dram> create_hbm() const;
+  std::unique_ptr<Dram> create_ddr() const;
   std::unique_ptr<Ssd> create_ssd() const;
 
   uint64_t round_up(uint64_t value, uint64_t alignment) const;

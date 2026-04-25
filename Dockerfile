@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
 RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 100 && \
     update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-10 100
 
-RUN cd /workspace
+WORKDIR /workspace
 
 # Install CMake 3.22.0 from source
 RUN wget https://github.com/Kitware/CMake/releases/download/v3.22.0/cmake-3.22.0.tar.gz && \
@@ -24,7 +24,9 @@ RUN wget https://github.com/Kitware/CMake/releases/download/v3.22.0/cmake-3.22.0
     make install
 
 # Install specific Python packages with pip
-RUN pip3 install conan==1.57.0 transformers==4.40.1 onnx onnxruntime torch==2.3.1 torchvision optimum
+RUN pip3 install conan==1.57.0 transformers==4.40.1 onnx onnxruntime torch==2.3.1 torchvision optimum 
+
+RUN pip3 install matplotlib
 
 # Final command
 CMD ["echo", "Welcome to GR_Simulator!"]

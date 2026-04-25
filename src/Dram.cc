@@ -8,9 +8,9 @@
 uint32_t Dram::get_channel_id(MemoryAccess* access) {
   uint32_t channel_id;
   if (_n_ch >= 16)
-    channel_id = ipoly_hash_function((new_addr_type)access->dram_address/_config.dram_req_size, 0, _n_ch);
+    channel_id = ipoly_hash_function((new_addr_type)access->dram_address/_address_req_size, 0, _n_ch);
   else
-    channel_id = ipoly_hash_function((new_addr_type)access->dram_address/_config.dram_req_size, 0, 16) % _n_ch;
+    channel_id = ipoly_hash_function((new_addr_type)access->dram_address/_address_req_size, 0, 16) % _n_ch;
   return channel_id;
 }
 
@@ -28,6 +28,9 @@ SimpleDram::SimpleDram(SimulationConfig config)
   _config = config;
   _n_ch = config.dram_channels;
   _period_ps = 1000000 / std::max<uint32_t>(config.dram_freq, 1);
+  _address_base = config.hbm.address_base;
+  _capacity_bytes = config.hbm.capacity_bytes;
+  _address_req_size = config.hbm.req_size;
   _waiting_queue.resize(_n_ch);
   _response_queue.resize(_n_ch);
 }
@@ -91,6 +94,9 @@ DramRamulator::DramRamulator(SimulationConfig config)
   _config = config;
   _cycles = 0;
   _period_ps = 1000000 / std::max<uint32_t>(config.dram_freq, 1);
+  _address_base = config.hbm.address_base;
+  _capacity_bytes = config.hbm.capacity_bytes;
+  _address_req_size = config.hbm.req_size;
   _total_processed_requests.resize(_n_ch);
   _processed_requests.resize(_n_ch);
   for (int ch = 0; ch < _n_ch; ch++) {
@@ -193,44 +199,52 @@ void DramRamulator::print_stat() {
   _mem->print_stats();
 }
 
-DramRamulator2::DramRamulator2(SimulationConfig config) {
-  _n_ch = config.dram_channels;
-  _req_size = config.dram_req_size;
+Ramulator2Memory::Ramulator2Memory(const SimulationConfig& config,
+                                   const TieredMemoryConfig& tier_config,
+                                   std::string device_name)
+    : _tier_config(tier_config), _device_name(std::move(device_name)) {
+  _n_ch = tier_config.channels;
+  _req_size = tier_config.req_size;
   _config = config;
-  _period_ps = 1000000 / std::max<uint32_t>(config.dram_freq, 1);
+  _period_ps = 1000000 / std::max<uint32_t>(tier_config.freq, 1);
+  _address_base = tier_config.address_base;
+  _capacity_bytes = tier_config.capacity_bytes;
+  _address_req_size = tier_config.req_size;
   _mem.resize(_n_ch);
   for (int ch = 0; ch < _n_ch; ch++) {
     _mem[ch] = std::make_unique<NDPSim::Ramulator2>(
-      ch, _n_ch, config.dram_config_path, "Ramulator2", _config.dram_print_interval, 1);
+      ch, _n_ch, tier_config.config_path, _device_name, tier_config.print_interval,
+      std::max<int>(tier_config.nbl, 1));
   }
   _tx_log2 = log2(_req_size);
   _tx_ch_log2 = log2(_n_ch) + _tx_log2;
 }
 
-DramRamulator2::~DramRamulator2() {
+Ramulator2Memory::~Ramulator2Memory() {
 }
 
-bool DramRamulator2::running() {
+bool Ramulator2Memory::running() {
   return _inflight_requests > 0;
 }
 
-void DramRamulator2::cycle() {
+void Ramulator2Memory::cycle() {
   for (int ch = 0; ch < _n_ch; ch++) {
     _mem[ch]->cycle();
   }
 }
 
-bool DramRamulator2::is_full(uint32_t cid, MemoryAccess* request) {
+bool Ramulator2Memory::is_full(uint32_t cid, MemoryAccess* request) {
   return _mem[cid]->full();
 }
 
-void DramRamulator2::push(uint32_t cid, MemoryAccess* request) {
-  addr_type atomic_bytes =_config.dram_req_size;
+void Ramulator2Memory::push(uint32_t cid, MemoryAccess* request) {
+  addr_type atomic_bytes = _tier_config.req_size;
   addr_type target_addr = request->dram_address;
   // align address
   addr_type start_addr = target_addr - (target_addr % atomic_bytes);
   assert(start_addr == target_addr);
   assert(request->size == atomic_bytes);
+  target_addr -= _address_base;
   target_addr = (target_addr >> _tx_ch_log2) << _tx_log2;
   NDPSim::mem_fetch* mf = new NDPSim::mem_fetch();
   mf->addr = target_addr;
@@ -240,24 +254,25 @@ void DramRamulator2::push(uint32_t cid, MemoryAccess* request) {
   mf->origin_data = request;
   _mem[cid]->push(mf);
   _inflight_requests++;
+  _issued_requests++;
 }
 
-bool DramRamulator2::is_empty(uint32_t cid) {
+bool Ramulator2Memory::is_empty(uint32_t cid) {
   bool empty = (_mem[cid]->return_queue_top() == NULL);
   if (!empty) {
-    spdlog::debug("[DramR2] ch={} return_queue non-empty", cid);
+    spdlog::debug("[{}] ch={} return_queue non-empty", _device_name, cid);
   }
   return empty;
 }
 
-MemoryAccess* DramRamulator2::top(uint32_t cid) {
+MemoryAccess* Ramulator2Memory::top(uint32_t cid) {
   assert(!is_empty(cid));
   NDPSim::mem_fetch* mf = _mem[cid]->return_queue_top();
   ((MemoryAccess*)mf->origin_data)->request = false;
   return (MemoryAccess*)mf->origin_data;
 }
 
-void DramRamulator2::pop(uint32_t cid) {
+void Ramulator2Memory::pop(uint32_t cid) {
   assert(!is_empty(cid));
   NDPSim::mem_fetch* mf = _mem[cid]->return_queue_pop();
   // origin_data (MemoryAccess*) is owned by Core after top(); caller must
@@ -266,8 +281,15 @@ void DramRamulator2::pop(uint32_t cid) {
   delete mf;
 }
 
-void DramRamulator2::print_stat() {
+void Ramulator2Memory::print_stat() {
+  if (_issued_requests == 0) {
+    spdlog::info("[{}] Skip stats because no request was issued", _device_name);
+    return;
+  }
   for (int ch = 0; ch < _n_ch; ch++) {
     _mem[ch]->print(stdout);
   }
 }
+
+Ddr::Ddr(const SimulationConfig& config)
+    : Ramulator2Memory(config, config.ddr, "DDR") {}
