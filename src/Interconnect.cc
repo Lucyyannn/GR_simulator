@@ -104,6 +104,12 @@ void SimpleInterconnect::pop(uint32_t nid) {
   // spdlog::trace("PUSH {}", _cycles);
 }
 
+void SimpleInterconnect::advance_idle_cycles(cycle_type cycles) {
+  if (cycles == 0) return;
+  assert(!running());
+  _cycles += cycles;
+}
+
 
 Booksim2Interconnect::Booksim2Interconnect(SimulationConfig config) {
   _config = config;

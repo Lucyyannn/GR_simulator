@@ -15,6 +15,8 @@ class Interconnect {
   virtual MemoryAccess* top(uint32_t nid) = 0;
   virtual void pop(uint32_t nid) = 0;
   virtual void print_stats() = 0;
+  virtual bool supports_fast_forward() const { return false; }
+  virtual void advance_idle_cycles(cycle_type cycles) { (void)cycles; }
 
  protected:
   SimulationConfig _config;
@@ -36,6 +38,8 @@ class SimpleInterconnect : public Interconnect {
   virtual MemoryAccess* top(uint32_t nid) override;
   virtual void pop(uint32_t nid) override;
   virtual void print_stats() override {}
+  virtual bool supports_fast_forward() const override { return true; }
+  virtual void advance_idle_cycles(cycle_type cycles) override;
 
  private:
   uint32_t _latency;

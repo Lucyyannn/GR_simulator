@@ -6,6 +6,7 @@ cache/
 .continue/
 AGENTS.md
 PLAN.md
+baseline_flow.md
 .codex
 detail.csv
 *.log

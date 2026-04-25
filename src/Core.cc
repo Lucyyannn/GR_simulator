@@ -187,6 +187,72 @@ bool Core::running() {
   return running;
 }
 
+bool Core::can_fast_forward_stalled() {
+  if (!_finished_tiles.empty()) return false;
+  if (!_request_queue.empty()) return false;
+  if (!_ld_inst_queue.empty() || !_st_inst_queue.empty() ||
+      !_ex_inst_queue.empty()) {
+    return false;
+  }
+  if (!_compute_pipeline.empty() || !_vector_pipeline.empty()) return false;
+
+  bool has_blocked_tile = false;
+  for (auto& tile : _tiles) {
+    if (tile->instructions.empty()) return false;
+    std::unique_ptr<Instruction>& inst = tile->instructions.front();
+    int buffer_id = inst->dest_addr >= ACCUM_SPAD_BASE ? tile->accum_spad_id
+                                                       : tile->spad_id;
+    Sram* buffer = inst->dest_addr >= ACCUM_SPAD_BASE ? &_acc_spad : &_spad;
+
+    if (inst->opcode == Opcode::MOVIN) {
+      return false;
+    } else if (inst->opcode == Opcode::MOVOUT ||
+               inst->opcode == Opcode::MOVOUT_POOL) {
+      if (buffer->check_hit(inst->dest_addr, buffer_id)) return false;
+      has_blocked_tile = true;
+    } else {
+      inst->spad_id = tile->spad_id;
+      inst->accum_spad_id = tile->accum_spad_id;
+      if (can_issue_compute(inst)) return false;
+      has_blocked_tile = true;
+    }
+  }
+
+  return has_blocked_tile || _waiting_write_reqs > 0 || !running();
+}
+
+void Core::add_fast_forward_stats(cycle_type cycles) {
+  if (cycles == 0) return;
+  bool was_running = running();
+  _stat_memory_idle_cycle += cycles;
+  if (!was_running) _stat_idle_cycle += cycles;
+}
+
+void Core::advance_stalled_cycles(cycle_type cycles) {
+  while (cycles > 0) {
+    cycle_type step = cycles;
+    if (_config.core_print_interval != 0) {
+      cycle_type next_print =
+          ((_core_cycle / _config.core_print_interval) + 1) *
+          _config.core_print_interval;
+      if (next_print > _core_cycle && next_print - _core_cycle < step) {
+        step = next_print - _core_cycle;
+      } else if (next_print > _core_cycle && next_print - _core_cycle == step) {
+        step = next_print - _core_cycle;
+      }
+    }
+
+    add_fast_forward_stats(step);
+    _core_cycle += step;
+    cycles -= step;
+
+    if (_config.core_print_interval != 0 &&
+        _core_cycle % _config.core_print_interval == 0) {
+      print_current_stats();
+    }
+  }
+}
+
 bool Core::has_memory_request() { return _request_queue.size() > 0; }
 
 void Core::pop_memory_request() {

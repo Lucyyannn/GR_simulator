@@ -29,6 +29,8 @@ class Core {
   virtual void print_current_stats();
 
   virtual cycle_type get_compute_cycles() { return _stat_tot_compute_cycle; }
+  virtual bool can_fast_forward_stalled();
+  virtual void advance_stalled_cycles(cycle_type cycles);
 
  protected:
   virtual bool can_issue_compute(std::unique_ptr<Instruction>& inst);
@@ -40,6 +42,7 @@ class Core {
   virtual void handle_st_inst_queue();
   virtual cycle_type calculate_add_tree_iterations(uint32_t vector_size);
   virtual cycle_type calculate_vector_op_iterations(uint32_t vector_size);
+  void add_fast_forward_stats(cycle_type cycles);
 
   const uint32_t _id;
   const SimulationConfig _config;

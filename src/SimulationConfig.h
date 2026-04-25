@@ -124,6 +124,7 @@ struct SimulationConfig {
   uint32_t precision;
   uint32_t full_precision = 4;
   std::string layout;
+  bool enable_fast_forward = false;
 
   /*
    * This map stores the partition information: <partition_id, core_id>

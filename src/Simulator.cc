@@ -1,6 +1,7 @@
 #include "Simulator.h"
 
 #include <filesystem>
+#include <limits>
 #include <string>
 
 #include "SystolicOS.h"
@@ -259,6 +260,7 @@ void Simulator::cycle() {
       }
       _icnt->cycle();
     }
+    try_fast_forward();
   }
   /* Print simulation stats */
   for (int core_id = 0; core_id < _n_cores; core_id++) {
@@ -332,6 +334,59 @@ uint64_t Simulator::set_cycle_mask() {
     _icnt_time += _icnt_period;
   }
   return minimum_time;
+}
+
+uint64_t Simulator::count_ticks_before(uint64_t next_tick_ps,
+                                       uint64_t period_ps,
+                                       uint64_t target_ps) const {
+  if (period_ps == 0 || next_tick_ps >= target_ps) return 0;
+  return ((target_ps - 1 - next_tick_ps) / period_ps) + 1;
+}
+
+bool Simulator::can_fast_forward_to(uint64_t target_ps) {
+  if (!_config.enable_fast_forward) return false;
+  if (_language_mode) return false;
+  if (_icnt_interval != 0) return false;
+  if (!_models.empty()) return false;
+  if (!_storage_controller || !_storage_controller->has_pending()) return false;
+  if (_storage_controller->has_ready_response()) return false;
+  if (!_icnt || !_icnt->supports_fast_forward() || _icnt->running()) return false;
+  if (!_scheduler || !_scheduler->can_fast_forward_waiting()) return false;
+
+  uint64_t next_tick = MIN3(_core_time, _mem_time, _icnt_time);
+  if (target_ps <= next_tick) return false;
+
+  for (auto& core : _cores) {
+    if (!core->can_fast_forward_stalled()) return false;
+    if (core->has_memory_request()) return false;
+  }
+  return true;
+}
+
+void Simulator::try_fast_forward() {
+  if (!_config.enable_fast_forward || !_storage_controller) return;
+
+  uint64_t target_ps = _storage_controller->next_event_time_ps();
+  if (target_ps == std::numeric_limits<uint64_t>::max()) return;
+  if (!can_fast_forward_to(target_ps)) return;
+
+  uint64_t core_ticks = count_ticks_before(_core_time, _core_period, target_ps);
+  uint64_t icnt_ticks = count_ticks_before(_icnt_time, _icnt_period, target_ps);
+  uint64_t mem_ticks = count_ticks_before(_mem_time, _mem_period, target_ps);
+  if (core_ticks == 0 && icnt_ticks == 0 && mem_ticks == 0) return;
+
+  for (auto& core : _cores) {
+    core->advance_stalled_cycles(core_ticks);
+  }
+  if (_icnt && icnt_ticks > 0) _icnt->advance_idle_cycles(icnt_ticks);
+
+  _core_cycles += core_ticks;
+  _icnt_cycle += icnt_ticks;
+  _mem_cycles += mem_ticks;
+  _core_time += core_ticks * _core_period;
+  _icnt_time += icnt_ticks * _icnt_period;
+  _mem_time += mem_ticks * _mem_period;
+  _last_sim_time_ps = std::max(_last_sim_time_ps, target_ps);
 }
 
 uint32_t Simulator::get_dest_node(MemoryAccess *access) {

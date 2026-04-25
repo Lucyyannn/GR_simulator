@@ -403,6 +403,7 @@ SimulationConfig initialize_config(json config) {
   parsed_config.scheduler_type = get_config_value<std::string>(config, "scheduler");
   parsed_config.precision = get_config_value<uint32_t>(config, "precision");
   parsed_config.layout = get_config_value<std::string>(config, "layout");
+  parsed_config.enable_fast_forward = config.value("enable_fast_forward", false);
 
   if (config.contains("partition")) {
     for (int i=0; i<parsed_config.num_cores; i++) {

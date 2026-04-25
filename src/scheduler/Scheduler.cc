@@ -173,6 +173,18 @@ bool Scheduler::tile_queue_empty() {
   return all_empty;
 }
 
+bool Scheduler::can_fast_forward_waiting() const {
+  for (const auto& [_, queue] : _executable_tile_queue) {
+    if (!queue.empty()) return false;
+  }
+  for (const auto& [_, queue] : _core_executable_tile_queue) {
+    if (!queue.empty()) return false;
+  }
+
+  if (_request_queue.empty()) return true;
+  return !_active_layers_map.empty();
+}
+
 void Scheduler::finish_tile(uint32_t core_id, int layer_id) {
   spdlog::debug("Layer {} Core {} Finish Tile at {} Remain tile {}", layer_id, core_id,
                 *_core_cycle, _active_layers_map[layer_id].remain_tiles);

@@ -21,6 +21,7 @@ class Scheduler {
     virtual void finish_tile(uint32_t core_id, int layer_id);
     virtual bool empty();
     virtual bool tile_queue_empty();
+    virtual bool can_fast_forward_waiting() const;
   protected:
     typedef struct {
       uint32_t id;
