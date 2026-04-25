@@ -8,6 +8,7 @@
 #include "Mapping.h"
 
 class Ssd;
+class StorageController;
 
 class Model {
   public:
@@ -37,8 +38,10 @@ class Model {
     virtual void prepare_regressive();
 
     virtual void initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_table);
-    virtual void initialize_weight(std::vector<std::unique_ptr<Tensor>>& weight_table);
-    virtual void prefill_ssd_tensors(Ssd* ssd);
+	    virtual void initialize_weight(std::vector<std::unique_ptr<Tensor>>& weight_table);
+	    virtual void prefill_ssd_tensors(Ssd* ssd);
+	    virtual uint64_t prepare_baseline_storage(StorageController* controller,
+	                                              uint64_t now_ps);
   protected:
 
     uint32_t _id;

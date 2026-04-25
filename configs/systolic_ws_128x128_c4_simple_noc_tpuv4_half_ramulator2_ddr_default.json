@@ -143,6 +143,6 @@
 
   "precision" : 2,
   "layout" : "NHWC",
-  "enable_fast_forward" : true,
+  "enable_fast_forward" : false,
   "scheduler" : "simple"
 }

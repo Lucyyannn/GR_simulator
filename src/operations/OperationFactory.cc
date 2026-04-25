@@ -10,14 +10,20 @@
 #include "GlobalAvgPool.h"
 #include "Operation.h"
 #include "Attention.h"
+#include "Concat.h"
 #include "Dummy.h"
 #include "Embedding.h"
+#include "Elementwise.h"
 #include "EmbedLayerNorm.h"
+#include "LayerNorm.h"
 #include "SkipLayerNorm.h"
+#include "BiasAct.h"
 #include "BiasGelu.h"
 // #include "MatMul.h"
 #include "MaxPool.h"
 #include "Softmax.h"
+#include "Split.h"
+#include "View.h"
 
 SimulationConfig OperationFactory::_config = SimulationConfig();
 
@@ -128,10 +134,22 @@ std::unique_ptr<Operation> OperationFactory::create_from_trace(
     return std::make_unique<Flatten>(_config, model, entry.name, attrs, target_core);
   } else if (optype == "Embedding") {
     return std::make_unique<Embedding>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "Split") {
+    return std::make_unique<Split>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "View") {
+    return std::make_unique<View>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "Concat") {
+    return std::make_unique<Concat>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "Elementwise") {
+    return std::make_unique<Elementwise>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "LayerNorm") {
+    return std::make_unique<LayerNorm>(_config, model, entry.name, attrs, target_core);
   } else if (optype == "SkipLayerNorm") {
     return std::make_unique<SkipLayerNorm>(_config, model, entry.name, attrs, target_core);
   } else if (optype == "BiasGelu") {
     return std::make_unique<BiasGelu>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "BiasAct") {
+    return std::make_unique<BiasAct>(_config, model, entry.name, attrs, target_core);
   } else if (optype == "Softmax") {
     return std::make_unique<Softmax>(_config, model, entry.name, attrs, target_core);
   }

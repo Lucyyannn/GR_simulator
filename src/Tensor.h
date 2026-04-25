@@ -26,8 +26,10 @@ class Tensor {
   uint32_t num_child_nodes() { return _child_nodes.size(); }
   uint32_t get_child_node(uint32_t id) { return _child_nodes[id]; }
 
-  void allocate_tensor(int precision);
-  addr_type get_address() { return _address; }
+	  void allocate_tensor(int precision);
+	  void relocate(MemoryMedium medium);
+	  void set_address(addr_type address) { _address = address; }
+	  addr_type get_address() { return _address; }
   uint64_t get_size() { return _size; }
   void print_tensor();
 

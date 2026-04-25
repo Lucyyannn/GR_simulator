@@ -141,8 +141,13 @@ void Simulator::handle_model() {
 
     launch_model->initialize_model(_weight_table[launch_model->get_name()]);
     launch_model->prefill_ssd_tensors(_ssd.get());
+    uint64_t preload_finish_ps =
+        launch_model->prepare_baseline_storage(_storage_controller.get(),
+                                               _core_time);
+    advance_idle_time_to(preload_finish_ps);
     launch_model->set_request_time(_core_time);
-    spdlog::info("Schedule model: {} at {} us", launch_model->get_name(), _core_time);
+    spdlog::info("Schedule model: {} at {:.6f} us",
+                 launch_model->get_name(), ps_to_us(_core_time));
     _scheduler->schedule_model(std::move(launch_model), 1);
   }
 }
@@ -341,6 +346,26 @@ uint64_t Simulator::count_ticks_before(uint64_t next_tick_ps,
                                        uint64_t target_ps) const {
   if (period_ps == 0 || next_tick_ps >= target_ps) return 0;
   return ((target_ps - 1 - next_tick_ps) / period_ps) + 1;
+}
+
+void Simulator::advance_idle_time_to(uint64_t target_ps) {
+  if (target_ps <= _core_time && target_ps <= _icnt_time && target_ps <= _mem_time)
+    return;
+
+  uint64_t core_ticks = count_ticks_before(_core_time, _core_period, target_ps);
+  uint64_t icnt_ticks = count_ticks_before(_icnt_time, _icnt_period, target_ps);
+  uint64_t mem_ticks = count_ticks_before(_mem_time, _mem_period, target_ps);
+  for (auto& core : _cores) {
+    core->advance_stalled_cycles(core_ticks);
+  }
+  if (_icnt && icnt_ticks > 0) _icnt->advance_idle_cycles(icnt_ticks);
+  _core_cycles += core_ticks;
+  _icnt_cycle += icnt_ticks;
+  _mem_cycles += mem_ticks;
+  _core_time = std::max(_core_time, target_ps);
+  _icnt_time = std::max(_icnt_time, target_ps);
+  _mem_time = std::max(_mem_time, target_ps);
+  _last_sim_time_ps = std::max(_last_sim_time_ps, target_ps);
 }
 
 bool Simulator::can_fast_forward_to(uint64_t target_ps) {

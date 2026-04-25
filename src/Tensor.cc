@@ -118,6 +118,15 @@ void Tensor::allocate_tensor(int precision) {
                 _name, total_bytes, medium_name, _address);
 }
 
+void Tensor::relocate(MemoryMedium medium) {
+  _address = allocate_address_in_medium(static_cast<uint32_t>(_size), medium);
+  const char* medium_name = "HBM";
+  if (medium == MemoryMedium::DDR) medium_name = "DDR";
+  if (medium == MemoryMedium::SSD) medium_name = "SSD";
+  spdlog::debug("[TENSOR] {} relocated to {} at 0x{:x}",
+                _name, medium_name, _address);
+}
+
 void Tensor::print_tensor() {
   spdlog::info("Tensor: {} {} {} {}", _name, _src_node, _dims, _size);
 }

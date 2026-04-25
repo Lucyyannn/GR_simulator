@@ -37,6 +37,12 @@ TensorEntry parse_tensor(const nlohmann::json& j) {
   }
   entry.dtype = j.value("dtype", "float16");
   entry.is_weight = j.value("is_weight", false);
+  entry.logical_id = j.value("logical_id", "");
+  entry.role = j.value("role", "");
+  entry.initial_medium = j.value("initial_medium", "");
+  entry.runtime_medium = j.value("runtime_medium", "");
+  entry.layer_id = j.value("layer_id", 0);
+  entry.user_id = j.value("user_id", 0);
   return entry;
 }
 
@@ -95,6 +101,8 @@ TraceGraph TraceParser::parse(const std::string& json_path) {
     graph.metadata.format_version = meta.value("format_version", "1.0");
     graph.metadata.model_name = meta.value("model_name", "unknown");
     graph.metadata.layout = meta.value("layout", "NHWC");
+    graph.metadata.fail_on_unknown_op = meta.value("fail_on_unknown_op", false);
+    graph.metadata.baseline_preload = meta.value("baseline_preload", false);
   }
 
   if (root.contains("operators") && root["operators"].is_array()) {

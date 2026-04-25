@@ -1,0 +1,4480 @@
+{
+  "metadata": {
+    "format_version": "1.0",
+    "model_name": "hstu_8layer_baseline_small",
+    "model_type": "hstu_ranking",
+    "layout": "NHWC",
+    "num_layers": 8,
+    "baseline_preload": true,
+    "fail_on_unknown_op": true
+  },
+  "operators": [
+    {
+      "id": 0,
+      "name": "aten::embedding",
+      "inputs": [
+        {
+          "name": "embedding_table",
+          "shape": [
+            128,
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "embedding.table",
+          "role": "embedding_table"
+        },
+        {
+          "name": "candidate_ids",
+          "shape": [
+            4
+          ],
+          "dtype": "int64",
+          "runtime_medium": "hbm",
+          "role": "indices"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "x0",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation"
+        }
+      ],
+      "attrs": {
+        "indices_values": "0,1,2,3"
+      }
+    },
+    {
+      "id": 1,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "x0",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation"
+        },
+        {
+          "name": "layer0.w1",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer0.w1",
+          "role": "weight",
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.b1",
+          "shape": [
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer0.b1",
+          "role": "weight",
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer0.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 2,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer0.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer0.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 3,
+      "name": "aten::split",
+      "inputs": [
+        {
+          "name": "layer0.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer0.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "attrs": {
+        "axis": 1
+      }
+    },
+    {
+      "id": 4,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer0.kc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer0.kc",
+          "role": "kv_cache_k",
+          "layer_id": 0,
+          "user_id": 0
+        },
+        {
+          "name": "layer0.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer0.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 5,
+      "name": "aten::transpose",
+      "inputs": [
+        {
+          "name": "layer0.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer0.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "attrs": {
+        "dims": "1,0"
+      }
+    },
+    {
+      "id": 6,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer0.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer0.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 7,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer0.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer0.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 8,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer0.vc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer0.vc",
+          "role": "kv_cache_v",
+          "layer_id": 0,
+          "user_id": 0
+        },
+        {
+          "name": "layer0.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer0.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 9,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer0.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer0.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 10,
+      "name": "aten::layer_norm",
+      "inputs": [
+        {
+          "name": "layer0.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.ln_w",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer0.ln_w",
+          "role": "weight",
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.ln_b",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer0.ln_b",
+          "role": "weight",
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer0.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 11,
+      "name": "aten::mul",
+      "inputs": [
+        {
+          "name": "layer0.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer0.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 12,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "layer0.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.w2",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer0.w2",
+          "role": "weight",
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.b2",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer0.b2",
+          "role": "weight",
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "x1",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 13,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "x1",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation"
+        },
+        {
+          "name": "layer1.w1",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer1.w1",
+          "role": "weight",
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.b1",
+          "shape": [
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer1.b1",
+          "role": "weight",
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer1.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 14,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer1.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer1.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 15,
+      "name": "aten::split",
+      "inputs": [
+        {
+          "name": "layer1.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer1.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "attrs": {
+        "axis": 1
+      }
+    },
+    {
+      "id": 16,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer1.kc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer1.kc",
+          "role": "kv_cache_k",
+          "layer_id": 1,
+          "user_id": 0
+        },
+        {
+          "name": "layer1.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer1.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 17,
+      "name": "aten::transpose",
+      "inputs": [
+        {
+          "name": "layer1.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer1.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "attrs": {
+        "dims": "1,0"
+      }
+    },
+    {
+      "id": 18,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer1.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer1.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 19,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer1.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer1.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 20,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer1.vc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer1.vc",
+          "role": "kv_cache_v",
+          "layer_id": 1,
+          "user_id": 0
+        },
+        {
+          "name": "layer1.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer1.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 21,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer1.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer1.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 22,
+      "name": "aten::layer_norm",
+      "inputs": [
+        {
+          "name": "layer1.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.ln_w",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer1.ln_w",
+          "role": "weight",
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.ln_b",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer1.ln_b",
+          "role": "weight",
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer1.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 23,
+      "name": "aten::mul",
+      "inputs": [
+        {
+          "name": "layer1.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer1.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 24,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "layer1.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.w2",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer1.w2",
+          "role": "weight",
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.b2",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer1.b2",
+          "role": "weight",
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "x2",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 25,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "x2",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation"
+        },
+        {
+          "name": "layer2.w1",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer2.w1",
+          "role": "weight",
+          "layer_id": 2
+        },
+        {
+          "name": "layer2.b1",
+          "shape": [
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer2.b1",
+          "role": "weight",
+          "layer_id": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer2.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 26,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer2.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer2.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 27,
+      "name": "aten::split",
+      "inputs": [
+        {
+          "name": "layer2.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer2.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        },
+        {
+          "name": "layer2.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        },
+        {
+          "name": "layer2.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        },
+        {
+          "name": "layer2.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "attrs": {
+        "axis": 1
+      }
+    },
+    {
+      "id": 28,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer2.kc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer2.kc",
+          "role": "kv_cache_k",
+          "layer_id": 2,
+          "user_id": 0
+        },
+        {
+          "name": "layer2.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer2.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 29,
+      "name": "aten::transpose",
+      "inputs": [
+        {
+          "name": "layer2.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer2.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "attrs": {
+        "dims": "1,0"
+      }
+    },
+    {
+      "id": 30,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer2.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        },
+        {
+          "name": "layer2.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer2.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 31,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer2.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer2.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 32,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer2.vc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer2.vc",
+          "role": "kv_cache_v",
+          "layer_id": 2,
+          "user_id": 0
+        },
+        {
+          "name": "layer2.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer2.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 33,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer2.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        },
+        {
+          "name": "layer2.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer2.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 34,
+      "name": "aten::layer_norm",
+      "inputs": [
+        {
+          "name": "layer2.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        },
+        {
+          "name": "layer2.ln_w",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer2.ln_w",
+          "role": "weight",
+          "layer_id": 2
+        },
+        {
+          "name": "layer2.ln_b",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer2.ln_b",
+          "role": "weight",
+          "layer_id": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer2.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 35,
+      "name": "aten::mul",
+      "inputs": [
+        {
+          "name": "layer2.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        },
+        {
+          "name": "layer2.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer2.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 36,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "layer2.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        },
+        {
+          "name": "layer2.w2",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer2.w2",
+          "role": "weight",
+          "layer_id": 2
+        },
+        {
+          "name": "layer2.b2",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer2.b2",
+          "role": "weight",
+          "layer_id": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "x3",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 2
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 37,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "x3",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation"
+        },
+        {
+          "name": "layer3.w1",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer3.w1",
+          "role": "weight",
+          "layer_id": 3
+        },
+        {
+          "name": "layer3.b1",
+          "shape": [
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer3.b1",
+          "role": "weight",
+          "layer_id": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer3.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 38,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer3.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer3.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 39,
+      "name": "aten::split",
+      "inputs": [
+        {
+          "name": "layer3.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer3.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        },
+        {
+          "name": "layer3.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        },
+        {
+          "name": "layer3.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        },
+        {
+          "name": "layer3.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "attrs": {
+        "axis": 1
+      }
+    },
+    {
+      "id": 40,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer3.kc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer3.kc",
+          "role": "kv_cache_k",
+          "layer_id": 3,
+          "user_id": 0
+        },
+        {
+          "name": "layer3.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer3.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 41,
+      "name": "aten::transpose",
+      "inputs": [
+        {
+          "name": "layer3.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer3.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "attrs": {
+        "dims": "1,0"
+      }
+    },
+    {
+      "id": 42,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer3.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        },
+        {
+          "name": "layer3.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer3.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 43,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer3.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer3.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 44,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer3.vc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer3.vc",
+          "role": "kv_cache_v",
+          "layer_id": 3,
+          "user_id": 0
+        },
+        {
+          "name": "layer3.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer3.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 45,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer3.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        },
+        {
+          "name": "layer3.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer3.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 46,
+      "name": "aten::layer_norm",
+      "inputs": [
+        {
+          "name": "layer3.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        },
+        {
+          "name": "layer3.ln_w",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer3.ln_w",
+          "role": "weight",
+          "layer_id": 3
+        },
+        {
+          "name": "layer3.ln_b",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer3.ln_b",
+          "role": "weight",
+          "layer_id": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer3.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 47,
+      "name": "aten::mul",
+      "inputs": [
+        {
+          "name": "layer3.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        },
+        {
+          "name": "layer3.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer3.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 48,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "layer3.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        },
+        {
+          "name": "layer3.w2",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer3.w2",
+          "role": "weight",
+          "layer_id": 3
+        },
+        {
+          "name": "layer3.b2",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer3.b2",
+          "role": "weight",
+          "layer_id": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "x4",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 3
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 49,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "x4",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation"
+        },
+        {
+          "name": "layer4.w1",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer4.w1",
+          "role": "weight",
+          "layer_id": 4
+        },
+        {
+          "name": "layer4.b1",
+          "shape": [
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer4.b1",
+          "role": "weight",
+          "layer_id": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer4.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 50,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer4.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer4.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 51,
+      "name": "aten::split",
+      "inputs": [
+        {
+          "name": "layer4.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer4.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        },
+        {
+          "name": "layer4.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        },
+        {
+          "name": "layer4.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        },
+        {
+          "name": "layer4.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "attrs": {
+        "axis": 1
+      }
+    },
+    {
+      "id": 52,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer4.kc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer4.kc",
+          "role": "kv_cache_k",
+          "layer_id": 4,
+          "user_id": 0
+        },
+        {
+          "name": "layer4.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer4.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 53,
+      "name": "aten::transpose",
+      "inputs": [
+        {
+          "name": "layer4.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer4.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "attrs": {
+        "dims": "1,0"
+      }
+    },
+    {
+      "id": 54,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer4.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        },
+        {
+          "name": "layer4.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer4.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 55,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer4.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer4.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 56,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer4.vc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer4.vc",
+          "role": "kv_cache_v",
+          "layer_id": 4,
+          "user_id": 0
+        },
+        {
+          "name": "layer4.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer4.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 57,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer4.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        },
+        {
+          "name": "layer4.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer4.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 58,
+      "name": "aten::layer_norm",
+      "inputs": [
+        {
+          "name": "layer4.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        },
+        {
+          "name": "layer4.ln_w",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer4.ln_w",
+          "role": "weight",
+          "layer_id": 4
+        },
+        {
+          "name": "layer4.ln_b",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer4.ln_b",
+          "role": "weight",
+          "layer_id": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer4.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 59,
+      "name": "aten::mul",
+      "inputs": [
+        {
+          "name": "layer4.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        },
+        {
+          "name": "layer4.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer4.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 60,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "layer4.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        },
+        {
+          "name": "layer4.w2",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer4.w2",
+          "role": "weight",
+          "layer_id": 4
+        },
+        {
+          "name": "layer4.b2",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer4.b2",
+          "role": "weight",
+          "layer_id": 4
+        }
+      ],
+      "outputs": [
+        {
+          "name": "x5",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 4
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 61,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "x5",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation"
+        },
+        {
+          "name": "layer5.w1",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer5.w1",
+          "role": "weight",
+          "layer_id": 5
+        },
+        {
+          "name": "layer5.b1",
+          "shape": [
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer5.b1",
+          "role": "weight",
+          "layer_id": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer5.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 62,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer5.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer5.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 63,
+      "name": "aten::split",
+      "inputs": [
+        {
+          "name": "layer5.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer5.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        },
+        {
+          "name": "layer5.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        },
+        {
+          "name": "layer5.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        },
+        {
+          "name": "layer5.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "attrs": {
+        "axis": 1
+      }
+    },
+    {
+      "id": 64,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer5.kc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer5.kc",
+          "role": "kv_cache_k",
+          "layer_id": 5,
+          "user_id": 0
+        },
+        {
+          "name": "layer5.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer5.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 65,
+      "name": "aten::transpose",
+      "inputs": [
+        {
+          "name": "layer5.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer5.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "attrs": {
+        "dims": "1,0"
+      }
+    },
+    {
+      "id": 66,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer5.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        },
+        {
+          "name": "layer5.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer5.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 67,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer5.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer5.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 68,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer5.vc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer5.vc",
+          "role": "kv_cache_v",
+          "layer_id": 5,
+          "user_id": 0
+        },
+        {
+          "name": "layer5.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer5.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 69,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer5.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        },
+        {
+          "name": "layer5.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer5.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 70,
+      "name": "aten::layer_norm",
+      "inputs": [
+        {
+          "name": "layer5.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        },
+        {
+          "name": "layer5.ln_w",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer5.ln_w",
+          "role": "weight",
+          "layer_id": 5
+        },
+        {
+          "name": "layer5.ln_b",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer5.ln_b",
+          "role": "weight",
+          "layer_id": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer5.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 71,
+      "name": "aten::mul",
+      "inputs": [
+        {
+          "name": "layer5.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        },
+        {
+          "name": "layer5.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer5.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 72,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "layer5.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        },
+        {
+          "name": "layer5.w2",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer5.w2",
+          "role": "weight",
+          "layer_id": 5
+        },
+        {
+          "name": "layer5.b2",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer5.b2",
+          "role": "weight",
+          "layer_id": 5
+        }
+      ],
+      "outputs": [
+        {
+          "name": "x6",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 5
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 73,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "x6",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation"
+        },
+        {
+          "name": "layer6.w1",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer6.w1",
+          "role": "weight",
+          "layer_id": 6
+        },
+        {
+          "name": "layer6.b1",
+          "shape": [
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer6.b1",
+          "role": "weight",
+          "layer_id": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer6.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 74,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer6.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer6.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 75,
+      "name": "aten::split",
+      "inputs": [
+        {
+          "name": "layer6.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer6.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        },
+        {
+          "name": "layer6.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        },
+        {
+          "name": "layer6.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        },
+        {
+          "name": "layer6.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "attrs": {
+        "axis": 1
+      }
+    },
+    {
+      "id": 76,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer6.kc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer6.kc",
+          "role": "kv_cache_k",
+          "layer_id": 6,
+          "user_id": 0
+        },
+        {
+          "name": "layer6.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer6.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 77,
+      "name": "aten::transpose",
+      "inputs": [
+        {
+          "name": "layer6.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer6.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "attrs": {
+        "dims": "1,0"
+      }
+    },
+    {
+      "id": 78,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer6.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        },
+        {
+          "name": "layer6.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer6.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 79,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer6.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer6.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 80,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer6.vc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer6.vc",
+          "role": "kv_cache_v",
+          "layer_id": 6,
+          "user_id": 0
+        },
+        {
+          "name": "layer6.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer6.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 81,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer6.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        },
+        {
+          "name": "layer6.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer6.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 82,
+      "name": "aten::layer_norm",
+      "inputs": [
+        {
+          "name": "layer6.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        },
+        {
+          "name": "layer6.ln_w",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer6.ln_w",
+          "role": "weight",
+          "layer_id": 6
+        },
+        {
+          "name": "layer6.ln_b",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer6.ln_b",
+          "role": "weight",
+          "layer_id": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer6.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 83,
+      "name": "aten::mul",
+      "inputs": [
+        {
+          "name": "layer6.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        },
+        {
+          "name": "layer6.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer6.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 84,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "layer6.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        },
+        {
+          "name": "layer6.w2",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer6.w2",
+          "role": "weight",
+          "layer_id": 6
+        },
+        {
+          "name": "layer6.b2",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer6.b2",
+          "role": "weight",
+          "layer_id": 6
+        }
+      ],
+      "outputs": [
+        {
+          "name": "x7",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 6
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 85,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "x7",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation"
+        },
+        {
+          "name": "layer7.w1",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer7.w1",
+          "role": "weight",
+          "layer_id": 7
+        },
+        {
+          "name": "layer7.b1",
+          "shape": [
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer7.b1",
+          "role": "weight",
+          "layer_id": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer7.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 86,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer7.z",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer7.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 87,
+      "name": "aten::split",
+      "inputs": [
+        {
+          "name": "layer7.zact",
+          "shape": [
+            4,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer7.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        },
+        {
+          "name": "layer7.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        },
+        {
+          "name": "layer7.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        },
+        {
+          "name": "layer7.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "attrs": {
+        "axis": 1
+      }
+    },
+    {
+      "id": 88,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer7.kc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer7.kc",
+          "role": "kv_cache_k",
+          "layer_id": 7,
+          "user_id": 0
+        },
+        {
+          "name": "layer7.k",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer7.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 89,
+      "name": "aten::transpose",
+      "inputs": [
+        {
+          "name": "layer7.k_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer7.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "attrs": {
+        "dims": "1,0"
+      }
+    },
+    {
+      "id": 90,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer7.q",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        },
+        {
+          "name": "layer7.k_all_t",
+          "shape": [
+            16,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer7.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 91,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "layer7.score",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer7.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 92,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "layer7.vc",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user0.layer7.vc",
+          "role": "kv_cache_v",
+          "layer_id": 7,
+          "user_id": 0
+        },
+        {
+          "name": "layer7.v",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer7.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "attrs": {
+        "axis": 0
+      }
+    },
+    {
+      "id": 93,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "layer7.attn",
+          "shape": [
+            4,
+            8
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        },
+        {
+          "name": "layer7.v_all",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer7.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 94,
+      "name": "aten::layer_norm",
+      "inputs": [
+        {
+          "name": "layer7.av",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        },
+        {
+          "name": "layer7.ln_w",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer7.ln_w",
+          "role": "weight",
+          "layer_id": 7
+        },
+        {
+          "name": "layer7.ln_b",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer7.ln_b",
+          "role": "weight",
+          "layer_id": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer7.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 95,
+      "name": "aten::mul",
+      "inputs": [
+        {
+          "name": "layer7.av_norm",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        },
+        {
+          "name": "layer7.u",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "layer7.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 96,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "layer7.gated",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        },
+        {
+          "name": "layer7.w2",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer7.w2",
+          "role": "weight",
+          "layer_id": 7
+        },
+        {
+          "name": "layer7.b2",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer7.b2",
+          "role": "weight",
+          "layer_id": 7
+        }
+      ],
+      "outputs": [
+        {
+          "name": "x8",
+          "shape": [
+            4,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "layer_id": 7
+        }
+      ],
+      "attrs": {}
+    }
+  ]
+}

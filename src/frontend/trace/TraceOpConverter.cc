@@ -13,6 +13,24 @@ std::string TraceOpConverter::shape_to_str(const std::vector<uint32_t>& shape) {
   return result;
 }
 
+std::string TraceOpConverter::join_shapes(const std::vector<TensorEntry>& tensors) {
+  std::string result;
+  for (size_t i = 0; i < tensors.size(); i++) {
+    if (i != 0) result += ";";
+    result += shape_to_str(tensors[i].shape);
+  }
+  return result;
+}
+
+std::string TraceOpConverter::join_names(const std::vector<TensorEntry>& tensors) {
+  std::string result;
+  for (size_t i = 0; i < tensors.size(); i++) {
+    if (i != 0) result += ";";
+    result += tensors[i].name;
+  }
+  return result;
+}
+
 std::vector<uint32_t> TraceOpConverter::parse_dims(const std::string& s) {
   std::vector<uint32_t> dims;
   std::istringstream iss(s);
@@ -49,6 +67,17 @@ ConvertedOp TraceOpConverter::convert(const OpEntry& entry) {
     return convert_gelu(entry);
   if (name == "aten::silu" || name == "silu")
     return convert_silu(entry);
+  if (name == "aten::split" || name == "aten::chunk" || name == "split" ||
+      name == "chunk")
+    return convert_split(entry);
+  if (name == "aten::cat" || name == "cat")
+    return convert_cat(entry);
+  if (name == "aten::mul" || name == "mul")
+    return convert_mul(entry);
+  if (name == "aten::transpose" || name == "aten::permute" ||
+      name == "aten::reshape" || name == "aten::view" || name == "transpose" ||
+      name == "permute" || name == "reshape" || name == "view")
+    return convert_view(entry);
   if (name == "aten::softmax" || name == "softmax")
     return convert_softmax(entry);
   if (name == "aten::embedding" || name == "embedding")
@@ -67,8 +96,10 @@ ConvertedOp TraceOpConverter::convert_conv2d(const OpEntry& entry) {
     conv.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
   if (entry.inputs.size() >= 2)
     conv.attrs["weight_shape"] = shape_to_str(entry.inputs[1].shape);
+	  if (!entry.outputs.empty())
+	    conv.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   if (!entry.outputs.empty())
-    conv.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    conv.attrs["output_name"] = entry.outputs[0].name;
 
   if (conv.attrs.find("kernel_shape") == conv.attrs.end() && entry.inputs.size() >= 2) {
     auto& ws = entry.inputs[1].shape;
@@ -116,8 +147,10 @@ ConvertedOp TraceOpConverter::convert_linear(const OpEntry& entry) {
     gemm.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
   if (entry.inputs.size() >= 2)
     gemm.attrs["weight_shape"] = shape_to_str(entry.inputs[1].shape);
+	  if (!entry.outputs.empty())
+	    gemm.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   if (!entry.outputs.empty())
-    gemm.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    gemm.attrs["output_name"] = entry.outputs[0].name;
 
   gemm.attrs["has_bias"] = (entry.inputs.size() >= 3) ? "1" : "0";
   return gemm;
@@ -132,8 +165,10 @@ ConvertedOp TraceOpConverter::convert_matmul(const OpEntry& entry) {
     gemm.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
   if (entry.inputs.size() >= 2)
     gemm.attrs["weight_shape"] = shape_to_str(entry.inputs[1].shape);
+	  if (!entry.outputs.empty())
+	    gemm.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   if (!entry.outputs.empty())
-    gemm.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    gemm.attrs["output_name"] = entry.outputs[0].name;
 
   gemm.attrs["has_bias"] = "0";
   return gemm;
@@ -148,8 +183,10 @@ ConvertedOp TraceOpConverter::convert_addmm(const OpEntry& entry) {
     gemm.attrs["input_shape"] = shape_to_str(entry.inputs[1].shape);
   if (entry.inputs.size() >= 3)
     gemm.attrs["weight_shape"] = shape_to_str(entry.inputs[2].shape);
+	  if (!entry.outputs.empty())
+	    gemm.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   if (!entry.outputs.empty())
-    gemm.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    gemm.attrs["output_name"] = entry.outputs[0].name;
 
   gemm.attrs["has_bias"] = (entry.inputs.size() >= 1) ? "1" : "0";
   return gemm;
@@ -162,8 +199,10 @@ ConvertedOp TraceOpConverter::convert_max_pool2d(const OpEntry& entry) {
 
   if (!entry.inputs.empty())
     pool.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+	  if (!entry.outputs.empty())
+	    pool.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   if (!entry.outputs.empty())
-    pool.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    pool.attrs["output_name"] = entry.outputs[0].name;
 
   if (pool.attrs.find("kernel_shape") == pool.attrs.end())
     pool.attrs["kernel_shape"] = "2,2";
@@ -181,8 +220,10 @@ ConvertedOp TraceOpConverter::convert_adaptive_avg_pool2d(const OpEntry& entry) 
 
   if (!entry.inputs.empty())
     pool.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+	  if (!entry.outputs.empty())
+	    pool.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   if (!entry.outputs.empty())
-    pool.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    pool.attrs["output_name"] = entry.outputs[0].name;
 
   if (pool.attrs.find("output_size") == pool.attrs.end() && !entry.outputs.empty())
     pool.attrs["output_size"] = shape_to_str(entry.outputs[0].shape);
@@ -196,8 +237,10 @@ ConvertedOp TraceOpConverter::convert_avg_pool2d(const OpEntry& entry) {
 
   if (!entry.inputs.empty())
     pool.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+	  if (!entry.outputs.empty())
+	    pool.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   if (!entry.outputs.empty())
-    pool.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    pool.attrs["output_name"] = entry.outputs[0].name;
 
   if (pool.attrs.find("kernel_shape") == pool.attrs.end())
     pool.attrs["kernel_shape"] = "2,2";
@@ -215,8 +258,10 @@ ConvertedOp TraceOpConverter::convert_flatten(const OpEntry& entry) {
 
   if (!entry.inputs.empty())
     flat.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+	  if (!entry.outputs.empty())
+	    flat.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   if (!entry.outputs.empty())
-    flat.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    flat.attrs["output_name"] = entry.outputs[0].name;
 
   if (flat.attrs.find("start_dim") == flat.attrs.end())
     flat.attrs["start_dim"] = "1";
@@ -227,7 +272,7 @@ ConvertedOp TraceOpConverter::convert_flatten(const OpEntry& entry) {
 
 ConvertedOp TraceOpConverter::convert_layer_norm(const OpEntry& entry) {
   ConvertedOp ln;
-  ln.optype = "SkipLayerNorm";
+  ln.optype = "LayerNorm";
   ln.attrs = entry.attrs;
 
   if (!entry.inputs.empty())
@@ -236,8 +281,10 @@ ConvertedOp TraceOpConverter::convert_layer_norm(const OpEntry& entry) {
     ln.attrs["weight_shape"] = shape_to_str(entry.inputs[1].shape);
   if (entry.inputs.size() >= 3)
     ln.attrs["bias_shape"] = shape_to_str(entry.inputs[2].shape);
+	  if (!entry.outputs.empty())
+	    ln.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   if (!entry.outputs.empty())
-    ln.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    ln.attrs["output_name"] = entry.outputs[0].name;
 
   if (ln.attrs.find("normalized_shape") == ln.attrs.end() && !entry.inputs.empty())
     ln.attrs["normalized_shape"] = std::to_string(entry.inputs[0].shape.back());
@@ -251,22 +298,85 @@ ConvertedOp TraceOpConverter::convert_gelu(const OpEntry& entry) {
 
   if (!entry.inputs.empty())
     act.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+	  if (!entry.outputs.empty())
+	    act.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   if (!entry.outputs.empty())
-    act.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
-  return act;
+    act.attrs["output_name"] = entry.outputs[0].name;
+	  return act;
 }
 
 ConvertedOp TraceOpConverter::convert_silu(const OpEntry& entry) {
-  ConvertedOp act;
-  act.optype = "BiasGelu";
-  act.attrs = entry.attrs;
-  act.attrs["activation_type"] = "silu";
+	  ConvertedOp act;
+	  act.optype = "BiasAct";
+	  act.attrs = entry.attrs;
+  act.attrs["activation"] = "silu";
+  act.attrs["has_bias"] = "0";
+  act.attrs["llama_mlp"] = "0";
 
-  if (!entry.inputs.empty())
-    act.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+	  if (!entry.inputs.empty())
+	    act.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+	  if (!entry.outputs.empty())
+	    act.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   if (!entry.outputs.empty())
-    act.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
-  return act;
+    act.attrs["output_name"] = entry.outputs[0].name;
+	  return act;
+}
+
+ConvertedOp TraceOpConverter::convert_split(const OpEntry& entry) {
+  ConvertedOp split;
+  split.optype = "Split";
+  split.attrs = entry.attrs;
+  if (!entry.inputs.empty())
+    split.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+  split.attrs["output_shapes"] = join_shapes(entry.outputs);
+  split.attrs["output_names"] = join_names(entry.outputs);
+  if (!split.attrs.count("axis") && split.attrs.count("dim"))
+    split.attrs["axis"] = split.attrs["dim"];
+  if (!split.attrs.count("axis")) split.attrs["axis"] = "-1";
+  if (split.attrs["axis"] == "-1" && !entry.inputs.empty())
+    split.attrs["axis"] = std::to_string(entry.inputs[0].shape.size() - 1);
+  return split;
+}
+
+ConvertedOp TraceOpConverter::convert_cat(const OpEntry& entry) {
+  ConvertedOp cat;
+  cat.optype = "Concat";
+  cat.attrs = entry.attrs;
+  if (!cat.attrs.count("axis") && cat.attrs.count("dim"))
+    cat.attrs["axis"] = cat.attrs["dim"];
+  if (!cat.attrs.count("axis")) cat.attrs["axis"] = "0";
+  if (!entry.outputs.empty()) {
+    cat.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    cat.attrs["output_name"] = entry.outputs[0].name;
+  }
+  return cat;
+}
+
+ConvertedOp TraceOpConverter::convert_mul(const OpEntry& entry) {
+  ConvertedOp mul;
+  mul.optype = "Elementwise";
+  mul.attrs = entry.attrs;
+  mul.attrs["elementwise_op"] = "mul";
+  if (!entry.inputs.empty())
+    mul.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+  if (!entry.outputs.empty()) {
+    mul.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    mul.attrs["output_name"] = entry.outputs[0].name;
+  }
+  return mul;
+}
+
+ConvertedOp TraceOpConverter::convert_view(const OpEntry& entry) {
+  ConvertedOp view;
+  view.optype = "View";
+  view.attrs = entry.attrs;
+  if (!entry.inputs.empty())
+    view.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+  if (!entry.outputs.empty()) {
+    view.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    view.attrs["output_name"] = entry.outputs[0].name;
+  }
+  return view;
 }
 
 ConvertedOp TraceOpConverter::convert_embedding(const OpEntry& entry) {
@@ -280,8 +390,8 @@ ConvertedOp TraceOpConverter::convert_embedding(const OpEntry& entry) {
     embedding.attrs["indices_shape"] = shape_to_str(entry.inputs[1].shape);
     embedding.attrs["indices_dtype"] = entry.inputs[1].dtype;
   }
-  if (!entry.outputs.empty()) {
-    embedding.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+	  if (!entry.outputs.empty()) {
+	    embedding.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
     embedding.attrs["output_name"] = entry.outputs[0].name;
   }
 
@@ -295,8 +405,10 @@ ConvertedOp TraceOpConverter::convert_softmax(const OpEntry& entry) {
 
   if (!entry.inputs.empty())
     sm.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+	  if (!entry.outputs.empty())
+	    sm.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   if (!entry.outputs.empty())
-    sm.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    sm.attrs["output_name"] = entry.outputs[0].name;
 
   if (sm.attrs.find("dim") == sm.attrs.end())
     sm.attrs["dim"] = "-1";
@@ -310,8 +422,10 @@ ConvertedOp TraceOpConverter::convert_dummy(const OpEntry& entry) {
 
   if (!entry.inputs.empty())
     dummy.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+	  if (!entry.outputs.empty())
+	    dummy.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
   if (!entry.outputs.empty())
-    dummy.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    dummy.attrs["output_name"] = entry.outputs[0].name;
   return dummy;
 }
 

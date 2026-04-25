@@ -172,6 +172,11 @@ void Model::initialize_weight(std::vector<std::unique_ptr<Tensor>>& weight_table
 
 void Model::prefill_ssd_tensors(Ssd* /*ssd*/) {}
 
+uint64_t Model::prepare_baseline_storage(StorageController* /*controller*/,
+                                         uint64_t now_ps) {
+  return now_ps;
+}
+
 
 void Model::set_layer_finish(uint32_t id) {
   _operation_map[id]->set_finish();

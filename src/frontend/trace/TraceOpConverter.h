@@ -25,12 +25,18 @@ class TraceOpConverter {
   static ConvertedOp convert_flatten(const OpEntry& entry);
   static ConvertedOp convert_layer_norm(const OpEntry& entry);
   static ConvertedOp convert_gelu(const OpEntry& entry);
-  static ConvertedOp convert_silu(const OpEntry& entry);
-  static ConvertedOp convert_softmax(const OpEntry& entry);
+	  static ConvertedOp convert_silu(const OpEntry& entry);
+	  static ConvertedOp convert_split(const OpEntry& entry);
+	  static ConvertedOp convert_cat(const OpEntry& entry);
+	  static ConvertedOp convert_mul(const OpEntry& entry);
+	  static ConvertedOp convert_view(const OpEntry& entry);
+	  static ConvertedOp convert_softmax(const OpEntry& entry);
   static ConvertedOp convert_embedding(const OpEntry& entry);
   static ConvertedOp convert_dummy(const OpEntry& entry);
 
-  static std::string shape_to_str(const std::vector<uint32_t>& shape);
+	  static std::string shape_to_str(const std::vector<uint32_t>& shape);
+	  static std::string join_shapes(const std::vector<TensorEntry>& tensors);
+	  static std::string join_names(const std::vector<TensorEntry>& tensors);
   static std::vector<uint32_t> parse_dims(const std::string& s);
 };
 

@@ -93,8 +93,11 @@ Gemm::Gemm(SimulationConfig config, Model* model, std::string name,
   _input_shape = parse_dims(get_attribute("input_shape"));
   _output_shape = parse_dims(get_attribute("output_shape"));
   _weight_shape = parse_dims(get_attribute("weight_shape"));
-  std::unique_ptr<Tensor> output_tensor = std::make_unique<Tensor>(
-        _id, name_gen(_name, "out"), _output_shape, _config.precision, false);
+  std::string output_name = attributes.count("output_name")
+                                ? get_attribute("output_name")
+                                : name_gen(_name, "out");
+	  std::unique_ptr<Tensor> output_tensor = std::make_unique<Tensor>(
+	        _id, output_name, _output_shape, _config.precision, false);
   _outputs.push_back(output_tensor.get()->get_id());
   _model->add_tensor(std::move(output_tensor));
   spdlog::debug("[Gemm] input_shape: {}", _input_shape);

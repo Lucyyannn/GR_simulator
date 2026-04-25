@@ -4,7 +4,7 @@ CMAKE_MINIMUM_REQUIRED(VERSION 3.15)
 set(LIB_NAME "Simulator")
 
 # set source and headers
-file(GLOB_RECURSE SRC_FILES
+file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
   "${CMAKE_SOURCE_DIR}/src/*.h"
   "${CMAKE_SOURCE_DIR}/src/*.cc"
 )

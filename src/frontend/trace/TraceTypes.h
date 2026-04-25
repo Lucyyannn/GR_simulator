@@ -10,6 +10,12 @@ struct TensorEntry {
   std::vector<uint32_t> shape;
   std::string dtype;
   bool is_weight = false;
+  std::string logical_id;
+  std::string role;
+  std::string initial_medium;
+  std::string runtime_medium;
+  uint32_t layer_id = 0;
+  uint32_t user_id = 0;
 };
 
 struct OpEntry {
@@ -24,6 +30,8 @@ struct TraceMetadata {
   std::string format_version;
   std::string model_name;
   std::string layout;
+  bool fail_on_unknown_op = false;
+  bool baseline_preload = false;
 };
 
 struct TraceGraph {

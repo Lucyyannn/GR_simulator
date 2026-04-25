@@ -1,0 +1,8 @@
+{
+  "models": [
+    {
+      "name": "hstu_8layer_baseline_small",
+      "trace_path": "example/trace_tests/test_hstu_8layer_baseline.json"
+    }
+  ]
+}

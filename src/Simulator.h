@@ -35,9 +35,10 @@ class Simulator {
   uint64_t set_cycle_mask();
   void try_fast_forward();
   bool can_fast_forward_to(uint64_t target_ps);
-  uint64_t count_ticks_before(uint64_t next_tick_ps, uint64_t period_ps,
-                              uint64_t target_ps) const;
-  void handle_model();
+	  uint64_t count_ticks_before(uint64_t next_tick_ps, uint64_t period_ps,
+	                              uint64_t target_ps) const;
+	  void advance_idle_time_to(uint64_t target_ps);
+	  void handle_model();
   uint32_t get_dest_node(MemoryAccess* access);
   void print_simulation_time_summary(double wall_clock_seconds) const;
   SimulationConfig _config;

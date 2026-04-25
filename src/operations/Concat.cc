@@ -44,12 +44,21 @@ Concat::Concat(const Concat& src) : Operation(src) {
 	_axis = src._axis;
 }
 
-Concat::Concat(SimulationConfig config, Model* model,
-							 std::string name, std::map<std::string, std::string> &attributes, uint32_t target_core)
-		: Operation(config, model, name, attributes, target_core) {
-			//TODO:implement this
-		_axis = std::stoi(get_attribute("axis"));
-}
+	Concat::Concat(SimulationConfig config, Model* model,
+								 std::string name, std::map<std::string, std::string> &attributes, uint32_t target_core)
+			: Operation(config, model, name, attributes, target_core) {
+			_axis = std::stoi(get_attribute("axis"));
+			if (_attributes.count("output_shape")) {
+				auto output_shape = parse_dims(get_attribute("output_shape"));
+				std::string output_name = _attributes.count("output_name")
+				                              ? get_attribute("output_name")
+				                              : name_gen(_name, "output");
+				auto output_tensor = std::make_unique<Tensor>(
+				    _id, output_name, output_shape, _config.precision, false);
+				_outputs.push_back(output_tensor->get_id());
+				_model->add_tensor(std::move(output_tensor));
+			}
+	}
 
 void Concat::initialize_tiles(MappingTable& mapping_table) {
 	if(_outputs.size() == 0) {
@@ -59,7 +68,10 @@ void Concat::initialize_tiles(MappingTable& mapping_table) {
 			Tensor* tensor = _model->get_tensor(input);
 			output_shape[_axis] += tensor->get_dims()[_axis];
 		}
-		auto output_tensor = std::make_unique<Tensor>(_id, name_gen(_name, "output"), output_shape, _config.precision, false);
+			std::string output_name = _attributes.count("output_name")
+			                              ? get_attribute("output_name")
+			                              : name_gen(_name, "output");
+			auto output_tensor = std::make_unique<Tensor>(_id, output_name, output_shape, _config.precision, false);
 		_outputs.push_back(output_tensor->get_id());
 		_model->add_tensor(std::move(output_tensor));
 	}
@@ -75,4 +87,3 @@ void Concat::initialize_tiles(MappingTable& mapping_table) {
 
 void Concat::initialize_instructions(Tile* tile, Mapping mapping) {
 }
-

@@ -93,11 +93,11 @@ Operation::Operation(SimulationConfig config, Model* model,
 }
 
 Operation::Operation(SimulationConfig config, Model* model,
-            std::string name,  std::map<std::string, std::string>&attribute, uint32_t target_core) 
-    : _config(config), _model(model) ,_name(name), _attributes(attribute) {
-  _id = generate_id();
-  _finish = false;
-  target_core = target_core;
+	            std::string name,  std::map<std::string, std::string>&attribute, uint32_t target_core) 
+	    : _config(config), _model(model) ,_name(name), _attributes(attribute) {
+	  _id = generate_id();
+	  _finish = false;
+	  this->target_core = target_core;
   Ndim = 0;
   Cdim = 3;
   Hdim = 1;

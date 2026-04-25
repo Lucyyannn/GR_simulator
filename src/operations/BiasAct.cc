@@ -4,6 +4,7 @@
 static const std::map<std::string, Opcode> activation_map = {
     {"gelu", Opcode::GELU},
     {"relu", Opcode::COMP},
+    {"silu", Opcode::SWISH},
     {"swish", Opcode::SWISH},
     {"softmax", Opcode::SOFTMAX},
 };
@@ -34,15 +35,38 @@ BiasAct::BiasAct(SimulationConfig config, Model* model,
 }
 
 BiasAct::BiasAct(SimulationConfig config, Model* model,
-               std::string name, std::map<std::string, std::string> &attributes, uint32_t target_core)
-    : Operation(config, model, name, attributes, target_core) {
-    _activation = activation_map.at(get_attribute("activation"));
-    _use_bias = std::stoi(get_attribute("has_bias"));
-    _llama_mlp = std::stoi(get_attribute("llama_mlp"));
-}
+	               std::string name, std::map<std::string, std::string> &attributes, uint32_t target_core)
+	    : Operation(config, model, name, attributes, target_core) {
+	    _activation = activation_map.at(get_attribute("activation"));
+	    _use_bias = attributes.count("has_bias") ? std::stoi(get_attribute("has_bias")) : false;
+	    _llama_mlp = attributes.count("llama_mlp") ? std::stoi(get_attribute("llama_mlp")) : false;
+	    _input_shape = parse_dims(get_attribute("input_shape"));
+	    _output_shape = attributes.count("output_shape")
+	                      ? parse_dims(get_attribute("output_shape"))
+	                      : _input_shape;
+	    if (_input_shape.size() == 2) {
+	        _batch_size = 1;
+	        _seq = _input_shape[0];
+	        _dk = _input_shape[1];
+	    } else if (_input_shape.size() == 3) {
+	        _batch_size = _input_shape[0];
+	        _seq = _input_shape[1];
+	        _dk = _input_shape[2];
+	    } else {
+	        spdlog::error("[BiasAct] Unsupported input shape dimensions: {}", _input_shape.size());
+	        std::exit(EXIT_FAILURE);
+	    }
+	    std::string output_name = attributes.count("output_name")
+	                                  ? get_attribute("output_name")
+	                                  : name_gen(_name, "output");
+	    auto output_tensor = std::make_unique<Tensor>(
+	        _id, output_name, _output_shape, _config.precision, false);
+	    _outputs.push_back(output_tensor->get_id());
+	    _model->add_tensor(std::move(output_tensor));
+	}
 
 void BiasAct::initialize_tiles(MappingTable& mapping_table) {
-    if(_outputs.size() == 0) {
+	    if(_outputs.size() == 0) {
         _input_shape = get_input(0)->get_dims();
         _output_shape = _input_shape;
         if(_llama_mlp)
@@ -50,10 +74,16 @@ void BiasAct::initialize_tiles(MappingTable& mapping_table) {
         auto output_tensor = std::make_unique<Tensor>(_id, name_gen(_name, "output"), _output_shape, _config.precision, false);
         _outputs.push_back(output_tensor.get()->get_id());
         _model->add_tensor(std::move(output_tensor));
-        _dk = _input_shape.at(1);
-        _seq = _input_shape.at(0);
-        _batch_size = 1;
-    }
+	        if (_input_shape.size() == 2) {
+	            _dk = _input_shape.at(1);
+	            _seq = _input_shape.at(0);
+	            _batch_size = 1;
+	        } else {
+	            _batch_size = _input_shape.at(0);
+	            _seq = _input_shape.at(1);
+	            _dk = _input_shape.at(2);
+	        }
+	    }
     calculate_loops();
     for (uint32_t tokens= 0; tokens<_seq*_batch_size; tokens+=_tokens_per_tile) {
         uint32_t remain_tokens = std::min(_seq*_batch_size-tokens, _tokens_per_tile);
@@ -73,23 +103,26 @@ void BiasAct::initialize_tiles(MappingTable& mapping_table) {
 
 void BiasAct::initialize_instructions(Tile* tile, Mapping mapping, uint32_t token_offset, uint32_t tokens) {
     addr_type sram_base = SPAD_BASE;
-    addr_type sram_bias_base = sram_base + tokens * _dk * _config.precision;
+	    addr_type input_bytes = tokens * _dk * _config.precision;
+	    addr_type sram_bias_base = sram_base + _config.align_address(input_bytes);
 
     addr_type first_addr, second_addr, output_addr;
     first_addr = get_operand_addr(_INPUT_OPERAND);
-    second_addr = get_operand_addr(_INPUT_OPERAND+1);
+	    second_addr = _use_bias ? get_operand_addr(_INPUT_OPERAND+1) : 0;
     output_addr = get_operand_addr(_OUTPUT_OPERAND);
     /* Load two tile (input: tokens x _dk, skip: tokens x _dk) */
     std::set<addr_type> dram_addrs;
     std::set<addr_type> dram_output_addrs;
     std::set<addr_type> dram_skip_addrs;
-    for (int offset=0; offset<tokens*_dk*_config.precision; offset+=_config.dram_req_size) {
-        dram_addrs.insert(first_addr + token_offset*_dk*_config.precision + offset);
-        dram_output_addrs.insert(output_addr + token_offset*_dk*_config.precision + offset);
-    }
+	    for (int offset=0; offset<input_bytes; offset+=_config.dram_req_size) {
+	        dram_addrs.insert(_config.align_address(first_addr + token_offset*_dk*_config.precision + offset));
+	        dram_output_addrs.insert(_config.align_address(output_addr + token_offset*_dk*_config.precision + offset));
+	    }
 
-    for (int offset=0;offset<_dk*_config.precision; offset+=_config.dram_req_size)
-        dram_skip_addrs.insert(second_addr + _seq*_dk*_config.precision+ offset);
+	    if (_use_bias) {
+	        for (int offset=0;offset<_dk*_config.precision; offset+=_config.dram_req_size)
+	            dram_skip_addrs.insert(_config.align_address(second_addr + offset));
+	    }
 
 
     tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
@@ -100,27 +133,29 @@ void BiasAct::initialize_instructions(Tile* tile, Mapping mapping, uint32_t toke
         .operand_id = _INPUT_OPERAND,  // query
     }));
 
-    tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
-        .opcode = Opcode::MOVIN,
-        .dest_addr = sram_bias_base,
-        .size = (uint32_t)dram_skip_addrs.size(),
-        .src_addrs = std::vector<addr_type>(dram_skip_addrs.begin(), dram_skip_addrs.end()),
-        .operand_id = _INPUT_OPERAND+1,  // query
-    }));
+	    if (_use_bias) {
+	        tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
+	            .opcode = Opcode::MOVIN,
+	            .dest_addr = sram_bias_base,
+	            .size = (uint32_t)dram_skip_addrs.size(),
+	            .src_addrs = std::vector<addr_type>(dram_skip_addrs.begin(), dram_skip_addrs.end()),
+	            .operand_id = _INPUT_OPERAND+1,
+	        }));
 
-    tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
-        .opcode = Opcode::ADD,
-        .dest_addr = sram_base,
-        .size = _dk * tokens * _config.precision / _config.dram_req_size,
-        .compute_size = _dk * tokens * _config.precision,
-        .src_addrs = std::vector<addr_type>{sram_base, sram_bias_base},
-    }));
+	        tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
+	            .opcode = Opcode::ADD,
+	            .dest_addr = sram_base,
+	            .size = std::max<uint32_t>(1, (uint32_t)dram_addrs.size()),
+	            .compute_size = _dk * tokens * _config.precision,
+	            .src_addrs = std::vector<addr_type>{sram_base, sram_bias_base},
+	        }));
+	    }
 
     tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
         .opcode = _activation,
         .dest_addr = sram_base,
-        .size = _output_shape[1] * tokens * _config.precision / _config.dram_req_size,
-        .compute_size = _output_shape[1] * tokens * _config.precision,
+	        .size = std::max<uint32_t>(1, (uint32_t)dram_addrs.size()),
+	        .compute_size = _output_shape.back() * tokens * _config.precision,
         .src_addrs = std::vector<addr_type>{sram_base},
     }));
     if(_llama_mlp) {
