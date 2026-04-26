@@ -78,6 +78,18 @@ def op_modeling_attrs(op_modeling, op_name):
     return {"modeling_mode": mode}
 
 
+def build_reuse_mapping(length, period):
+    if period is None or period <= 0 or period >= length:
+        return None
+    physical_rows = min(period, length)
+    return {
+        "reuse_mode": "row_reuse",
+        "reuse_axis": 0,
+        "reuse_physical_rows": physical_rows,
+        "reuse_logical_to_physical": [i % physical_rows for i in range(length)],
+    }
+
+
 def build_trace(
     layers,
     tokens,
@@ -91,11 +103,16 @@ def build_trace(
     model_name="hstu_8layer_baseline_small",
     op_modeling=None,
     pipeline_enabled=False,
+    kv_reuse_enabled=False,
+    kv_reuse_period=None,
     seed=0,
 ):
     op_modeling = op_modeling or {}
     ops = []
     indices_values = indices_values or [i % vocab for i in range(tokens)]
+    kv_reuse_meta = (
+        build_reuse_mapping(kv_len, kv_reuse_period) if kv_reuse_enabled else None
+    )
 
     base = common_meta(user_id, batch_id, macro_batch_id)
     add_op(
@@ -210,6 +227,7 @@ def build_trace(
                     [kv_len, hidden],
                     logical_id=f"user{user_id}.{shared_layer}.kc",
                     role="kv_cache_k",
+                    **(kv_reuse_meta or {}),
                     **layer_meta,
                 ),
                 hbm_tensor(k, [tokens, hidden], role="activation", **layer_meta),
@@ -248,6 +266,7 @@ def build_trace(
                     [kv_len, hidden],
                     logical_id=f"user{user_id}.{shared_layer}.vc",
                     role="kv_cache_v",
+                    **(kv_reuse_meta or {}),
                     **layer_meta,
                 ),
                 hbm_tensor(v, [tokens, hidden], role="activation", **layer_meta),
@@ -337,6 +356,7 @@ def build_trace(
             "pipeline_enabled": pipeline_enabled,
             "baseline_preload": True,
             "fail_on_unknown_op": True,
+            "kv_reuse_enabled": kv_reuse_enabled,
             "random_seed": seed,
             "op_modeling": op_modeling,
         },
@@ -391,6 +411,8 @@ def write_single_trace(args, op_modeling):
         model_name="hstu_8layer_baseline_small",
         op_modeling=op_modeling,
         pipeline_enabled=args.pipeline,
+        kv_reuse_enabled=args.enable_kv_reuse,
+        kv_reuse_period=args.kv_reuse_period,
         seed=args.seed,
     )
     output = Path(args.output)
@@ -441,6 +463,8 @@ def write_pipeline_traces(args, op_modeling):
                         model_name=shared_weight_key,
                         op_modeling=op_modeling,
                         pipeline_enabled=True,
+                        kv_reuse_enabled=args.enable_kv_reuse,
+                        kv_reuse_period=args.kv_reuse_period,
                         seed=args.seed,
                     )
                     trace_path = output_dir / f"{shared_weight_key}.json"
@@ -469,6 +493,8 @@ def write_pipeline_traces(args, op_modeling):
                         model_name=model_name,
                         op_modeling=op_modeling,
                         pipeline_enabled=True,
+                        kv_reuse_enabled=args.enable_kv_reuse,
+                        kv_reuse_period=args.kv_reuse_period,
                         seed=args.seed,
                     )
                     trace_path = output_dir / f"{model_name}.json"
@@ -502,6 +528,8 @@ def write_pipeline_traces(args, op_modeling):
                 "random_seed": args.seed,
                 "op_modeling": op_modeling,
                 "shared_trace": args.shared_trace,
+                "kv_reuse_enabled": args.enable_kv_reuse,
+                "kv_reuse_period": args.kv_reuse_period,
             },
             "models": models,
         },
@@ -525,6 +553,13 @@ def main():
     parser.add_argument("--macro-batch-size", type=int)
     parser.add_argument("--batch-policy", choices=["contiguous"], default="contiguous")
     parser.add_argument("--pipeline", action="store_true")
+    parser.add_argument("--enable-kv-reuse", action="store_true")
+    parser.add_argument(
+        "--kv-reuse-period",
+        type=int,
+        default=4,
+        help="Synthetic action reuse period for KV cache rows when --enable-kv-reuse is set.",
+    )
     parser.add_argument(
         "--shared-trace",
         action="store_true",

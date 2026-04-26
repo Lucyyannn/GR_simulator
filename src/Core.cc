@@ -414,7 +414,8 @@ void Core::handle_ld_inst_queue() {
       if (front->size==0) {
         spdlog::error("Destination size is 0! opcode: {}, addr: 0x{:x}", (int)front->opcode, front->dest_addr);
       }
-      int ret = buffer->prefetch(front->dest_addr, buffer_id, front->size, front->size);
+      int ret = buffer->prefetch(front->dest_addr, buffer_id, front->size,
+                                 front->src_addrs.size());
       if (!ret) {
         spdlog::error("Destination allocated: {} Size remain: {}", buffer->check_allocated(front->dest_addr, buffer_id), buffer->check_remain(front->size, buffer_id));
         spdlog::error("instruction panic opcode: {:x}, addr: {:x}, size: {} B", (int)front->opcode, front->dest_addr, front->size*_config.dram_req_size);

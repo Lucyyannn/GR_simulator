@@ -139,7 +139,7 @@ python3 scripts/generate_hstu_baseline_trace.py \
 ### 2.3 运行仿真
 
 ```bash
-ONNXIM_HOME=/workspace/GR_simulator ./build/bin/Simulator \
+./build/bin/Simulator \
   --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ddr_default.json \
   --models_list ./example/baseline_intro_example_models_list.json \
   --mode trace \

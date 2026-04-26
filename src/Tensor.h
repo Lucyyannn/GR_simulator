@@ -21,6 +21,16 @@ class Tensor {
   std::string get_name() { return _name; }
   uint32_t get_src_node() { return _src_node; }
   std::vector<uint32_t> get_dims() { return _dims; }
+  bool has_reuse_layout() const { return _has_reuse_layout; }
+  uint32_t reuse_axis() const { return _reuse_axis; }
+  uint32_t reuse_physical_rows() const { return _reuse_physical_rows; }
+  uint64_t reuse_row_stride_bytes() const { return _reuse_row_stride_bytes; }
+  const std::vector<uint32_t>& reuse_logical_to_physical() const {
+    return _reuse_logical_to_physical;
+  }
+  void set_reuse_layout(uint32_t axis, uint32_t physical_rows,
+                        uint64_t row_stride_bytes,
+                        const std::vector<uint32_t>& logical_to_physical);
   void set_produced() { _produced = true; }
   bool get_produced() { return _produced; }
   uint32_t num_child_nodes() { return _child_nodes.size(); }
@@ -44,5 +54,10 @@ class Tensor {
   std::vector<uint32_t> _child_nodes;
   addr_type _address;
   uint64_t _size;
+  bool _has_reuse_layout = false;
+  uint32_t _reuse_axis = 0;
+  uint32_t _reuse_physical_rows = 0;
+  uint64_t _reuse_row_stride_bytes = 0;
+  std::vector<uint32_t> _reuse_logical_to_physical;
   friend Model;
 };

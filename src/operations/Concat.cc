@@ -147,9 +147,15 @@ void Concat::initialize_copy_tile(uint32_t input_idx, uint64_t element_offset,
 
 	addr_type input_addr = get_operand_addr(_INPUT_OPERAND + input_idx);
 	addr_type output_addr = get_operand_addr(_OUTPUT_OPERAND);
-	auto input_shape = get_input(input_idx)->get_dims();
+	Tensor* input_tensor = get_input(input_idx);
+	auto input_shape = input_tensor->get_dims();
+	const bool reuse_aware =
+			input_tensor->has_reuse_layout() &&
+			input_tensor->reuse_axis() == _axis &&
+			input_tensor->reuse_logical_to_physical().size() == input_shape[_axis];
 
 	std::set<addr_type> input_addrs;
+	std::set<addr_type> logical_input_addrs;
 	std::set<addr_type> output_addrs;
 	for (uint64_t i = 0; i < elements; ++i) {
 		uint64_t input_element = element_offset + i;
@@ -158,8 +164,27 @@ void Concat::initialize_copy_tile(uint32_t input_idx, uint64_t element_offset,
 		output_coords[_axis] += axis_base;
 		uint64_t output_element = flatten(output_coords, _output_shape);
 
-		input_addrs.insert(_config.align_address(
+		logical_input_addrs.insert(_config.align_address(
 				input_addr + input_element * static_cast<uint64_t>(_config.precision)));
+		if (reuse_aware) {
+			const auto& logical_to_physical =
+					input_tensor->reuse_logical_to_physical();
+			uint32_t logical_row = coords[_axis];
+			uint32_t physical_row = logical_to_physical[logical_row];
+			uint64_t inner_index = 0;
+			for (size_t dim = 0; dim < coords.size(); ++dim) {
+				if (dim == _axis) continue;
+				inner_index = inner_index * input_shape[dim] + coords[dim];
+			}
+			input_addrs.insert(_config.align_address(
+					input_addr +
+					static_cast<addr_type>(physical_row) *
+							input_tensor->reuse_row_stride_bytes() +
+					inner_index * static_cast<uint64_t>(_config.precision)));
+		} else {
+			input_addrs.insert(_config.align_address(
+					input_addr + input_element * static_cast<uint64_t>(_config.precision)));
+		}
 		output_addrs.insert(_config.align_address(
 				output_addr + output_element * static_cast<uint64_t>(_config.precision)));
 	}
@@ -174,14 +199,16 @@ void Concat::initialize_copy_tile(uint32_t input_idx, uint64_t element_offset,
 	tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
 			.opcode = Opcode::MOVIN,
 			.dest_addr = SPAD_BASE,
-			.size = static_cast<uint32_t>(input_addrs.size()),
+			.size = static_cast<uint32_t>(
+					reuse_aware ? logical_input_addrs.size() : input_addrs.size()),
 			.src_addrs = std::vector<addr_type>(input_addrs.begin(), input_addrs.end()),
 			.operand_id = _INPUT_OPERAND + input_idx,
 	}));
 	tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
 			.opcode = Opcode::COMP,
 			.dest_addr = SPAD_BASE,
-			.size = static_cast<uint32_t>(input_addrs.size()),
+			.size = static_cast<uint32_t>(
+					reuse_aware ? logical_input_addrs.size() : input_addrs.size()),
 			.compute_size = static_cast<uint32_t>(elements * _config.precision),
 			.src_addrs = std::vector<addr_type>{SPAD_BASE},
 	}));

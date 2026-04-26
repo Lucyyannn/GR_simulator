@@ -5,6 +5,7 @@ results/
 docs/
 cache/
 .continue/
+example/trace_tests/*
 AGENTS.md
 PLAN.md
 baseline_flow.md

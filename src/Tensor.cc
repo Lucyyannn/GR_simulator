@@ -44,6 +44,11 @@ Tensor::Tensor(const Tensor &tensor) {
   _address = tensor._address;
   _size = tensor._size;
   _precision = tensor._precision;
+  _has_reuse_layout = tensor._has_reuse_layout;
+  _reuse_axis = tensor._reuse_axis;
+  _reuse_physical_rows = tensor._reuse_physical_rows;
+  _reuse_row_stride_bytes = tensor._reuse_row_stride_bytes;
+  _reuse_logical_to_physical = tensor._reuse_logical_to_physical;
 }
 
 Tensor::Tensor(uint32_t src_node, std::string name, int precision) {
@@ -100,6 +105,16 @@ void Tensor::resize_tensor(std::vector<uint32_t> &dims) {
 
 void Tensor::add_child_node(Operation *op) {
   _child_nodes.push_back(op->get_id());
+}
+
+void Tensor::set_reuse_layout(
+    uint32_t axis, uint32_t physical_rows, uint64_t row_stride_bytes,
+    const std::vector<uint32_t>& logical_to_physical) {
+  _has_reuse_layout = true;
+  _reuse_axis = axis;
+  _reuse_physical_rows = physical_rows;
+  _reuse_row_stride_bytes = row_stride_bytes;
+  _reuse_logical_to_physical = logical_to_physical;
 }
 
 void Tensor::allocate_tensor(int precision) {

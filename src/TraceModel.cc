@@ -42,6 +42,23 @@ uint64_t tensor_bytes_for_shape(const std::vector<uint32_t>& shape,
   return elems * precision;
 }
 
+uint64_t round_up_to(uint64_t value, uint64_t alignment) {
+  if (alignment == 0) return value;
+  return ((value + alignment - 1) / alignment) * alignment;
+}
+
+uint64_t row_bytes_for_axis(const std::vector<uint32_t>& shape,
+                            uint32_t axis,
+                            uint32_t precision) {
+  if (shape.empty()) return precision;
+  uint64_t elems = 1;
+  for (size_t i = 0; i < shape.size(); ++i) {
+    if (i == axis) continue;
+    elems *= shape[i];
+  }
+  return elems * precision;
+}
+
 uint32_t flattened_elems(const std::vector<uint32_t>& shape) {
   if (shape.empty()) return 1;
   return std::accumulate(shape.begin(), shape.end(), 1u,
@@ -101,9 +118,39 @@ uint32_t TraceModel::register_tensor(const trace_frontend::TensorEntry& entry, b
 	  return id;
 }
 
+bool TraceModel::apply_reuse_layout(
+    Tensor* tensor, const trace_frontend::TensorEntry& entry) {
+  if (tensor == nullptr) return false;
+  if (!_graph.metadata.kv_reuse_enabled) return false;
+  if (entry.reuse_mode != "row_reuse") return false;
+  if (entry.reuse_logical_to_physical.empty()) return false;
+  if (entry.reuse_axis >= entry.shape.size()) return false;
+  if (entry.reuse_logical_to_physical.size() != entry.shape[entry.reuse_axis]) {
+    spdlog::error(
+        "[TraceModel] reuse mapping size {} does not match tensor {} axis {} extent {}",
+        entry.reuse_logical_to_physical.size(), entry.name, entry.reuse_axis,
+        entry.shape[entry.reuse_axis]);
+    std::exit(EXIT_FAILURE);
+  }
+
+  uint32_t physical_rows = entry.reuse_physical_rows;
+  for (uint32_t row : entry.reuse_logical_to_physical)
+    physical_rows = std::max(physical_rows, row + 1);
+  if (physical_rows == 0) return false;
+
+  const uint64_t row_bytes =
+      row_bytes_for_axis(entry.shape, entry.reuse_axis, _config.precision);
+  const uint64_t row_stride =
+      round_up_to(row_bytes, std::max<uint64_t>(_config.hbm.req_size, 1));
+  tensor->set_reuse_layout(entry.reuse_axis, physical_rows, row_stride,
+                           entry.reuse_logical_to_physical);
+  return true;
+}
+
 void TraceModel::apply_trace_storage(Tensor* tensor,
                                      const trace_frontend::TensorEntry& entry) {
   if (tensor == nullptr) return;
+  const bool has_reuse_layout = apply_reuse_layout(tensor, entry);
 
   MemoryMedium runtime_medium = parse_medium_name(entry.runtime_medium);
   if (runtime_medium == MemoryMedium::UNKNOWN)
@@ -171,6 +218,57 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
       tensor->set_address(_residency_manager->resident_addr(logical_id));
       spdlog::debug("[TraceModel] {} uses resident {} at 0x{:x}",
                     tensor->get_name(), logical_id, tensor->get_address());
+      return;
+    }
+
+    if (has_reuse_layout && tensor->has_reuse_layout()) {
+      const uint64_t logical_rows = entry.shape[entry.reuse_axis];
+      const uint64_t row_stride = tensor->reuse_row_stride_bytes();
+      const uint64_t physical_bytes =
+          static_cast<uint64_t>(tensor->reuse_physical_rows()) * row_stride;
+      const uint64_t logical_bytes = logical_rows * row_stride;
+      addr_type hbm_addr = _residency_manager->reserve_destination(
+          logical_id, physical_bytes, runtime_medium);
+      tensor->set_address(hbm_addr);
+      addr_type source_addr =
+          _residency_manager->source_addr(logical_id, logical_bytes,
+                                          initial_medium);
+
+      std::vector<uint32_t> canonical_rows(tensor->reuse_physical_rows(),
+                                           std::numeric_limits<uint32_t>::max());
+      const auto& map = tensor->reuse_logical_to_physical();
+      for (uint32_t logical_row = 0; logical_row < map.size(); ++logical_row) {
+        uint32_t physical_row = map[logical_row];
+        if (physical_row >= canonical_rows.size()) continue;
+        canonical_rows[physical_row] =
+            std::min(canonical_rows[physical_row], logical_row);
+      }
+
+      bool resident_marker_added = false;
+      for (uint32_t physical_row = 0; physical_row < canonical_rows.size();
+           ++physical_row) {
+        uint32_t logical_row = canonical_rows[physical_row];
+        if (logical_row == std::numeric_limits<uint32_t>::max()) continue;
+        _data_movements.push_back(PlannedDataMovement{
+            .tensor_name = tensor->get_name(),
+            .logical_id = logical_id,
+            .role = entry.role,
+            .source = initial_medium,
+            .destination = runtime_medium,
+            .src_addr = source_addr + static_cast<addr_type>(logical_row) * row_stride,
+            .dst_addr = tensor->get_address() +
+                        static_cast<addr_type>(physical_row) * row_stride,
+            .bytes = row_stride,
+            .batch_id = effective_batch_id(entry),
+            .macro_batch_id = effective_macro_batch_id(entry),
+            .user_id = effective_user_id(entry),
+            .makes_resident = !resident_marker_added,
+            .resident_bytes = physical_bytes,
+        });
+        resident_marker_added = true;
+      }
+      _reuse_logical_bytes += logical_bytes;
+      _reuse_physical_bytes += physical_bytes;
       return;
     }
 
@@ -255,6 +353,8 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
   _submitted_movement_ids.clear();
   _resident_loads.clear();
   _data_movements_submitted = false;
+  _reuse_logical_bytes = 0;
+  _reuse_physical_bytes = 0;
 
   for (auto& op : _graph.operators) {
     for (auto& inp : op.inputs) remember_tensor_entry(inp);
@@ -419,6 +519,14 @@ std::vector<uint64_t> TraceModel::submit_data_movements(
 
   spdlog::info("[TraceModel] {} submitting {} data movements",
                _name, _data_movements.size());
+  if (_reuse_logical_bytes > 0) {
+    spdlog::info(
+        "[TraceModel] {} kv reuse logical={}B physical={}B saved={}B ({:.2f}%)",
+        _name, _reuse_logical_bytes, _reuse_physical_bytes,
+        _reuse_logical_bytes - _reuse_physical_bytes,
+        100.0 * static_cast<double>(_reuse_logical_bytes - _reuse_physical_bytes) /
+            static_cast<double>(_reuse_logical_bytes));
+  }
   for (const auto& movement : _data_movements) {
     MigrationRequest request;
     request.src_medium = movement.source;
@@ -432,7 +540,8 @@ std::vector<uint64_t> TraceModel::submit_data_movements(
       _resident_loads.push_back(ResidentLoad{
           .logical_id = movement.logical_id,
           .hbm_addr = movement.dst_addr,
-          .bytes = movement.bytes,
+          .bytes = movement.resident_bytes == 0 ? movement.bytes
+                                                 : movement.resident_bytes,
           .movement_id = movement_id,
       });
     }

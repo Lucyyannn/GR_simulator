@@ -41,6 +41,7 @@ class TraceModel : public Model {
     uint32_t macro_batch_id = 0;
     uint32_t user_id = 0;
     bool makes_resident = false;
+    uint64_t resident_bytes = 0;
   };
 
   struct ResidentLoad {
@@ -57,10 +58,14 @@ class TraceModel : public Model {
   std::vector<uint64_t> _submitted_movement_ids;
   std::vector<ResidentLoad> _resident_loads;
   bool _data_movements_submitted = false;
+  uint64_t _reuse_logical_bytes = 0;
+  uint64_t _reuse_physical_bytes = 0;
 
   uint32_t register_tensor(const trace_frontend::TensorEntry& entry, bool produced);
   void remember_tensor_entry(const trace_frontend::TensorEntry& entry);
   void apply_trace_storage(Tensor* tensor, const trace_frontend::TensorEntry& entry);
+  bool apply_reuse_layout(Tensor* tensor,
+                          const trace_frontend::TensorEntry& entry);
   std::string effective_logical_id(const trace_frontend::TensorEntry& entry) const;
   uint32_t effective_user_id(const trace_frontend::TensorEntry& entry) const;
   uint32_t effective_batch_id(const trace_frontend::TensorEntry& entry) const;

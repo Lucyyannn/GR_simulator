@@ -47,6 +47,14 @@ TensorEntry parse_tensor(const nlohmann::json& j) {
     for (auto& idx : j["indices_values"])
       entry.indices_values.push_back(idx.get<uint32_t>());
   }
+  entry.reuse_mode = j.value("reuse_mode", "");
+  entry.reuse_axis = j.value("reuse_axis", 0);
+  entry.reuse_physical_rows = j.value("reuse_physical_rows", 0);
+  if (j.contains("reuse_logical_to_physical") &&
+      j["reuse_logical_to_physical"].is_array()) {
+    for (auto& row : j["reuse_logical_to_physical"])
+      entry.reuse_logical_to_physical.push_back(row.get<uint32_t>());
+  }
   entry.role = j.value("role", "");
   entry.initial_medium = j.value("initial_medium", "");
   entry.runtime_medium = j.value("runtime_medium", "");
@@ -115,6 +123,7 @@ TraceGraph TraceParser::parse(const std::string& json_path) {
     graph.metadata.fail_on_unknown_op = meta.value("fail_on_unknown_op", false);
     graph.metadata.baseline_preload = meta.value("baseline_preload", false);
     graph.metadata.pipeline_enabled = meta.value("pipeline_enabled", false);
+    graph.metadata.kv_reuse_enabled = meta.value("kv_reuse_enabled", false);
     if (meta.contains("op_modeling") && meta["op_modeling"].is_object()) {
       for (auto it = meta["op_modeling"].begin(); it != meta["op_modeling"].end(); ++it) {
         if (it->is_string()) graph.metadata.op_modeling[it.key()] = it->get<std::string>();
