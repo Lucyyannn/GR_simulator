@@ -1,6 +1,7 @@
 models/*
 build/
 logs/
+results/
 docs/
 cache/
 .continue/
@@ -10,4 +11,3 @@ baseline_flow.md
 .codex
 detail.csv
 *.log
-results/
