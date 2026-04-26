@@ -1,6 +1,7 @@
 #include "TraceModel.h"
 #include "Ssd.h"
 #include "memory/StorageController.h"
+#include "memory/ResidencyManager.h"
 #include "operations/OperationFactory.h"
 #include "frontend/trace/TraceParser.h"
 #include "frontend/trace/TraceOpConverter.h"
@@ -8,6 +9,7 @@
 #include <algorithm>
 #include <cctype>
 #include <limits>
+#include <numeric>
 
 TraceModel::TraceModel(const std::string& trace_path,
                        json model_config,
@@ -28,10 +30,60 @@ MemoryMedium parse_medium_name(const std::string& name) {
   return MemoryMedium::UNKNOWN;
 }
 
+bool is_resident_role(const std::string& role) {
+  return role == "weight" || role == "kv_cache_k" || role == "kv_cache_v";
+}
+
+uint64_t tensor_bytes_for_shape(const std::vector<uint32_t>& shape,
+                                uint32_t precision) {
+  if (shape.empty()) return precision;
+  uint64_t elems = 1;
+  for (uint32_t dim : shape) elems *= dim;
+  return elems * precision;
+}
+
+uint32_t flattened_elems(const std::vector<uint32_t>& shape) {
+  if (shape.empty()) return 1;
+  return std::accumulate(shape.begin(), shape.end(), 1u,
+                         std::multiplies<uint32_t>());
+}
+
 }  // namespace
 
 void TraceModel::remember_tensor_entry(const trace_frontend::TensorEntry& entry) {
   if (!entry.name.empty()) _tensor_entries[entry.name] = entry;
+}
+
+uint32_t TraceModel::effective_user_id(
+    const trace_frontend::TensorEntry& entry) const {
+  if (_model_config.contains("user_id"))
+    return _model_config["user_id"].get<uint32_t>();
+  return entry.user_id;
+}
+
+uint32_t TraceModel::effective_batch_id(
+    const trace_frontend::TensorEntry& entry) const {
+  if (_model_config.contains("batch_id"))
+    return _model_config["batch_id"].get<uint32_t>();
+  return entry.batch_id;
+}
+
+uint32_t TraceModel::effective_macro_batch_id(
+    const trace_frontend::TensorEntry& entry) const {
+  if (_model_config.contains("macro_batch_id"))
+    return _model_config["macro_batch_id"].get<uint32_t>();
+  return entry.macro_batch_id;
+}
+
+std::string TraceModel::effective_logical_id(
+    const trace_frontend::TensorEntry& entry) const {
+  if (entry.role == "kv_cache_k" || entry.role == "kv_cache_v") {
+    const char* suffix = entry.role == "kv_cache_k" ? "kc" : "vc";
+    return "user" + std::to_string(effective_user_id(entry)) + ".layer" +
+           std::to_string(entry.layer_id) + "." + suffix;
+  }
+  if (!entry.logical_id.empty()) return entry.logical_id;
+  return entry.name;
 }
 
 uint32_t TraceModel::register_tensor(const trace_frontend::TensorEntry& entry, bool produced) {
@@ -57,11 +109,97 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
   if (runtime_medium == MemoryMedium::UNKNOWN)
     runtime_medium = parse_medium_name(entry.initial_medium);
 
+  MemoryMedium initial_medium = parse_medium_name(entry.initial_medium);
+  const bool needs_preload =
+      _graph.metadata.baseline_preload &&
+      initial_medium != MemoryMedium::UNKNOWN &&
+      runtime_medium != MemoryMedium::UNKNOWN &&
+      initial_medium != runtime_medium;
+
+  if (needs_preload && entry.role == "embedding_rows") {
+    tensor->relocate(runtime_medium);
+    const uint64_t row_bytes =
+        entry.shape.empty() ? tensor->get_size()
+                            : static_cast<uint64_t>(entry.shape.back()) *
+                                  _config.precision;
+    const uint32_t rows = entry.indices_values.empty()
+                              ? flattened_elems(entry.shape) /
+                                    std::max<uint32_t>(entry.shape.empty()
+                                                           ? 1
+                                                           : entry.shape.back(),
+                                                       1)
+                              : entry.indices_values.size();
+    uint64_t source_bytes = tensor_bytes_for_shape(entry.source_shape,
+                                                  _config.precision);
+    if (source_bytes == _config.precision && !entry.source_shape.empty())
+      source_bytes = tensor->get_size();
+    std::string source_id = entry.source_logical_id.empty()
+                                ? "embedding.table"
+                                : entry.source_logical_id;
+    addr_type source_base =
+        _residency_manager
+            ? _residency_manager->source_addr(source_id, source_bytes,
+                                             initial_medium)
+            : allocate_address_in_medium(static_cast<uint32_t>(source_bytes),
+                                         initial_medium);
+
+    for (uint32_t i = 0; i < rows; ++i) {
+      uint32_t row = entry.indices_values.empty() ? i : entry.indices_values[i];
+      if (!entry.source_shape.empty() && entry.source_shape[0] > 0)
+        row %= entry.source_shape[0];
+      _data_movements.push_back(PlannedDataMovement{
+          .tensor_name = tensor->get_name(),
+          .logical_id = source_id,
+          .role = entry.role,
+          .source = initial_medium,
+          .destination = runtime_medium,
+          .src_addr = source_base + static_cast<addr_type>(row) * row_bytes,
+          .dst_addr = tensor->get_address() + static_cast<addr_type>(i) * row_bytes,
+          .bytes = row_bytes,
+          .batch_id = effective_batch_id(entry),
+          .macro_batch_id = effective_macro_batch_id(entry),
+          .user_id = effective_user_id(entry),
+      });
+    }
+    return;
+  }
+
+  if (needs_preload && is_resident_role(entry.role) && _residency_manager &&
+      runtime_medium == MemoryMedium::HBM) {
+    std::string logical_id = effective_logical_id(entry);
+    if (_residency_manager->is_resident(logical_id)) {
+      tensor->set_address(_residency_manager->resident_addr(logical_id));
+      spdlog::debug("[TraceModel] {} uses resident {} at 0x{:x}",
+                    tensor->get_name(), logical_id, tensor->get_address());
+      return;
+    }
+
+    addr_type hbm_addr = _residency_manager->reserve_destination(
+        logical_id, tensor->get_size(), runtime_medium);
+    tensor->set_address(hbm_addr);
+    addr_type source_addr = _residency_manager->source_addr(
+        logical_id, tensor->get_size(), initial_medium);
+    _data_movements.push_back(PlannedDataMovement{
+        .tensor_name = tensor->get_name(),
+        .logical_id = logical_id,
+        .role = entry.role,
+        .source = initial_medium,
+        .destination = runtime_medium,
+        .src_addr = source_addr,
+        .dst_addr = tensor->get_address(),
+        .bytes = tensor->get_size(),
+        .batch_id = effective_batch_id(entry),
+        .macro_batch_id = effective_macro_batch_id(entry),
+        .user_id = effective_user_id(entry),
+        .makes_resident = true,
+    });
+    return;
+  }
+
   if (runtime_medium != MemoryMedium::UNKNOWN) {
     tensor->relocate(runtime_medium);
   }
 
-  MemoryMedium initial_medium = parse_medium_name(entry.initial_medium);
   if (!_graph.metadata.baseline_preload ||
       initial_medium == MemoryMedium::UNKNOWN ||
       runtime_medium == MemoryMedium::UNKNOWN ||
@@ -81,9 +219,9 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
       .src_addr = source_addr,
       .dst_addr = tensor->get_address(),
       .bytes = tensor->get_size(),
-      .batch_id = entry.batch_id,
-      .macro_batch_id = entry.macro_batch_id,
-      .user_id = entry.user_id,
+      .batch_id = effective_batch_id(entry),
+      .macro_batch_id = effective_macro_batch_id(entry),
+      .user_id = effective_user_id(entry),
   });
 }
 
@@ -115,6 +253,7 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
 	    _graph = trace_frontend::TraceParser::parse(_trace_path);
   _data_movements.clear();
   _submitted_movement_ids.clear();
+  _resident_loads.clear();
   _data_movements_submitted = false;
 
   for (auto& op : _graph.operators) {
@@ -289,6 +428,14 @@ std::vector<uint64_t> TraceModel::submit_data_movements(
     request.bytes = movement.bytes;
     uint64_t movement_id = controller->submit_migration_request(request, now_ps);
     _submitted_movement_ids.push_back(movement_id);
+    if (movement.makes_resident) {
+      _resident_loads.push_back(ResidentLoad{
+          .logical_id = movement.logical_id,
+          .hbm_addr = movement.dst_addr,
+          .bytes = movement.bytes,
+          .movement_id = movement_id,
+      });
+    }
     spdlog::debug(
         "[TraceModel] movement {} {}: 0x{:x} -> 0x{:x}, {} bytes",
         movement_id, movement.tensor_name, movement.src_addr, movement.dst_addr,
@@ -302,6 +449,16 @@ bool TraceModel::data_movements_ready(StorageController* controller) const {
   if (_submitted_movement_ids.empty()) return true;
   if (controller == nullptr) return true;
   return controller->movements_done(_submitted_movement_ids);
+}
+
+void TraceModel::complete_data_movements(StorageController* controller) {
+  if (controller == nullptr || _residency_manager == nullptr) return;
+  for (const auto& load : _resident_loads) {
+    if (controller->movement_done(load.movement_id)) {
+      _residency_manager->mark_resident(load.logical_id, load.hbm_addr,
+                                        load.bytes);
+    }
+  }
 }
 
 void TraceModel::prefill_ssd_tensors(Ssd* ssd) {

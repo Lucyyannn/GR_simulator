@@ -38,6 +38,15 @@ TensorEntry parse_tensor(const nlohmann::json& j) {
   entry.dtype = j.value("dtype", "float16");
   entry.is_weight = j.value("is_weight", false);
   entry.logical_id = j.value("logical_id", "");
+  entry.source_logical_id = j.value("source_logical_id", "");
+  if (j.contains("source_shape") && j["source_shape"].is_array()) {
+    for (auto& dim : j["source_shape"])
+      entry.source_shape.push_back(dim.get<uint32_t>());
+  }
+  if (j.contains("indices_values") && j["indices_values"].is_array()) {
+    for (auto& idx : j["indices_values"])
+      entry.indices_values.push_back(idx.get<uint32_t>());
+  }
   entry.role = j.value("role", "");
   entry.initial_medium = j.value("initial_medium", "");
   entry.runtime_medium = j.value("runtime_medium", "");

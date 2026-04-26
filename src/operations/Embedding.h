@@ -32,4 +32,5 @@ class Embedding : public Operation {
   uint32_t _index_element_bytes = 4;
   uint32_t _weight_input_idx = 0;
   uint32_t _indices_input_idx = 1;
+  bool _preloaded_rows = false;
 };

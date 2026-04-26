@@ -22,6 +22,18 @@ def hbm_tensor(name, shape, dtype="float16", **meta):
     return tensor(name, shape, dtype=dtype, runtime_medium="hbm", **meta)
 
 
+def ddr_tensor(name, shape, dtype="float16", is_weight=False, **meta):
+    return tensor(
+        name,
+        shape,
+        dtype=dtype,
+        is_weight=is_weight,
+        initial_medium="ddr",
+        runtime_medium="ddr",
+        **meta,
+    )
+
+
 def ddr_to_hbm_tensor(name, shape, dtype="float16", is_weight=False, **meta):
     return tensor(
         name,
@@ -90,7 +102,7 @@ def build_trace(
         ops,
         "aten::embedding",
         [
-            ddr_to_hbm_tensor(
+            ddr_tensor(
                 "embedding_table",
                 [vocab, hidden],
                 is_weight=True,
@@ -107,14 +119,21 @@ def build_trace(
             ),
         ],
         [
-            hbm_tensor(
+            ddr_to_hbm_tensor(
                 f"u{user_id}.b{batch_id}.m{macro_batch_id}.x0",
                 [tokens, hidden],
-                role="activation",
+                logical_id=f"u{user_id}.b{batch_id}.m{macro_batch_id}.embedding_rows",
+                role="embedding_rows",
+                source_logical_id="embedding.table",
+                source_shape=[vocab, hidden],
+                indices_values=indices_values,
                 **base,
             )
         ],
-        {"indices_values": ",".join(str(v) for v in indices_values)},
+        {
+            "indices_values": ",".join(str(v) for v in indices_values),
+            "modeling_mode": "preloaded_rows",
+        },
     )
 
     current = f"u{user_id}.b{batch_id}.m{macro_batch_id}.x0"

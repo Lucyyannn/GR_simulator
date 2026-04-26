@@ -8,6 +8,7 @@
 #include "Interconnect.h"
 #include "Model.h"
 #include "memory/StorageController.h"
+#include "memory/ResidencyManager.h"
 #include "scheduler/Scheduler.h"
 #include "scheduler/LanguageScheduler.h"
 #include <deque>
@@ -57,6 +58,7 @@ class Simulator {
   std::unique_ptr<Ddr> _ddr;
   std::unique_ptr<Ssd>  _ssd;    // FEMU-inspired storage (optional)
   std::unique_ptr<StorageController> _storage_controller;
+  std::unique_ptr<ResidencyManager> _residency_manager;
   std::unique_ptr<Scheduler> _scheduler;
   
   // period information (ps)

@@ -92,6 +92,7 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
   }
   _storage_controller =
       std::make_unique<StorageController>(config, _hbm.get(), _ddr.get(), _ssd.get());
+  _residency_manager = std::make_unique<ResidencyManager>();
 
   // Create interconnect object
   if (config.icnt_type == IcntType::SIMPLE) {
@@ -153,6 +154,7 @@ void Simulator::handle_model() {
 
   for (auto it = _preloading_models.begin(); it != _preloading_models.end();) {
     if ((*it)->data_movements_ready(_storage_controller.get())) {
+      (*it)->complete_data_movements(_storage_controller.get());
       spdlog::info("Model {} data ready at {:.6f} us",
                    (*it)->get_name(), ps_to_us(_core_time));
       _ready_to_compute_models.push_back(std::move(*it));
@@ -186,12 +188,14 @@ void Simulator::admit_preload_models() {
                  launch_model->get_name(), ps_to_us(_core_time),
                  _preloading_models.size(), max_preloading,
                  _waiting_to_preload_models.size());
+    launch_model->set_residency_manager(_residency_manager.get());
     launch_model->initialize_model(_weight_table[weight_key]);
     launch_model->prefill_ssd_tensors(_ssd.get());
     auto movement_ids =
         launch_model->submit_data_movements(_storage_controller.get(), _core_time);
     if (movement_ids.empty() ||
         launch_model->data_movements_ready(_storage_controller.get())) {
+      launch_model->complete_data_movements(_storage_controller.get());
       spdlog::info("Model {} data ready at {:.6f} us",
                    launch_model->get_name(), ps_to_us(_core_time));
       _ready_to_compute_models.push_back(std::move(launch_model));

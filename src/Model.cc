@@ -181,6 +181,8 @@ bool Model::data_movements_ready(StorageController* /*controller*/) const {
   return true;
 }
 
+void Model::complete_data_movements(StorageController* /*controller*/) {}
+
 uint64_t Model::prepare_baseline_storage(StorageController* /*controller*/,
                                          uint64_t now_ps) {
   return now_ps;

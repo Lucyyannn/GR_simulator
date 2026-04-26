@@ -57,6 +57,12 @@ Embedding::Embedding(SimulationConfig config, Model* model, std::string name,
   infer_output_shape();
   if (_attributes.find("indices_dtype") != _attributes.end())
     _index_element_bytes = get_dtype_bytes(get_attribute("indices_dtype"));
+  if ((_attributes.count("modeling_mode") &&
+       _attributes.at("modeling_mode") == "preloaded_rows") ||
+      (_attributes.count("preloaded_rows") &&
+       _attributes.at("preloaded_rows") == "1")) {
+    _preloaded_rows = true;
+  }
 
   std::string output_name = _attributes.count("output_name")
                                 ? _attributes["output_name"]
@@ -66,7 +72,8 @@ Embedding::Embedding(SimulationConfig config, Model* model, std::string name,
   _outputs.push_back(output_tensor->get_id());
   _model->add_tensor(std::move(output_tensor));
 
-  calculate_loops();
+  if (!_preloaded_rows)
+    calculate_loops();
 }
 
 void Embedding::infer_output_shape() {
@@ -111,6 +118,18 @@ void Embedding::calculate_loops() {
 }
 
 void Embedding::initialize_tiles(MappingTable& mapping_table) {
+  (void)mapping_table;
+  if (_preloaded_rows) {
+    auto tile = std::make_unique<Tile>(Tile{
+        .status = Tile::Status::INITIALIZED,
+        .optype = "Embedding",
+        .layer_id = _id,
+        .accum = false,
+        .skip = true,
+    });
+    _tiles.push_back(std::move(tile));
+    return;
+  }
   for (uint32_t lookup_offset = 0; lookup_offset < _num_lookups;
        lookup_offset += _rows_per_tile) {
     uint32_t lookups = std::min(_num_lookups - lookup_offset, _rows_per_tile);

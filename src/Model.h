@@ -9,6 +9,7 @@
 
 class Ssd;
 class StorageController;
+class ResidencyManager;
 
 class Model {
   public:
@@ -43,8 +44,12 @@ class Model {
 	    virtual std::vector<uint64_t> submit_data_movements(
 	        StorageController* controller, uint64_t now_ps);
 	    virtual bool data_movements_ready(StorageController* controller) const;
+	    virtual void complete_data_movements(StorageController* controller);
 	    virtual uint64_t prepare_baseline_storage(StorageController* controller,
 	                                              uint64_t now_ps);
+    void set_residency_manager(ResidencyManager* residency_manager) {
+      _residency_manager = residency_manager;
+    }
   protected:
 
     uint32_t _id;
@@ -66,6 +71,7 @@ class Model {
     uint64_t _request_time = 0;   // pico second
     uint64_t _start_time = 0;   // pico second
     bool _started = false;
+    ResidencyManager* _residency_manager = nullptr;
     bool check_exist_in_exeutable(uint32_t id);
 };
 

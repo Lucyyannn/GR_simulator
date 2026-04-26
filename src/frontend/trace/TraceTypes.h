@@ -11,6 +11,9 @@ struct TensorEntry {
   std::string dtype;
   bool is_weight = false;
   std::string logical_id;
+  std::string source_logical_id;
+  std::vector<uint32_t> source_shape;
+  std::vector<uint32_t> indices_values;
   std::string role;
   std::string initial_medium;
   std::string runtime_medium;
