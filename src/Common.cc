@@ -401,6 +401,14 @@ SimulationConfig initialize_config(json config) {
   parsed_config.dram_config_path = parsed_config.hbm.config_path;
 
   parsed_config.scheduler_type = get_config_value<std::string>(config, "scheduler");
+  if (config.contains("pipeline")) {
+    const auto& pipeline = config["pipeline"];
+    parsed_config.max_preloading_models =
+        pipeline.value("max_preloading_models", parsed_config.max_preloading_models);
+  } else {
+    parsed_config.max_preloading_models =
+        config.value("max_preloading_models", parsed_config.max_preloading_models);
+  }
   parsed_config.precision = get_config_value<uint32_t>(config, "precision");
   parsed_config.layout = get_config_value<std::string>(config, "layout");
   parsed_config.enable_fast_forward = config.value("enable_fast_forward", false);

@@ -14,10 +14,9 @@ class Concat : public Operation {
   protected:
 
   private:
-    // std::vector<uint32_t> _kernel_shape;
-    // std::vector<uint32_t> _strides;
-    // std::vector<uint32_t> _dilations;
-    // std::vector<uint32_t> _pads;
+    void initialize_copy_tile(uint32_t input_idx, uint64_t element_offset,
+                              uint64_t elements, uint64_t axis_base);
 
     uint32_t _axis;
+    std::vector<uint32_t> _output_shape;
 };

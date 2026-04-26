@@ -40,6 +40,9 @@ class Model {
     virtual void initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_table);
 	    virtual void initialize_weight(std::vector<std::unique_ptr<Tensor>>& weight_table);
 	    virtual void prefill_ssd_tensors(Ssd* ssd);
+	    virtual std::vector<uint64_t> submit_data_movements(
+	        StorageController* controller, uint64_t now_ps);
+	    virtual bool data_movements_ready(StorageController* controller) const;
 	    virtual uint64_t prepare_baseline_storage(StorageController* controller,
 	                                              uint64_t now_ps);
   protected:

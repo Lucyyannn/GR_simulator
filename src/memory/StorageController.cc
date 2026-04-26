@@ -78,6 +78,18 @@ uint64_t StorageController::submit_migration_request(
   return req.id;
 }
 
+bool StorageController::movement_done(uint64_t movement_id) const {
+  return _completed_migrations.find(movement_id) != _completed_migrations.end();
+}
+
+bool StorageController::movements_done(
+    const std::vector<uint64_t>& movement_ids) const {
+  for (uint64_t id : movement_ids) {
+    if (!movement_done(id)) return false;
+  }
+  return true;
+}
+
 Dram* StorageController::device_for_medium(MemoryMedium medium) const {
   switch (medium) {
     case MemoryMedium::HBM:
@@ -426,6 +438,7 @@ void StorageController::handle_completed_access(uint64_t now_ps,
   if (migration.bytes_written >= migration.request.bytes &&
       migration.inflight_reads == 0 && migration.inflight_writes == 0 &&
       migration.next_offset >= migration.request.bytes) {
+    _completed_migrations.insert(migration_it->first);
     _active_migrations.erase(migration_it);
   }
 }

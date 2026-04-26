@@ -116,6 +116,8 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
 
   //Configure Hardware Scheduler
   _scheduler = Scheduler::create(_config, &_core_cycles, &_core_time, this);
+  spdlog::info("Pipeline admission max_preloading_models={}",
+               _config.max_preloading_models);
   
   /* Create heap */
   std::make_heap(_models.begin(), _models.end(), CompareModel());
@@ -134,21 +136,83 @@ void Simulator::handle_model() {
       std::push_heap(_models.begin(), _models.end(), CompareModel());
     }
   }
+  size_t arrived_count = 0;
   while (!_models.empty() && _models.front()->get_request_time() <= _core_time) {
     std::unique_ptr<Model> launch_model = std::move(_models.front());
     std::pop_heap(_models.begin(), _models.end(), CompareModel());
     _models.pop_back();
+    _waiting_to_preload_models.push_back(std::move(launch_model));
+    arrived_count++;
+  }
+  if (arrived_count > 0) {
+    spdlog::info("Queued {} model(s) waiting_to_preload at {:.6f} us "
+                 "(total_waiting={})",
+                 arrived_count, ps_to_us(_core_time),
+                 _waiting_to_preload_models.size());
+  }
 
-    launch_model->initialize_model(_weight_table[launch_model->get_name()]);
+  for (auto it = _preloading_models.begin(); it != _preloading_models.end();) {
+    if ((*it)->data_movements_ready(_storage_controller.get())) {
+      spdlog::info("Model {} data ready at {:.6f} us",
+                   (*it)->get_name(), ps_to_us(_core_time));
+      _ready_to_compute_models.push_back(std::move(*it));
+      it = _preloading_models.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
+  admit_preload_models();
+  schedule_ready_models();
+}
+
+void Simulator::admit_preload_models() {
+  const uint32_t max_preloading = _config.max_preloading_models;
+  while (!_waiting_to_preload_models.empty() &&
+         (max_preloading == 0 ||
+          _preloading_models.size() < max_preloading)) {
+    std::unique_ptr<Model> launch_model =
+        std::move(_waiting_to_preload_models.front());
+    _waiting_to_preload_models.pop_front();
+
+    const json model_config = launch_model->get_model_config();
+    std::string weight_key = launch_model->get_name();
+    if (model_config.contains("weight_key")) {
+      weight_key = model_config["weight_key"].get<std::string>();
+    }
+
+    spdlog::info("Admit model {} to preload at {:.6f} us "
+                 "(inflight_preloads={}/{}, waiting_remaining={})",
+                 launch_model->get_name(), ps_to_us(_core_time),
+                 _preloading_models.size(), max_preloading,
+                 _waiting_to_preload_models.size());
+    launch_model->initialize_model(_weight_table[weight_key]);
     launch_model->prefill_ssd_tensors(_ssd.get());
-    uint64_t preload_finish_ps =
-        launch_model->prepare_baseline_storage(_storage_controller.get(),
-                                               _core_time);
-    advance_idle_time_to(preload_finish_ps);
-    launch_model->set_request_time(_core_time);
+    auto movement_ids =
+        launch_model->submit_data_movements(_storage_controller.get(), _core_time);
+    if (movement_ids.empty() ||
+        launch_model->data_movements_ready(_storage_controller.get())) {
+      spdlog::info("Model {} data ready at {:.6f} us",
+                   launch_model->get_name(), ps_to_us(_core_time));
+      _ready_to_compute_models.push_back(std::move(launch_model));
+    } else {
+      spdlog::info("Model {} preloading {} movements at {:.6f} us",
+                   launch_model->get_name(), movement_ids.size(),
+                   ps_to_us(_core_time));
+      _preloading_models.push_back(std::move(launch_model));
+    }
+  }
+}
+
+void Simulator::schedule_ready_models() {
+  while (!_ready_to_compute_models.empty()) {
+    std::unique_ptr<Model> ready_model =
+        std::move(_ready_to_compute_models.front());
+    _ready_to_compute_models.pop_front();
+    ready_model->set_request_time(_core_time);
     spdlog::info("Schedule model: {} at {:.6f} us",
-                 launch_model->get_name(), ps_to_us(_core_time));
-    _scheduler->schedule_model(std::move(launch_model), 1);
+                 ready_model->get_name(), ps_to_us(_core_time));
+    _scheduler->schedule_model(std::move(ready_model), 1);
   }
 }
 
@@ -278,8 +342,13 @@ void Simulator::cycle() {
 }
 
 void Simulator::register_model(std::unique_ptr<Model> model) {
-  if(_weight_table.find(model->get_name()) == _weight_table.end()) {
-    model->initialize_weight(_weight_table[model->get_name()]);
+  const json model_config = model->get_model_config();
+  std::string weight_key = model->get_name();
+  if (model_config.contains("weight_key")) {
+    weight_key = model_config["weight_key"].get<std::string>();
+  }
+  if(_weight_table.find(weight_key) == _weight_table.end()) {
+    model->initialize_weight(_weight_table[weight_key]);
   } 
   _models.push_back(std::move(model));
   std::push_heap(_models.begin(), _models.end(), CompareModel());
@@ -305,6 +374,9 @@ void Simulator::finish_language_model(uint32_t model_id) {
 bool Simulator::running() {
   bool running = false;
   running |= !_models.empty();
+  running |= !_waiting_to_preload_models.empty();
+  running |= !_preloading_models.empty();
+  running |= !_ready_to_compute_models.empty();
   for (auto &core : _cores) {
     running = running || core->running();
   }
@@ -373,6 +445,8 @@ bool Simulator::can_fast_forward_to(uint64_t target_ps) {
   if (_language_mode) return false;
   if (_icnt_interval != 0) return false;
   if (!_models.empty()) return false;
+  if (!_waiting_to_preload_models.empty()) return false;
+  if (!_ready_to_compute_models.empty()) return false;
   if (!_storage_controller || !_storage_controller->has_pending()) return false;
   if (_storage_controller->has_ready_response()) return false;
   if (!_icnt || !_icnt->supports_fast_forward() || _icnt->running()) return false;

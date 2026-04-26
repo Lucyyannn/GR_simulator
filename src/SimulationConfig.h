@@ -119,6 +119,7 @@ struct SimulationConfig {
 
   /* Sheduler config */
   std::string scheduler_type;
+  uint32_t max_preloading_models = 1;
 
   /* Other configs */
   uint32_t precision;

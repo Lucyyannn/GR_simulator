@@ -16,6 +16,8 @@ struct TensorEntry {
   std::string runtime_medium;
   uint32_t layer_id = 0;
   uint32_t user_id = 0;
+  uint32_t batch_id = 0;
+  uint32_t macro_batch_id = 0;
 };
 
 struct OpEntry {
@@ -32,6 +34,8 @@ struct TraceMetadata {
   std::string layout;
   bool fail_on_unknown_op = false;
   bool baseline_preload = false;
+  bool pipeline_enabled = false;
+  std::map<std::string, std::string> op_modeling;
 };
 
 struct TraceGraph {

@@ -1,0 +1,1416 @@
+{
+  "metadata": {
+    "format_version": "1.0",
+    "model_name": "hstu_u5_b1_m2",
+    "model_type": "hstu_ranking",
+    "workload_type": "hstu_ranking",
+    "layout": "NHWC",
+    "num_layers": 2,
+    "user_id": 5,
+    "batch_id": 1,
+    "macro_batch_id": 2,
+    "pipeline_enabled": true,
+    "baseline_preload": true,
+    "fail_on_unknown_op": true,
+    "random_seed": 1234,
+    "op_modeling": {
+      "split": "skip",
+      "view": "skip",
+      "concat": "skip"
+    }
+  },
+  "operators": [
+    {
+      "id": 0,
+      "name": "aten::embedding",
+      "inputs": [
+        {
+          "name": "embedding_table",
+          "shape": [
+            1024,
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "embedding.table",
+          "role": "embedding_table",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2
+        },
+        {
+          "name": "u5.b1.m2.candidate_ids",
+          "shape": [
+            16
+          ],
+          "dtype": "int64",
+          "runtime_medium": "hbm",
+          "role": "indices",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.x0",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2
+        }
+      ],
+      "attrs": {
+        "indices_values": "476,724,422,880,909,49,828,141,129,145,500,780,994,777,486,619"
+      }
+    },
+    {
+      "id": 1,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.x0",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.w1",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer0.w1",
+          "role": "weight",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.b1",
+          "shape": [
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer0.b1",
+          "role": "weight",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer0.z",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 2,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer0.z",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer0.zact",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 3,
+      "name": "aten::split",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer0.zact",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer0.u",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "u5.b1.m2.layer0.v",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "u5.b1.m2.layer0.q",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "u5.b1.m2.layer0.k",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "attrs": {
+        "axis": 1,
+        "modeling_mode": "skip"
+      }
+    },
+    {
+      "id": 4,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "user5.layer0.kc",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user5.layer0.kc",
+          "role": "kv_cache_k",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "u5.b1.m2.layer0.k",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer0.k_all",
+          "shape": [
+            24,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "attrs": {
+        "axis": 0,
+        "modeling_mode": "skip"
+      }
+    },
+    {
+      "id": 5,
+      "name": "aten::transpose",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer0.k_all",
+          "shape": [
+            24,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer0.k_all_t",
+          "shape": [
+            16,
+            24
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "attrs": {
+        "dims": "1,0",
+        "modeling_mode": "skip"
+      }
+    },
+    {
+      "id": 6,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer0.q",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "u5.b1.m2.layer0.k_all_t",
+          "shape": [
+            16,
+            24
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer0.score",
+          "shape": [
+            16,
+            24
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 7,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer0.score",
+          "shape": [
+            16,
+            24
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer0.attn",
+          "shape": [
+            16,
+            24
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 8,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "user5.layer0.vc",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user5.layer0.vc",
+          "role": "kv_cache_v",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "u5.b1.m2.layer0.v",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer0.v_all",
+          "shape": [
+            24,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "attrs": {
+        "axis": 0,
+        "modeling_mode": "skip"
+      }
+    },
+    {
+      "id": 9,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer0.attn",
+          "shape": [
+            16,
+            24
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "u5.b1.m2.layer0.v_all",
+          "shape": [
+            24,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer0.av",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 10,
+      "name": "aten::layer_norm",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer0.av",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.ln_w",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer0.ln_w",
+          "role": "weight",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.ln_b",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer0.ln_b",
+          "role": "weight",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer0.av_norm",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 11,
+      "name": "aten::mul",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer0.av_norm",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "u5.b1.m2.layer0.u",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer0.gated",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 12,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer0.gated",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.w2",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer0.w2",
+          "role": "weight",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        },
+        {
+          "name": "layer0.b2",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer0.b2",
+          "role": "weight",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.x1",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 0
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 13,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.x1",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.w1",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer1.w1",
+          "role": "weight",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.b1",
+          "shape": [
+            64
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer1.b1",
+          "role": "weight",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer1.z",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 14,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer1.z",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer1.zact",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 15,
+      "name": "aten::split",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer1.zact",
+          "shape": [
+            16,
+            64
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer1.u",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "u5.b1.m2.layer1.v",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "u5.b1.m2.layer1.q",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "u5.b1.m2.layer1.k",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "attrs": {
+        "axis": 1,
+        "modeling_mode": "skip"
+      }
+    },
+    {
+      "id": 16,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "user5.layer1.kc",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user5.layer1.kc",
+          "role": "kv_cache_k",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "u5.b1.m2.layer1.k",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer1.k_all",
+          "shape": [
+            24,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "attrs": {
+        "axis": 0,
+        "modeling_mode": "skip"
+      }
+    },
+    {
+      "id": 17,
+      "name": "aten::transpose",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer1.k_all",
+          "shape": [
+            24,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer1.k_all_t",
+          "shape": [
+            16,
+            24
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "attrs": {
+        "dims": "1,0",
+        "modeling_mode": "skip"
+      }
+    },
+    {
+      "id": 18,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer1.q",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "u5.b1.m2.layer1.k_all_t",
+          "shape": [
+            16,
+            24
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer1.score",
+          "shape": [
+            16,
+            24
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 19,
+      "name": "aten::silu",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer1.score",
+          "shape": [
+            16,
+            24
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer1.attn",
+          "shape": [
+            16,
+            24
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 20,
+      "name": "aten::cat",
+      "inputs": [
+        {
+          "name": "user5.layer1.vc",
+          "shape": [
+            8,
+            16
+          ],
+          "dtype": "float16",
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "user5.layer1.vc",
+          "role": "kv_cache_v",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "u5.b1.m2.layer1.v",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer1.v_all",
+          "shape": [
+            24,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "attrs": {
+        "axis": 0,
+        "modeling_mode": "skip"
+      }
+    },
+    {
+      "id": 21,
+      "name": "aten::matmul",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer1.attn",
+          "shape": [
+            16,
+            24
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "u5.b1.m2.layer1.v_all",
+          "shape": [
+            24,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer1.av",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 22,
+      "name": "aten::layer_norm",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer1.av",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.ln_w",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer1.ln_w",
+          "role": "weight",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.ln_b",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer1.ln_b",
+          "role": "weight",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer1.av_norm",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 23,
+      "name": "aten::mul",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer1.av_norm",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "u5.b1.m2.layer1.u",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.layer1.gated",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    },
+    {
+      "id": 24,
+      "name": "aten::linear",
+      "inputs": [
+        {
+          "name": "u5.b1.m2.layer1.gated",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.w2",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer1.w2",
+          "role": "weight",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        },
+        {
+          "name": "layer1.b2",
+          "shape": [
+            16
+          ],
+          "dtype": "float16",
+          "is_weight": true,
+          "initial_medium": "ddr",
+          "runtime_medium": "hbm",
+          "logical_id": "layer1.b2",
+          "role": "weight",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "outputs": [
+        {
+          "name": "u5.b1.m2.x2",
+          "shape": [
+            16,
+            16
+          ],
+          "dtype": "float16",
+          "runtime_medium": "hbm",
+          "role": "activation",
+          "user_id": 5,
+          "batch_id": 1,
+          "macro_batch_id": 2,
+          "layer_id": 1
+        }
+      ],
+      "attrs": {}
+    }
+  ]
+}

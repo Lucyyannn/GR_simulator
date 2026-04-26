@@ -5,6 +5,8 @@
 #include "frontend/trace/TraceParser.h"
 #include "frontend/trace/TraceOpConverter.h"
 
+#include <algorithm>
+#include <cctype>
 #include <limits>
 
 TraceModel::TraceModel(const std::string& trace_path,
@@ -70,13 +72,18 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
   addr_type source_addr =
       allocate_address_in_medium(static_cast<uint32_t>(tensor->get_size()),
                                  initial_medium);
-  _baseline_migrations.push_back(BaselineMigration{
+  _data_movements.push_back(PlannedDataMovement{
       .tensor_name = tensor->get_name(),
+      .logical_id = entry.logical_id,
+      .role = entry.role,
       .source = initial_medium,
       .destination = runtime_medium,
       .src_addr = source_addr,
       .dst_addr = tensor->get_address(),
       .bytes = tensor->get_size(),
+      .batch_id = entry.batch_id,
+      .macro_batch_id = entry.macro_batch_id,
+      .user_id = entry.user_id,
   });
 }
 
@@ -106,7 +113,9 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
 
 	  if (_graph.operators.empty())
 	    _graph = trace_frontend::TraceParser::parse(_trace_path);
-  _baseline_migrations.clear();
+  _data_movements.clear();
+  _submitted_movement_ids.clear();
+  _data_movements_submitted = false;
 
   for (auto& op : _graph.operators) {
     for (auto& inp : op.inputs) remember_tensor_entry(inp);
@@ -144,6 +153,16 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
 
 	  for (auto& op_entry : _graph.operators) {
 	    auto converted = trace_frontend::TraceOpConverter::convert(op_entry);
+    if ((converted.optype == "Split" || converted.optype == "View" ||
+         converted.optype == "Concat") &&
+        !converted.attrs.count("modeling_mode")) {
+      std::string key = converted.optype;
+      std::transform(key.begin(), key.end(), key.begin(),
+                     [](unsigned char c) { return std::tolower(c); });
+      auto mode_it = _graph.metadata.op_modeling.find(key);
+      if (mode_it != _graph.metadata.op_modeling.end())
+        converted.attrs["modeling_mode"] = mode_it->second;
+    }
     if (_graph.metadata.fail_on_unknown_op && converted.optype == "Dummy") {
       spdlog::error("[TraceModel] Unsupported trace op '{}' in fail-fast mode",
                     op_entry.name);
@@ -230,26 +249,12 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
 
 uint64_t TraceModel::prepare_baseline_storage(StorageController* controller,
                                               uint64_t now_ps) {
-  if (controller == nullptr || _baseline_migrations.empty()) return now_ps;
+  if (controller == nullptr || _data_movements.empty()) return now_ps;
 
-  spdlog::info("[TraceModel] {} submitting {} baseline preload migrations",
-               _name, _baseline_migrations.size());
-  for (const auto& migration : _baseline_migrations) {
-    MigrationRequest request;
-    request.src_medium = migration.source;
-    request.dst_medium = migration.destination;
-    request.src_addr = migration.src_addr;
-    request.dst_addr = migration.dst_addr;
-    request.bytes = migration.bytes;
-    controller->submit_migration_request(request, now_ps);
-    spdlog::debug(
-        "[TraceModel] preload {}: 0x{:x} -> 0x{:x}, {} bytes",
-        migration.tensor_name, migration.src_addr, migration.dst_addr,
-        migration.bytes);
-  }
+  submit_data_movements(controller, now_ps);
 
   uint64_t current_ps = now_ps;
-  while (controller->has_pending()) {
+  while (!data_movements_ready(controller)) {
     uint64_t next_ps = controller->next_event_time_ps();
     if (next_ps == std::numeric_limits<uint64_t>::max()) break;
     if (next_ps <= current_ps) next_ps = current_ps + 1;
@@ -265,6 +270,38 @@ uint64_t TraceModel::prepare_baseline_storage(StorageController* controller,
   spdlog::info("[TraceModel] {} baseline preload finished at {} ps",
                _name, current_ps);
   return current_ps;
+}
+
+std::vector<uint64_t> TraceModel::submit_data_movements(
+    StorageController* controller, uint64_t now_ps) {
+  if (controller == nullptr || _data_movements.empty())
+    return _submitted_movement_ids;
+  if (_data_movements_submitted) return _submitted_movement_ids;
+
+  spdlog::info("[TraceModel] {} submitting {} data movements",
+               _name, _data_movements.size());
+  for (const auto& movement : _data_movements) {
+    MigrationRequest request;
+    request.src_medium = movement.source;
+    request.dst_medium = movement.destination;
+    request.src_addr = movement.src_addr;
+    request.dst_addr = movement.dst_addr;
+    request.bytes = movement.bytes;
+    uint64_t movement_id = controller->submit_migration_request(request, now_ps);
+    _submitted_movement_ids.push_back(movement_id);
+    spdlog::debug(
+        "[TraceModel] movement {} {}: 0x{:x} -> 0x{:x}, {} bytes",
+        movement_id, movement.tensor_name, movement.src_addr, movement.dst_addr,
+        movement.bytes);
+  }
+  _data_movements_submitted = true;
+  return _submitted_movement_ids;
+}
+
+bool TraceModel::data_movements_ready(StorageController* controller) const {
+  if (_submitted_movement_ids.empty()) return true;
+  if (controller == nullptr) return true;
+  return controller->movements_done(_submitted_movement_ids);
 }
 
 void TraceModel::prefill_ssd_tensors(Ssd* ssd) {

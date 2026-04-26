@@ -43,6 +43,8 @@ TensorEntry parse_tensor(const nlohmann::json& j) {
   entry.runtime_medium = j.value("runtime_medium", "");
   entry.layer_id = j.value("layer_id", 0);
   entry.user_id = j.value("user_id", 0);
+  entry.batch_id = j.value("batch_id", 0);
+  entry.macro_batch_id = j.value("macro_batch_id", 0);
   return entry;
 }
 
@@ -103,6 +105,12 @@ TraceGraph TraceParser::parse(const std::string& json_path) {
     graph.metadata.layout = meta.value("layout", "NHWC");
     graph.metadata.fail_on_unknown_op = meta.value("fail_on_unknown_op", false);
     graph.metadata.baseline_preload = meta.value("baseline_preload", false);
+    graph.metadata.pipeline_enabled = meta.value("pipeline_enabled", false);
+    if (meta.contains("op_modeling") && meta["op_modeling"].is_object()) {
+      for (auto it = meta["op_modeling"].begin(); it != meta["op_modeling"].end(); ++it) {
+        if (it->is_string()) graph.metadata.op_modeling[it.key()] = it->get<std::string>();
+      }
+    }
   }
 
   if (root.contains("operators") && root["operators"].is_array()) {

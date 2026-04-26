@@ -10,6 +10,7 @@
 #include "memory/StorageController.h"
 #include "scheduler/Scheduler.h"
 #include "scheduler/LanguageScheduler.h"
+#include <deque>
 #include <queue>
 
 #define CORE_MASK 0x1 << 1
@@ -38,7 +39,9 @@ class Simulator {
 	  uint64_t count_ticks_before(uint64_t next_tick_ps, uint64_t period_ps,
 	                              uint64_t target_ps) const;
 	  void advance_idle_time_to(uint64_t target_ps);
-	  void handle_model();
+  void handle_model();
+  void admit_preload_models();
+  void schedule_ready_models();
   uint32_t get_dest_node(MemoryAccess* access);
   void print_simulation_time_summary(double wall_clock_seconds) const;
   SimulationConfig _config;
@@ -92,6 +95,9 @@ class Simulator {
   robin_hood::unordered_map<std::string, 
     std::vector<std::unique_ptr<Tensor>>> _weight_table;
   std::vector<std::unique_ptr<Model>>  _models;
+  std::deque<std::unique_ptr<Model>> _waiting_to_preload_models;
+  std::deque<std::unique_ptr<Model>> _preloading_models;
+  std::deque<std::unique_ptr<Model>> _ready_to_compute_models;
   robin_hood::unordered_map<std::string, std::unique_ptr<Model>> _language_models;
   std::vector<std::chrono::time_point<std::chrono::high_resolution_clock>> _tile_timestamp;
 

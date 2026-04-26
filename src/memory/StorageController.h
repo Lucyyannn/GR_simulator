@@ -4,6 +4,7 @@
 #include <deque>
 #include <map>
 #include <queue>
+#include <set>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -40,6 +41,8 @@ class StorageController {
 
   uint64_t submit_migration_request(const MigrationRequest& request,
                                     uint64_t now_ps);
+  bool movement_done(uint64_t movement_id) const;
+  bool movements_done(const std::vector<uint64_t>& movement_ids) const;
 
  private:
   struct SsdWriteStreamKey {
@@ -106,6 +109,7 @@ class StorageController {
   std::deque<MemoryAccess*> _ready_responses;
   std::queue<MemoryAccess*> _retry_queue;
   std::map<uint64_t, ActiveMigration> _active_migrations;
+  std::set<uint64_t> _completed_migrations;
   std::map<SsdWriteStreamKey, PendingSsdWrite> _pending_ssd_writes;
   std::map<uint64_t, SsdAggregateContext> _ssd_write_aggregates;
   std::map<addr_type, uint64_t> _ssd_inflight_read_pages;

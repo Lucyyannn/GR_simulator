@@ -11,6 +11,10 @@ class View : public Operation {
   void initialize_tiles(MappingTable& mapping_table) override;
 
  private:
+  void initialize_copy_tile(uint64_t element_offset, uint64_t elements);
+  uint64_t input_element_for_output(uint64_t output_element) const;
+  std::vector<uint32_t> _input_shape;
   std::vector<uint32_t> _output_shape;
+  std::vector<uint32_t> _dims;
   std::string _output_name;
 };
