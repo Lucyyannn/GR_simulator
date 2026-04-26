@@ -78,15 +78,26 @@ def op_modeling_attrs(op_modeling, op_name):
     return {"modeling_mode": mode}
 
 
-def build_reuse_mapping(length, period):
-    if period is None or period <= 0 or period >= length:
+def build_action_reuse_mapping(length, action_count, rng):
+    if action_count is None or action_count <= 0 or action_count >= length:
         return None
-    physical_rows = min(period, length)
+    action_count = min(action_count, length)
+    action_ids = list(range(action_count))
+    action_ids.extend(rng.randrange(action_count) for _ in range(length - action_count))
+
+    action_to_physical = {}
+    logical_to_physical = []
+    for action_id in action_ids:
+        if action_id not in action_to_physical:
+            action_to_physical[action_id] = len(action_to_physical)
+        logical_to_physical.append(action_to_physical[action_id])
+
     return {
         "reuse_mode": "row_reuse",
         "reuse_axis": 0,
-        "reuse_physical_rows": physical_rows,
-        "reuse_logical_to_physical": [i % physical_rows for i in range(length)],
+        "reuse_physical_rows": len(action_to_physical),
+        "reuse_logical_to_physical": logical_to_physical,
+        "reuse_action_ids": action_ids,
     }
 
 
@@ -104,14 +115,17 @@ def build_trace(
     op_modeling=None,
     pipeline_enabled=False,
     kv_reuse_enabled=False,
-    kv_reuse_period=None,
+    kv_reuse_action_count=None,
     seed=0,
 ):
     op_modeling = op_modeling or {}
+    reuse_rng = random.Random(seed + user_id * 1000003 + batch_id * 9176 + macro_batch_id)
     ops = []
     indices_values = indices_values or [i % vocab for i in range(tokens)]
     kv_reuse_meta = (
-        build_reuse_mapping(kv_len, kv_reuse_period) if kv_reuse_enabled else None
+        build_action_reuse_mapping(kv_len, kv_reuse_action_count, reuse_rng)
+        if kv_reuse_enabled
+        else None
     )
 
     base = common_meta(user_id, batch_id, macro_batch_id)
@@ -412,7 +426,7 @@ def write_single_trace(args, op_modeling):
         op_modeling=op_modeling,
         pipeline_enabled=args.pipeline,
         kv_reuse_enabled=args.enable_kv_reuse,
-        kv_reuse_period=args.kv_reuse_period,
+        kv_reuse_action_count=args.kv_reuse_action_count,
         seed=args.seed,
     )
     output = Path(args.output)
@@ -464,7 +478,7 @@ def write_pipeline_traces(args, op_modeling):
                         op_modeling=op_modeling,
                         pipeline_enabled=True,
                         kv_reuse_enabled=args.enable_kv_reuse,
-                        kv_reuse_period=args.kv_reuse_period,
+                        kv_reuse_action_count=args.kv_reuse_action_count,
                         seed=args.seed,
                     )
                     trace_path = output_dir / f"{shared_weight_key}.json"
@@ -494,7 +508,7 @@ def write_pipeline_traces(args, op_modeling):
                         op_modeling=op_modeling,
                         pipeline_enabled=True,
                         kv_reuse_enabled=args.enable_kv_reuse,
-                        kv_reuse_period=args.kv_reuse_period,
+                        kv_reuse_action_count=args.kv_reuse_action_count,
                         seed=args.seed,
                     )
                     trace_path = output_dir / f"{model_name}.json"
@@ -529,7 +543,7 @@ def write_pipeline_traces(args, op_modeling):
                 "op_modeling": op_modeling,
                 "shared_trace": args.shared_trace,
                 "kv_reuse_enabled": args.enable_kv_reuse,
-                "kv_reuse_period": args.kv_reuse_period,
+                "kv_reuse_action_count": args.kv_reuse_action_count,
             },
             "models": models,
         },
@@ -555,10 +569,10 @@ def main():
     parser.add_argument("--pipeline", action="store_true")
     parser.add_argument("--enable-kv-reuse", action="store_true")
     parser.add_argument(
-        "--kv-reuse-period",
+        "--kv-reuse-action-count",
         type=int,
         default=4,
-        help="Synthetic action reuse period for KV cache rows when --enable-kv-reuse is set.",
+        help="Number of distinct synthetic actions in the generated KV history sequence.",
     )
     parser.add_argument(
         "--shared-trace",
