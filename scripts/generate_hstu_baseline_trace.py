@@ -78,26 +78,49 @@ def op_modeling_attrs(op_modeling, op_name):
     return {"modeling_mode": mode}
 
 
-def build_action_reuse_mapping(length, action_count, rng):
-    if action_count is None or action_count <= 0 or action_count >= length:
+def build_action_reuse_mapping(
+    length,
+    action_count,
+    rng,
+    action_offset=1,
+    action_stride=2,
+):
+    action_positions = list(range(action_offset, length, action_stride))
+    if (
+        action_count is None
+        or action_count <= 0
+        or action_count >= len(action_positions)
+    ):
         return None
-    action_count = min(action_count, length)
-    action_ids = list(range(action_count))
-    action_ids.extend(rng.randrange(action_count) for _ in range(length - action_count))
 
-    action_to_physical = {}
+    action_count = min(action_count, len(action_positions))
+    action_ids = list(range(action_count))
+    action_ids.extend(
+        rng.randrange(action_count) for _ in range(len(action_positions) - action_count)
+    )
+
+    action_id_by_position = dict(zip(action_positions, action_ids))
+    row_to_physical = {}
     logical_to_physical = []
-    for action_id in action_ids:
-        if action_id not in action_to_physical:
-            action_to_physical[action_id] = len(action_to_physical)
-        logical_to_physical.append(action_to_physical[action_id])
+    for logical_row in range(length):
+        if logical_row in action_id_by_position:
+            row_key = ("action", action_id_by_position[logical_row])
+        else:
+            row_key = ("item", logical_row)
+
+        if row_key not in row_to_physical:
+            row_to_physical[row_key] = len(row_to_physical)
+        logical_to_physical.append(row_to_physical[row_key])
 
     return {
         "reuse_mode": "row_reuse",
         "reuse_axis": 0,
-        "reuse_physical_rows": len(action_to_physical),
+        "reuse_physical_rows": len(row_to_physical),
         "reuse_logical_to_physical": logical_to_physical,
+        "reuse_action_positions": action_positions,
         "reuse_action_ids": action_ids,
+        "reuse_action_offset": action_offset,
+        "reuse_action_stride": action_stride,
     }
 
 
@@ -116,6 +139,8 @@ def build_trace(
     pipeline_enabled=False,
     kv_reuse_enabled=False,
     kv_reuse_action_count=None,
+    kv_reuse_action_offset=1,
+    kv_reuse_action_stride=2,
     seed=0,
 ):
     op_modeling = op_modeling or {}
@@ -123,7 +148,13 @@ def build_trace(
     ops = []
     indices_values = indices_values or [i % vocab for i in range(tokens)]
     kv_reuse_meta = (
-        build_action_reuse_mapping(kv_len, kv_reuse_action_count, reuse_rng)
+        build_action_reuse_mapping(
+            kv_len,
+            kv_reuse_action_count,
+            reuse_rng,
+            action_offset=kv_reuse_action_offset,
+            action_stride=kv_reuse_action_stride,
+        )
         if kv_reuse_enabled
         else None
     )
@@ -427,6 +458,8 @@ def write_single_trace(args, op_modeling):
         pipeline_enabled=args.pipeline,
         kv_reuse_enabled=args.enable_kv_reuse,
         kv_reuse_action_count=args.kv_reuse_action_count,
+        kv_reuse_action_offset=args.kv_reuse_action_offset,
+        kv_reuse_action_stride=args.kv_reuse_action_stride,
         seed=args.seed,
     )
     output = Path(args.output)
@@ -479,6 +512,8 @@ def write_pipeline_traces(args, op_modeling):
                         pipeline_enabled=True,
                         kv_reuse_enabled=args.enable_kv_reuse,
                         kv_reuse_action_count=args.kv_reuse_action_count,
+                        kv_reuse_action_offset=args.kv_reuse_action_offset,
+                        kv_reuse_action_stride=args.kv_reuse_action_stride,
                         seed=args.seed,
                     )
                     trace_path = output_dir / f"{shared_weight_key}.json"
@@ -509,6 +544,8 @@ def write_pipeline_traces(args, op_modeling):
                         pipeline_enabled=True,
                         kv_reuse_enabled=args.enable_kv_reuse,
                         kv_reuse_action_count=args.kv_reuse_action_count,
+                        kv_reuse_action_offset=args.kv_reuse_action_offset,
+                        kv_reuse_action_stride=args.kv_reuse_action_stride,
                         seed=args.seed,
                     )
                     trace_path = output_dir / f"{model_name}.json"
@@ -544,6 +581,8 @@ def write_pipeline_traces(args, op_modeling):
                 "shared_trace": args.shared_trace,
                 "kv_reuse_enabled": args.enable_kv_reuse,
                 "kv_reuse_action_count": args.kv_reuse_action_count,
+                "kv_reuse_action_offset": args.kv_reuse_action_offset,
+                "kv_reuse_action_stride": args.kv_reuse_action_stride,
             },
             "models": models,
         },
@@ -572,7 +611,25 @@ def main():
         "--kv-reuse-action-count",
         type=int,
         default=4,
-        help="Number of distinct synthetic actions in the generated KV history sequence.",
+        help=(
+            "Number of distinct synthetic actions among action rows in the "
+            "generated KV history sequence."
+        ),
+    )
+    parser.add_argument(
+        "--kv-reuse-action-offset",
+        type=int,
+        default=1,
+        help=(
+            "0-based index of the first action row in the [item, action, ...] "
+            "history sequence."
+        ),
+    )
+    parser.add_argument(
+        "--kv-reuse-action-stride",
+        type=int,
+        default=2,
+        help="Stride between action rows in the generated KV history sequence.",
     )
     parser.add_argument(
         "--shared-trace",
@@ -593,6 +650,10 @@ def main():
 
     if args.num_users < 1 or args.users_per_batch < 1:
         raise ValueError("--num-users and --users-per-batch must be positive")
+    if args.kv_reuse_action_stride < 1:
+        raise ValueError("--kv-reuse-action-stride must be positive")
+    if args.kv_reuse_action_offset < 0:
+        raise ValueError("--kv-reuse-action-offset must be non-negative")
     op_modeling = parse_op_modeling(args.op_modeling)
     multi_trace = (
         args.pipeline

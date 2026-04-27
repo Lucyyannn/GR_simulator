@@ -3,6 +3,7 @@ build/
 logs/
 results/
 cache/
+docs/
 .continue/
 example/trace_tests/*
 AGENTS.md
