@@ -173,13 +173,13 @@ ONNXIM_HOME=/workspace/GR_simulator ./build/bin/Simulator \
 - `candidates_per_user = 256, 512, 1024, 2048`
 - `history_len = 1024, 2048, 4096, 8192`
 
-截至本次暂停，已完成 9/16 组实验；后续 7 组未继续运行。完整 CSV 已落盘到：
+正式结果使用 4-core 配置完成 16/16 组实验。曾尝试 32-core 配置并通过 smoke 测试确认逻辑可跑通，但该配置会显著增加逐周期仿真的 wall-time，因此未作为本轮正式 sweep 配置。完整 CSV 已落盘到：
 
 ```text
 results/baseline_intro_sweep.csv
 ```
 
-已完成结果如下：
+完整结果如下：
 
 | history_len | candidates_per_user | macro_batch_size | request 数 | 首个 request movement | 稳态 request movement | simulation time (us) | wall-time (s) | finished requests |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -192,24 +192,15 @@ results/baseline_intro_sweep.csv
 | 2048 | 1024 | 64 | 16 | 128 | 64 | 6339.779 | 424.879 | 16 |
 | 2048 | 2048 | 64 | 32 | 128 | 64 | 11380.372 | 826.115 | 32 |
 | 4096 | 256 | 64 | 4 | 128 | 64 | 4006.518 | 250.751 | 4 |
+| 4096 | 512 | 64 | 8 | 128 | 64 | 5906.666 | 432.492 | 8 |
+| 4096 | 1024 | 64 | 16 | 128 | 64 | 9714.548 | 801.526 | 16 |
+| 4096 | 2048 | 64 | 32 | 128 | 64 | 17341.448 | 1572.953 | 32 |
+| 8192 | 256 | 64 | 4 | 128 | 64 | 7014.092 | 474.795 | 4 |
+| 8192 | 512 | 64 | 8 | 128 | 64 | 10330.945 | 852.584 | 8 |
+| 8192 | 1024 | 64 | 16 | 128 | 64 | 16962.236 | 1594.765 | 16 |
+| 8192 | 2048 | 64 | 32 | 128 | 64 | 30241.547 | 3145.635 | 32 |
 
 movement 解释：
 
 - 首个 request 的 128 次 movement = 64 行 embedding gather + 48 个 weight + 16 个 KV cache。
 - 同一用户后续 macrobatch 的 64 次 movement = 64 行 embedding gather；weight 和 KV cache 已通过 HBM residency 复用。
-
-未完成/暂停的实验组合：
-
-| history_len | candidates_per_user |
-| ---: | ---: |
-| 4096 | 512 |
-| 4096 | 1024 |
-| 4096 | 2048 |
-| 8192 | 256 |
-| 8192 | 512 |
-| 8192 | 1024 |
-| 8192 | 2048 |
-
-暂停时，`history_len=4096,candidates_per_user=512` 的仿真正在运行中，未写入完整 CSV，因此不计入有效结果。
-
-TODO：改成32个core继续实验
