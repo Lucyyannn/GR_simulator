@@ -2,7 +2,6 @@ models/*
 build/
 logs/
 results/
-docs/
 cache/
 .continue/
 AGENTS.md
