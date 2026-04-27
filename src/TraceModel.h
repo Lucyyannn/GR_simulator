@@ -29,6 +29,12 @@ class TraceModel : public Model {
 
 	 private:
   struct PlannedDataMovement {
+    struct Segment {
+      addr_type src_addr = 0;
+      addr_type dst_addr = 0;
+      uint64_t bytes = 0;
+    };
+
     std::string tensor_name;
     std::string logical_id;
     std::string role;
@@ -42,6 +48,7 @@ class TraceModel : public Model {
     uint32_t user_id = 0;
     bool makes_resident = false;
     uint64_t resident_bytes = 0;
+    std::vector<Segment> segments;
   };
 
   struct ResidentLoad {

@@ -14,6 +14,12 @@
 #include "../Hbm.h"
 #include "../Ssd.h"
 
+struct MigrationSegment {
+  addr_type src_addr = 0;
+  addr_type dst_addr = 0;
+  uint64_t bytes = 0;
+};
+
 struct MigrationRequest {
   uint64_t id = 0;
   MemoryMedium src_medium = MemoryMedium::UNKNOWN;
@@ -21,6 +27,7 @@ struct MigrationRequest {
   addr_type src_addr = 0;
   addr_type dst_addr = 0;
   uint64_t bytes = 0;
+  std::vector<MigrationSegment> segments;
   uint64_t submitted_time_ps = 0;
 };
 
@@ -41,6 +48,8 @@ class StorageController {
 
   uint64_t submit_migration_request(const MigrationRequest& request,
                                     uint64_t now_ps);
+  std::vector<uint64_t> submit_migration_requests(
+      const std::vector<MigrationRequest>& requests, uint64_t now_ps);
   bool movement_done(uint64_t movement_id) const;
   bool movements_done(const std::vector<uint64_t>& movement_ids) const;
 
@@ -72,7 +81,9 @@ class StorageController {
 
   struct ActiveMigration {
     MigrationRequest request;
-    uint64_t next_offset = 0;
+    uint64_t segment_index = 0;
+    uint64_t segment_offset = 0;
+    uint64_t total_bytes = 0;
     uint64_t bytes_written = 0;
     uint64_t inflight_reads = 0;
     uint64_t inflight_writes = 0;

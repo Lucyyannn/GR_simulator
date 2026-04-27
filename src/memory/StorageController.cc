@@ -3,6 +3,28 @@
 #include <algorithm>
 #include <limits>
 
+namespace {
+
+uint64_t migration_total_bytes(const MigrationRequest& request) {
+  if (request.segments.empty()) return request.bytes;
+  uint64_t total = 0;
+  for (const auto& segment : request.segments) total += segment.bytes;
+  return total;
+}
+
+std::vector<MigrationSegment> normalized_segments(
+    const MigrationRequest& request) {
+  if (!request.segments.empty()) return request.segments;
+  if (request.bytes == 0) return {};
+  return std::vector<MigrationSegment>{MigrationSegment{
+      .src_addr = request.src_addr,
+      .dst_addr = request.dst_addr,
+      .bytes = request.bytes,
+  }};
+}
+
+}  // namespace
+
 StorageController::StorageController(SimulationConfig config, Dram* hbm,
                                      Dram* ddr, Ssd* ssd)
     : _config(config), _hbm(hbm), _ddr(ddr), _ssd(ssd) {}
@@ -70,12 +92,30 @@ uint64_t StorageController::next_event_time_ps() const {
 
 uint64_t StorageController::submit_migration_request(
     const MigrationRequest& request, uint64_t now_ps) {
-  MigrationRequest req = request;
-  if (req.id == 0) req.id = _next_migration_id++;
-  req.submitted_time_ps = now_ps;
-  _active_migrations[req.id] = ActiveMigration{.request = req};
+  auto ids = submit_migration_requests(std::vector<MigrationRequest>{request},
+                                       now_ps);
+  return ids.empty() ? 0 : ids.front();
+}
+
+std::vector<uint64_t> StorageController::submit_migration_requests(
+    const std::vector<MigrationRequest>& requests, uint64_t now_ps) {
+  std::vector<uint64_t> ids;
+  ids.reserve(requests.size());
+  for (const auto& request : requests) {
+    if (migration_total_bytes(request) == 0) continue;
+    MigrationRequest req = request;
+    if (req.id == 0) req.id = _next_migration_id++;
+    req.submitted_time_ps = now_ps;
+    req.segments = normalized_segments(req);
+    uint64_t total_bytes = migration_total_bytes(req);
+    _active_migrations[req.id] = ActiveMigration{
+        .request = req,
+        .total_bytes = total_bytes,
+    };
+    ids.push_back(req.id);
+  }
   service_migrations(now_ps);
-  return req.id;
+  return ids;
 }
 
 bool StorageController::movement_done(uint64_t movement_id) const {
@@ -435,9 +475,9 @@ void StorageController::handle_completed_access(uint64_t now_ps,
 
   delete response;
 
-  if (migration.bytes_written >= migration.request.bytes &&
+  if (migration.bytes_written >= migration.total_bytes &&
       migration.inflight_reads == 0 && migration.inflight_writes == 0 &&
-      migration.next_offset >= migration.request.bytes) {
+      migration.segment_index >= migration.request.segments.size()) {
     _completed_migrations.insert(migration_it->first);
     _active_migrations.erase(migration_it);
   }
@@ -464,14 +504,19 @@ void StorageController::service_migrations(uint64_t now_ps) {
   }
 
   for (auto& [migration_id, migration] : _active_migrations) {
-    while (migration.next_offset < migration.request.bytes) {
-      uint64_t chunk =
-          std::min<uint64_t>(_config.hbm.req_size,
-                             migration.request.bytes - migration.next_offset);
+    while (migration.segment_index < migration.request.segments.size()) {
+      const auto& segment = migration.request.segments[migration.segment_index];
+      if (segment.bytes == 0) {
+        migration.segment_index++;
+        migration.segment_offset = 0;
+        continue;
+      }
+      uint64_t remaining = segment.bytes - migration.segment_offset;
+      uint64_t chunk = std::min<uint64_t>(_config.hbm.req_size, remaining);
       auto* read_request = new MemoryAccess();
       read_request->id = generate_mem_access_id();
-      read_request->dram_address = migration.request.src_addr + migration.next_offset;
-      read_request->aux_address = migration.request.dst_addr + migration.next_offset;
+      read_request->dram_address = segment.src_addr + migration.segment_offset;
+      read_request->aux_address = segment.dst_addr + migration.segment_offset;
       read_request->size = chunk;
       read_request->logical_size_bytes = chunk;
       read_request->write = false;
@@ -491,7 +536,11 @@ void StorageController::service_migrations(uint64_t now_ps) {
       }
 
       migration.inflight_reads++;
-      migration.next_offset += chunk;
+      migration.segment_offset += chunk;
+      if (migration.segment_offset >= segment.bytes) {
+        migration.segment_index++;
+        migration.segment_offset = 0;
+      }
     }
   }
 }

@@ -244,29 +244,49 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
             std::min(canonical_rows[physical_row], logical_row);
       }
 
-      bool resident_marker_added = false;
+      PlannedDataMovement movement{
+          .tensor_name = tensor->get_name(),
+          .logical_id = logical_id,
+          .role = entry.role,
+          .source = initial_medium,
+          .destination = runtime_medium,
+          .src_addr = source_addr,
+          .dst_addr = tensor->get_address(),
+          .bytes = physical_bytes,
+          .batch_id = effective_batch_id(entry),
+          .macro_batch_id = effective_macro_batch_id(entry),
+          .user_id = effective_user_id(entry),
+          .makes_resident = true,
+          .resident_bytes = physical_bytes,
+      };
+      auto add_segment = [&movement](addr_type src_addr, addr_type dst_addr,
+                                     uint64_t bytes) {
+        if (bytes == 0) return;
+        if (!movement.segments.empty()) {
+          auto& last = movement.segments.back();
+          if (last.src_addr + last.bytes == src_addr &&
+              last.dst_addr + last.bytes == dst_addr) {
+            last.bytes += bytes;
+            return;
+          }
+        }
+        movement.segments.push_back(PlannedDataMovement::Segment{
+            .src_addr = src_addr,
+            .dst_addr = dst_addr,
+            .bytes = bytes,
+        });
+      };
+
       for (uint32_t physical_row = 0; physical_row < canonical_rows.size();
            ++physical_row) {
         uint32_t logical_row = canonical_rows[physical_row];
         if (logical_row == std::numeric_limits<uint32_t>::max()) continue;
-        _data_movements.push_back(PlannedDataMovement{
-            .tensor_name = tensor->get_name(),
-            .logical_id = logical_id,
-            .role = entry.role,
-            .source = initial_medium,
-            .destination = runtime_medium,
-            .src_addr = source_addr + static_cast<addr_type>(logical_row) * row_stride,
-            .dst_addr = tensor->get_address() +
+        add_segment(source_addr + static_cast<addr_type>(logical_row) * row_stride,
+                    tensor->get_address() +
                         static_cast<addr_type>(physical_row) * row_stride,
-            .bytes = row_stride,
-            .batch_id = effective_batch_id(entry),
-            .macro_batch_id = effective_macro_batch_id(entry),
-            .user_id = effective_user_id(entry),
-            .makes_resident = !resident_marker_added,
-            .resident_bytes = physical_bytes,
-        });
-        resident_marker_added = true;
+                    row_stride);
       }
+      _data_movements.push_back(std::move(movement));
       _reuse_logical_bytes += logical_bytes;
       _reuse_physical_bytes += physical_bytes;
       return;
@@ -527,15 +547,43 @@ std::vector<uint64_t> TraceModel::submit_data_movements(
         100.0 * static_cast<double>(_reuse_logical_bytes - _reuse_physical_bytes) /
             static_cast<double>(_reuse_logical_bytes));
   }
-  for (const auto& movement : _data_movements) {
+  std::vector<MigrationRequest> requests;
+  std::vector<size_t> request_movement_indices;
+  requests.reserve(_data_movements.size());
+  request_movement_indices.reserve(_data_movements.size());
+  for (size_t movement_idx = 0; movement_idx < _data_movements.size();
+       ++movement_idx) {
+    const auto& movement = _data_movements[movement_idx];
     MigrationRequest request;
     request.src_medium = movement.source;
     request.dst_medium = movement.destination;
     request.src_addr = movement.src_addr;
     request.dst_addr = movement.dst_addr;
     request.bytes = movement.bytes;
-    uint64_t movement_id = controller->submit_migration_request(request, now_ps);
-    _submitted_movement_ids.push_back(movement_id);
+    request.segments.reserve(movement.segments.size());
+    for (const auto& segment : movement.segments) {
+      request.segments.push_back(MigrationSegment{
+          .src_addr = segment.src_addr,
+          .dst_addr = segment.dst_addr,
+          .bytes = segment.bytes,
+      });
+    }
+    uint64_t request_bytes = request.segments.empty() ? request.bytes : 0;
+    for (const auto& segment : request.segments) request_bytes += segment.bytes;
+    if (request_bytes == 0) continue;
+    request_movement_indices.push_back(movement_idx);
+    requests.push_back(std::move(request));
+  }
+
+  std::vector<uint64_t> movement_ids =
+      controller->submit_migration_requests(requests, now_ps);
+  _submitted_movement_ids.insert(_submitted_movement_ids.end(),
+                                 movement_ids.begin(), movement_ids.end());
+
+  for (size_t i = 0; i < request_movement_indices.size() &&
+                     i < movement_ids.size(); ++i) {
+    const auto& movement = _data_movements[request_movement_indices[i]];
+    uint64_t movement_id = movement_ids[i];
     if (movement.makes_resident) {
       _resident_loads.push_back(ResidentLoad{
           .logical_id = movement.logical_id,
