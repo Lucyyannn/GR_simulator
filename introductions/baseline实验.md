@@ -173,7 +173,7 @@ ONNXIM_HOME=/workspace/GR_simulator ./build/bin/Simulator \
 - `candidates_per_user = 256, 512, 1024, 2048`
 - `history_len = 1024, 2048, 4096, 8192`
 
-正式结果使用 4-core 配置完成 16/16 组实验。曾尝试 32-core 配置并通过 smoke 测试确认逻辑可跑通，但该配置会显著增加逐周期仿真的 wall-time，因此未作为本轮正式 sweep 配置。完整 CSV 已落盘到：
+正式结果使用 4-core 配置完成 16/16 组实验。完整 CSV 已落盘到：
 
 ```text
 results/baseline_intro_sweep.csv
