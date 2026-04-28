@@ -351,6 +351,7 @@ def build_trace(
                 ),
             ],
             [hbm_tensor(av_norm, [tokens, hidden], role="activation", **layer_meta)],
+            {**op_modeling_attrs(op_modeling, "layer_norm")},
         )
         add_op(
             ops,

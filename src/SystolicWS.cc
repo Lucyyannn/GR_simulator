@@ -132,6 +132,23 @@ cycle_type SystolicWS::get_vector_compute_cycles(std::unique_ptr<Instruction>& i
   cycle_type add_tree, scalar_ops, vector_ops;
   switch (inst->opcode) {
     case Opcode::LAYERNORM:
+      if (_config.layernorm_modeling == "rowwise") {
+        uint32_t rows = inst->vector_rows > 0 ? inst->vector_rows : MAX(inst->tile_m, 1);
+        uint32_t bytes_per_row = inst->vector_bytes_per_row;
+        if (bytes_per_row == 0) {
+          bytes_per_row = rows > 0 ? std::max(1u, inst->compute_size / rows)
+                                   : std::max(1u, inst->compute_size);
+        }
+        cycle_type row_vec_op_iter = calculate_vector_op_iterations(bytes_per_row);
+        cycle_type row_add_tree_iter = calculate_add_tree_iterations(bytes_per_row);
+        add_tree = 2 * row_add_tree_iter * _config.core_config[_id].add_tree_latency;
+        scalar_ops = 2 * _config.core_config[_id].scalar_mul_latency +
+                     _config.core_config[_id].scalar_sqrt_latency;
+        vector_ops = row_vec_op_iter *
+                     (2 * _config.core_config[_id].add_latency +
+                      3 * _config.core_config[_id].mul_latency);
+        return (add_tree + scalar_ops + vector_ops) * rows;
+      }
       add_tree = 2 * add_tree_iter * _config.core_config[_id].add_tree_latency;
       scalar_ops = 2 * _config.core_config[_id].scalar_mul_latency + _config.core_config[_id].scalar_sqrt_latency;
       // 1 addition, 1 subtraction, 1 division, 2 multiplication.

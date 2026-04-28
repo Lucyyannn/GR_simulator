@@ -124,6 +124,8 @@ typedef struct {
   uint32_t tile_m;
   uint32_t tile_k;
   uint32_t tile_n;
+  uint32_t vector_rows = 0;
+  uint32_t vector_bytes_per_row = 0;
 
   bool src_from_accum = false;
   bool zero_init = false;

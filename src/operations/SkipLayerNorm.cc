@@ -128,8 +128,11 @@ void SkipLayerNorm::initialize_instructions(Tile* tile, Mapping mapping, uint32_
         .opcode = Opcode::LAYERNORM,
         .dest_addr = sram_base,
         .size = _dk * _config.precision,
+        .compute_size = _dk * _config.precision,
         .src_addrs = std::vector<addr_type>{sram_base},
         .tile_m = tokens,
+        .vector_rows = tokens,
+        .vector_bytes_per_row = _dk * _config.precision,
     }));
 
     tile->instructions.push_back(std::make_unique<Instruction>(Instruction{

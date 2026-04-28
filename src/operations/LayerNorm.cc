@@ -79,6 +79,8 @@ void LayerNorm::initialize_instructions(Tile* tile, uint32_t token_offset,
       .compute_size = bytes,
       .src_addrs = std::vector<addr_type>{SPAD_BASE},
       .tile_m = tokens,
+      .vector_rows = tokens,
+      .vector_bytes_per_row = _hidden * _config.precision,
   }));
   tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
       .opcode = Opcode::MOVOUT,

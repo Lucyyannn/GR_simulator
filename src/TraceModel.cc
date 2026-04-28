@@ -527,7 +527,7 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
 	  for (auto& op_entry : _graph.operators) {
 	    auto converted = trace_frontend::TraceOpConverter::convert(op_entry);
     if ((converted.optype == "Split" || converted.optype == "View" ||
-         converted.optype == "Concat") &&
+         converted.optype == "Concat" || converted.optype == "LayerNorm") &&
         !converted.attrs.count("modeling_mode")) {
       std::string key = converted.optype;
       std::transform(key.begin(), key.end(), key.begin(),
@@ -536,7 +536,14 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
       if (mode_it != _graph.metadata.op_modeling.end())
         converted.attrs["modeling_mode"] = mode_it->second;
     }
-    if (_graph.metadata.fail_on_unknown_op && converted.optype == "Dummy") {
+    if (converted.optype == "LayerNorm" &&
+        converted.attrs.count("modeling_mode") &&
+        converted.attrs["modeling_mode"] == "skip") {
+      converted.optype = "Dummy";
+    }
+    if (_graph.metadata.fail_on_unknown_op && converted.optype == "Dummy" &&
+        (!converted.attrs.count("modeling_mode") ||
+         converted.attrs["modeling_mode"] != "skip")) {
       spdlog::error("[TraceModel] Unsupported trace op '{}' in fail-fast mode",
                     op_entry.name);
       std::exit(EXIT_FAILURE);

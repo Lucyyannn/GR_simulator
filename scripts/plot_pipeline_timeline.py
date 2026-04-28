@@ -20,17 +20,10 @@ def label_for(row):
     model = row["model"]
     layer = row["layer_id"]
     pipe = row["pipe"]
-    phase = row.get("phase", "")
     if pipe == "preload":
-        if phase and phase != "stage":
-            return f"{model}:preload:{phase}"
-        return f"{model}:preload:stage"
-    if phase == "movin":
-        if layer and layer != "-1":
-            return f"{model}:L{layer}:{phase}"
-        return f"{model}:{phase}"
+        return f"{model}:preload"
     if layer and layer != "-1":
-        return f"{model}:compute-total:L{layer}"
+        return f"{model}:L{layer}:compute"
     return f"{model}:compute"
 
 
@@ -40,6 +33,7 @@ def plot_timeline(csv_path, output_path):
         row
         for row in rows
         if row.get("pipe") in {"preload", "compute"}
+        and not (row.get("pipe") == "preload" and row.get("phase") == "stage")
         and float(row.get("duration_us", "0") or 0) >= 0
     ]
     if not rows:
