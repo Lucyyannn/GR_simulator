@@ -31,6 +31,12 @@ struct MigrationRequest {
   uint64_t submitted_time_ps = 0;
 };
 
+struct CompletedMigrationRange {
+  uint64_t movement_id = 0;
+  addr_type dst_addr = 0;
+  uint64_t bytes = 0;
+};
+
 class StorageController {
  public:
   StorageController(SimulationConfig config, Dram* hbm, Dram* ddr, Ssd* ssd);
@@ -52,6 +58,14 @@ class StorageController {
       const std::vector<MigrationRequest>& requests, uint64_t now_ps);
   bool movement_done(uint64_t movement_id) const;
   bool movements_done(const std::vector<uint64_t>& movement_ids) const;
+  size_t completed_migration_range_count() const {
+    return _completed_migration_ranges.size();
+  }
+  const CompletedMigrationRange& completed_migration_range_at(
+      size_t index) const {
+    return _completed_migration_ranges.at(index);
+  }
+  const StorageRuntimeStats& runtime_stats() const { return _runtime_stats; }
 
  private:
   struct SsdWriteStreamKey {
@@ -90,6 +104,9 @@ class StorageController {
   };
 
   Dram* device_for_medium(MemoryMedium medium) const;
+  MemoryTierRuntimeStats& tier_stats_for_medium(MemoryMedium medium);
+  void record_dispatch_blocked(MemoryMedium medium);
+  void record_completed_access(const MemoryAccess* access);
   bool route_to_device(uint32_t preferred_port, MemoryAccess* request,
                        MemoryMedium medium, uint64_t now_ps);
   bool route_to_ssd(MemoryAccess* request, uint64_t now_ps);
@@ -121,8 +138,10 @@ class StorageController {
   std::queue<MemoryAccess*> _retry_queue;
   std::map<uint64_t, ActiveMigration> _active_migrations;
   std::set<uint64_t> _completed_migrations;
+  std::vector<CompletedMigrationRange> _completed_migration_ranges;
   std::map<SsdWriteStreamKey, PendingSsdWrite> _pending_ssd_writes;
   std::map<uint64_t, SsdAggregateContext> _ssd_write_aggregates;
   std::map<addr_type, uint64_t> _ssd_inflight_read_pages;
   std::map<uint64_t, SsdAggregateContext> _ssd_read_aggregates;
+  StorageRuntimeStats _runtime_stats;
 };

@@ -118,6 +118,16 @@ uint32_t TraceModel::register_tensor(const trace_frontend::TensorEntry& entry, b
 	  return id;
 }
 
+Tensor* TraceModel::find_tensor_covering(addr_type address, uint64_t bytes) const {
+  for (const auto& [_, tensor] : _tensor_map) {
+    if (tensor == nullptr) continue;
+    addr_type begin = tensor->get_address();
+    addr_type end = begin + tensor->get_size();
+    if (address >= begin && address + bytes <= end) return tensor.get();
+  }
+  return nullptr;
+}
+
 bool TraceModel::apply_reuse_layout(
     Tensor* tensor, const trace_frontend::TensorEntry& entry) {
   if (tensor == nullptr) return false;
@@ -165,6 +175,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
 
   if (needs_preload && entry.role == "embedding_rows") {
     tensor->relocate(runtime_medium);
+    tensor->set_memory_pending();
     const uint64_t row_bytes =
         entry.shape.empty() ? tensor->get_size()
                             : static_cast<uint64_t>(entry.shape.back()) *
@@ -216,6 +227,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
     std::string logical_id = effective_logical_id(entry);
     if (_residency_manager->is_resident(logical_id)) {
       tensor->set_address(_residency_manager->resident_addr(logical_id));
+      tensor->mark_full_memory_ready();
       spdlog::debug("[TraceModel] {} uses resident {} at 0x{:x}",
                     tensor->get_name(), logical_id, tensor->get_address());
       return;
@@ -230,6 +242,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
       addr_type hbm_addr = _residency_manager->reserve_destination(
           logical_id, physical_bytes, runtime_medium);
       tensor->set_address(hbm_addr);
+      tensor->set_memory_pending();
       addr_type source_addr =
           _residency_manager->source_addr(logical_id, logical_bytes,
                                           initial_medium);
@@ -295,6 +308,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
     addr_type hbm_addr = _residency_manager->reserve_destination(
         logical_id, tensor->get_size(), runtime_medium);
     tensor->set_address(hbm_addr);
+    tensor->set_memory_pending();
     addr_type source_addr = _residency_manager->source_addr(
         logical_id, tensor->get_size(), initial_medium);
     _data_movements.push_back(PlannedDataMovement{
@@ -328,6 +342,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
   addr_type source_addr =
       allocate_address_in_medium(static_cast<uint32_t>(tensor->get_size()),
                                  initial_medium);
+  tensor->set_memory_pending();
   _data_movements.push_back(PlannedDataMovement{
       .tensor_name = tensor->get_name(),
       .logical_id = entry.logical_id,
@@ -373,6 +388,8 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
   _submitted_movement_ids.clear();
   _resident_loads.clear();
   _data_movements_submitted = false;
+  _pipeline_preload_complete = true;
+  _next_completed_range_index = 0;
   _reuse_logical_bytes = 0;
   _reuse_physical_bytes = 0;
 
@@ -599,6 +616,8 @@ std::vector<uint64_t> TraceModel::submit_data_movements(
         movement.bytes);
   }
   _data_movements_submitted = true;
+  _pipeline_preload_complete = _submitted_movement_ids.empty() ||
+      controller->movements_done(_submitted_movement_ids);
   return _submitted_movement_ids;
 }
 
@@ -608,14 +627,44 @@ bool TraceModel::data_movements_ready(StorageController* controller) const {
   return controller->movements_done(_submitted_movement_ids);
 }
 
-void TraceModel::complete_data_movements(StorageController* controller) {
+void TraceModel::refresh_pipeline_preload(StorageController* controller) {
+  if (controller == nullptr) return;
+  while (_next_completed_range_index <
+         controller->completed_migration_range_count()) {
+    const CompletedMigrationRange& range =
+        controller->completed_migration_range_at(_next_completed_range_index);
+    _next_completed_range_index++;
+    Tensor* tensor = find_tensor_covering(range.dst_addr, range.bytes);
+    if (tensor != nullptr) {
+      tensor->mark_memory_ready(range.dst_addr, range.bytes);
+    }
+  }
+
+  if (_submitted_movement_ids.empty()) {
+    _pipeline_preload_complete = true;
+  } else {
+    _pipeline_preload_complete =
+        controller->movements_done(_submitted_movement_ids);
+  }
+  mark_completed_resident_loads(controller);
+}
+
+void TraceModel::mark_completed_resident_loads(StorageController* controller) {
   if (controller == nullptr || _residency_manager == nullptr) return;
-  for (const auto& load : _resident_loads) {
+  for (auto& load : _resident_loads) {
+    if (load.marked) continue;
     if (controller->movement_done(load.movement_id)) {
       _residency_manager->mark_resident(load.logical_id, load.hbm_addr,
                                         load.bytes);
+      load.marked = true;
     }
   }
+}
+
+void TraceModel::complete_data_movements(StorageController* controller) {
+  if (controller == nullptr || _residency_manager == nullptr) return;
+  refresh_pipeline_preload(controller);
+  mark_completed_resident_loads(controller);
 }
 
 void TraceModel::prefill_ssd_tensors(Ssd* ssd) {

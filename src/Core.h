@@ -27,6 +27,7 @@ class Core {
   virtual void push_memory_response(MemoryAccess* response);
   virtual void print_stats();
   virtual void print_current_stats();
+  virtual CoreRuntimeStats get_runtime_stats() const;
 
   virtual cycle_type get_compute_cycles() { return _stat_tot_compute_cycle; }
   virtual bool can_fast_forward_stalled();
@@ -43,6 +44,7 @@ class Core {
   virtual cycle_type calculate_add_tree_iterations(uint32_t vector_size);
   virtual cycle_type calculate_vector_op_iterations(uint32_t vector_size);
   void add_fast_forward_stats(cycle_type cycles);
+  bool front_tile_waits_on_memory();
 
   const uint32_t _id;
   const SimulationConfig _config;
@@ -57,6 +59,15 @@ class Core {
 
   cycle_type _stat_memory_idle_cycle;
   cycle_type _stat_tot_memory_idle_cycle = 0;
+
+  cycle_type _stat_memory_wait_cycle = 0;
+  cycle_type _stat_tot_memory_wait_cycle = 0;
+
+  cycle_type _stat_dependency_wait_cycle = 0;
+  cycle_type _stat_tot_dependency_wait_cycle = 0;
+
+  cycle_type _stat_request_injection_wait_cycle = 0;
+  cycle_type _stat_tot_request_injection_wait_cycle = 0;
 
   cycle_type _stat_compute_cycle = 0;
   cycle_type _stat_tot_compute_cycle = 0;

@@ -117,6 +117,7 @@ void Operation::set_finish() {
   for (auto id : _outputs) {
     Tensor* output = _model->get_tensor(id);
     output->set_produced();
+    output->mark_full_memory_ready();
   }
   _finish = true;
   spdlog::trace("layer {} finish", _name.c_str());

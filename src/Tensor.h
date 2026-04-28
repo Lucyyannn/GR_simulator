@@ -33,6 +33,11 @@ class Tensor {
                         const std::vector<uint32_t>& logical_to_physical);
   void set_produced() { _produced = true; }
   bool get_produced() { return _produced; }
+  void set_memory_pending();
+  void mark_memory_ready(addr_type address, uint64_t bytes);
+  void mark_full_memory_ready();
+  bool memory_ready(addr_type address, uint64_t bytes) const;
+  bool memory_ready() const;
   uint32_t num_child_nodes() { return _child_nodes.size(); }
   uint32_t get_child_node(uint32_t id) { return _child_nodes[id]; }
 
@@ -59,5 +64,7 @@ class Tensor {
   uint32_t _reuse_physical_rows = 0;
   uint64_t _reuse_row_stride_bytes = 0;
   std::vector<uint32_t> _reuse_logical_to_physical;
+  bool _memory_ready_full = true;
+  std::vector<std::pair<addr_type, addr_type>> _memory_ready_ranges;
   friend Model;
 };

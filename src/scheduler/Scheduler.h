@@ -3,6 +3,8 @@
 #include "../Common.h"
 #include "../Model.h"
 
+class StorageController;
+
 typedef struct {
   uint32_t request_id;
   std::unique_ptr<Model> model;
@@ -22,6 +24,11 @@ class Scheduler {
     virtual bool empty();
     virtual bool tile_queue_empty();
     virtual bool can_fast_forward_waiting() const;
+    virtual void refresh_pipeline_preload(StorageController* controller);
+    virtual size_t pipeline_preload_inflight_count() const;
+    uint64_t pipeline_data_wait_cycles() const {
+      return _pipeline_data_wait_cycles;
+    }
   protected:
     typedef struct {
       uint32_t id;
@@ -46,11 +53,15 @@ class Scheduler {
     std::map<uint32_t, std::deque<std::unique_ptr<Tile>>> _executable_tile_queue;
     std::map<uint32_t, std::deque<std::unique_ptr<Tile>>> _core_executable_tile_queue;
     uint32_t _nr_layer = 0; // For layer round-robin
+    uint64_t _pipeline_data_wait_cycles = 0;
     SimulationConfig _config;
     void* _simulator;
     robin_hood::unordered_map<uint32_t, LayerStat> _layer_stat_map;
     robin_hood::unordered_map<uint32_t, LayerStat> _active_layers_map;
     bool preserve_small_layer_core_ids(uint32_t layer_id, size_t available_cores) const;
+    bool has_pending_core_tile(uint32_t layer_id) const;
+    bool pipeline_tile_ready(Model* model, const Tile* tile) const;
+    Model* model_for_layer(uint32_t layer_id);
     virtual void refresh_status();
     uint32_t count_active_layers();
     uint32_t cpu_to_partition(uint32_t cpu);

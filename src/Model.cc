@@ -188,6 +188,71 @@ uint64_t Model::prepare_baseline_storage(StorageController* /*controller*/,
   return now_ps;
 }
 
+void Model::refresh_pipeline_preload(StorageController* /*controller*/) {}
+
+bool Model::address_range_memory_ready(addr_type address, uint64_t bytes) const {
+  if (bytes == 0) return true;
+  for (const auto& [_, tensor] : _tensor_map) {
+    if (tensor == nullptr) continue;
+    addr_type begin = tensor->get_address();
+    addr_type end = begin + tensor->get_size();
+    if (address >= begin && address + bytes <= end) {
+      return tensor->memory_ready(address, bytes);
+    }
+  }
+  return true;
+}
+
+bool Model::tile_has_full_core_compute(const Tile* tile) const {
+  if (tile == nullptr) return false;
+  uint32_t core_id = tile->core_id >= 0 ? static_cast<uint32_t>(tile->core_id)
+                                        : _target_core;
+  if (core_id >= _config.num_cores) core_id = 0;
+  const uint32_t core_height = _config.core_config[core_id].core_height;
+  const uint32_t core_width = _config.core_config[core_id].core_width;
+  for (const auto& inst : tile->instructions) {
+    if (inst == nullptr) continue;
+    if (inst->opcode != Opcode::GEMM &&
+        inst->opcode != Opcode::GEMM_PRELOAD) {
+      continue;
+    }
+    if (inst->tile_m >= core_width &&
+        inst->tile_n >= core_height &&
+        inst->tile_k >= core_height) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Model::tile_ready_for_pipeline(const Tile* tile,
+                                    bool require_full_core) const {
+  if (tile == nullptr) return false;
+  if (tile->status == Tile::Status::BAR || tile->skip) return true;
+  if (require_full_core) {
+    bool has_systolic_compute = false;
+    for (const auto& inst : tile->instructions) {
+      if (inst == nullptr) continue;
+      has_systolic_compute =
+          has_systolic_compute || inst->opcode == Opcode::GEMM ||
+          inst->opcode == Opcode::GEMM_PRELOAD;
+    }
+    if (has_systolic_compute && !tile_has_full_core_compute(tile))
+      return false;
+  }
+
+  const uint64_t req_size =
+      _config.hbm.req_size > 0 ? _config.hbm.req_size : _config.dram_req_size;
+  for (const auto& inst : tile->instructions) {
+    if (inst == nullptr || inst->opcode != Opcode::MOVIN) continue;
+    addr_type base = inst->base_addr == GARBEGE_ADDR ? 0 : inst->base_addr;
+    for (addr_type addr : inst->src_addrs) {
+      if (!address_range_memory_ready(addr + base, req_size)) return false;
+    }
+  }
+  return true;
+}
+
 
 void Model::set_layer_finish(uint32_t id) {
   _operation_map[id]->set_finish();

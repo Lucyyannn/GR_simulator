@@ -27,7 +27,11 @@ std::vector<MigrationSegment> normalized_segments(
 
 StorageController::StorageController(SimulationConfig config, Dram* hbm,
                                      Dram* ddr, Ssd* ssd)
-    : _config(config), _hbm(hbm), _ddr(ddr), _ssd(ssd) {}
+    : _config(config), _hbm(hbm), _ddr(ddr), _ssd(ssd) {
+  _runtime_stats.hbm.name = "HBM";
+  _runtime_stats.ddr.name = "DDR";
+  _runtime_stats.ssd.name = "SSD";
+}
 
 void StorageController::advance_to(uint64_t now_ps) {
   _last_advanced_ps = std::max(_last_advanced_ps, now_ps);
@@ -143,6 +147,53 @@ Dram* StorageController::device_for_medium(MemoryMedium medium) const {
   }
 }
 
+MemoryTierRuntimeStats& StorageController::tier_stats_for_medium(
+    MemoryMedium medium) {
+  switch (medium) {
+    case MemoryMedium::HBM:
+      return _runtime_stats.hbm;
+    case MemoryMedium::DDR:
+      return _runtime_stats.ddr;
+    case MemoryMedium::SSD:
+      return _runtime_stats.ssd;
+    case MemoryMedium::UNKNOWN:
+    default:
+      return _runtime_stats.hbm;
+  }
+}
+
+void StorageController::record_dispatch_blocked(MemoryMedium medium) {
+  tier_stats_for_medium(medium).dispatch_blocked++;
+}
+
+void StorageController::record_completed_access(const MemoryAccess* access) {
+  if (access == nullptr) return;
+  MemoryTierRuntimeStats& stats = tier_stats_for_medium(access->target_medium);
+  const uint64_t bytes = access->logical_size_bytes == 0
+                             ? access->size
+                             : access->logical_size_bytes;
+  if (access->write) {
+    stats.write_requests++;
+    stats.write_bytes += bytes;
+    if (access->controller_generated)
+      stats.controller_write_bytes += bytes;
+    else
+      stats.core_write_bytes += bytes;
+  } else {
+    stats.read_requests++;
+    stats.read_bytes += bytes;
+    if (access->controller_generated)
+      stats.controller_read_bytes += bytes;
+    else
+      stats.core_read_bytes += bytes;
+  }
+  if (access->mem_finish_time_ps >= access->mem_enter_time_ps) {
+    uint64_t latency = access->mem_finish_time_ps - access->mem_enter_time_ps;
+    stats.total_latency_ps += latency;
+    stats.max_latency_ps = std::max(stats.max_latency_ps, latency);
+  }
+}
+
 bool StorageController::route_to_device(uint32_t preferred_port,
                                         MemoryAccess* request,
                                         MemoryMedium medium,
@@ -162,7 +213,10 @@ bool StorageController::route_to_device(uint32_t preferred_port,
       medium == MemoryMedium::HBM ? _config.hbm.channels : _config.ddr.channels;
   uint32_t channel =
       preferred_port < channel_count ? preferred_port : device->get_channel_id(request);
-  if (device->is_full(channel, request)) return false;
+  if (device->is_full(channel, request)) {
+    record_dispatch_blocked(medium);
+    return false;
+  }
   device->push(channel, request);
   return true;
 }
@@ -170,7 +224,10 @@ bool StorageController::route_to_device(uint32_t preferred_port,
 bool StorageController::route_to_ssd(MemoryAccess* request, uint64_t now_ps) {
   if (_ssd == nullptr) return false;
   if (request->ssd_host_request) {
-    if (_ssd->is_full(request)) return false;
+    if (_ssd->is_full(request)) {
+      record_dispatch_blocked(MemoryMedium::SSD);
+      return false;
+    }
     _ssd->set_current_time_ps(now_ps);
     _ssd->push(request);
     return true;
@@ -314,7 +371,11 @@ bool StorageController::flush_pending_ssd_write_key(const SsdWriteStreamKey& key
 
 bool StorageController::dispatch_ssd_aggregate(MemoryAccess* aggregate,
                                                uint64_t now_ps) {
-  if (_ssd == nullptr || _ssd->is_full(aggregate)) return false;
+  if (_ssd == nullptr) return false;
+  if (_ssd->is_full(aggregate)) {
+    record_dispatch_blocked(MemoryMedium::SSD);
+    return false;
+  }
   _ssd->set_current_time_ps(now_ps);
   _ssd->push(aggregate);
   return true;
@@ -422,6 +483,7 @@ void StorageController::drain_ssd_responses(uint64_t now_ps) {
       response->mem_finish_time_ps = now_ps;
     if (_ssd_write_aggregates.find(response->id) != _ssd_write_aggregates.end() ||
         _ssd_read_aggregates.find(response->id) != _ssd_read_aggregates.end()) {
+      record_completed_access(response);
       complete_ssd_aggregate(now_ps, response);
       continue;
     }
@@ -431,6 +493,13 @@ void StorageController::drain_ssd_responses(uint64_t now_ps) {
 
 void StorageController::handle_completed_access(uint64_t now_ps,
                                                 MemoryAccess* response) {
+  if (response->target_medium == MemoryMedium::HBM ||
+      response->target_medium == MemoryMedium::DDR ||
+      (response->target_medium == MemoryMedium::SSD &&
+       response->ssd_host_request)) {
+    record_completed_access(response);
+  }
+
   if (!response->controller_generated) {
     _ready_responses.push_back(response);
     return;
@@ -471,6 +540,11 @@ void StorageController::handle_completed_access(uint64_t now_ps,
   } else {
     if (migration.inflight_writes > 0) migration.inflight_writes--;
     migration.bytes_written += response->logical_size_bytes;
+    _completed_migration_ranges.push_back(CompletedMigrationRange{
+        .movement_id = response->macro_request_id,
+        .dst_addr = response->dram_address,
+        .bytes = response->logical_size_bytes,
+    });
   }
 
   delete response;

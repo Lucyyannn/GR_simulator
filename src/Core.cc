@@ -98,6 +98,7 @@ void Core::cycle() {
   _core_cycle++;
   _spad.cycle();
   _acc_spad.cycle();
+  bool issued = false;
   for (int tile_iter = 0; tile_iter < _tiles.size(); tile_iter++) {
     int i = (tile_iter + tile_rr) % _tiles.size();
     if(_tiles[i]->instructions.empty()) 
@@ -118,7 +119,6 @@ void Core::cycle() {
       buffer = &_spad;
       buffer_id = _tiles[i]->spad_id;
     }
-    bool issued = false;
     if (inst->opcode == Opcode::MOVIN) {
       /*LD inst queue */
       if (inst->size == 0) {
@@ -156,6 +156,16 @@ void Core::cycle() {
       _tiles[i]->instructions.pop_front();
       tile_rr = i;
       break;
+    }
+  }
+  if (running() && !_request_queue.empty()) {
+    _stat_request_injection_wait_cycle++;
+  }
+  if (running() && !issued && !_tiles.empty()) {
+    if (front_tile_waits_on_memory()) {
+      _stat_memory_wait_cycle++;
+    } else {
+      _stat_dependency_wait_cycle++;
     }
   }
   for (auto tile = _tiles.begin() ; tile < _tiles.end(); tile++) {
@@ -225,7 +235,10 @@ void Core::add_fast_forward_stats(cycle_type cycles) {
   if (cycles == 0) return;
   bool was_running = running();
   _stat_memory_idle_cycle += cycles;
-  if (!was_running) _stat_idle_cycle += cycles;
+  if (was_running)
+    _stat_memory_wait_cycle += cycles;
+  else
+    _stat_idle_cycle += cycles;
 }
 
 void Core::advance_stalled_cycles(cycle_type cycles) {
@@ -295,6 +308,57 @@ bool Core::can_issue_compute(std::unique_ptr<Instruction>& inst) {
   return result;
 }
 
+bool Core::front_tile_waits_on_memory() {
+  if (!_request_queue.empty() || !_ld_inst_queue.empty() || _waiting_write_reqs > 0)
+    return true;
+
+  for (auto& tile : _tiles) {
+    if (tile == nullptr || tile->instructions.empty()) continue;
+    std::unique_ptr<Instruction>& inst = tile->instructions.front();
+    int buffer_id = inst->dest_addr >= ACCUM_SPAD_BASE ? tile->accum_spad_id
+                                                       : tile->spad_id;
+    Sram* buffer = inst->dest_addr >= ACCUM_SPAD_BASE ? &_acc_spad : &_spad;
+
+    if (inst->opcode == Opcode::MOVIN) {
+      return true;
+    }
+    if (inst->opcode == Opcode::MOVOUT ||
+        inst->opcode == Opcode::MOVOUT_POOL) {
+      if (!buffer->check_hit(inst->dest_addr, buffer_id)) return true;
+      continue;
+    }
+    for (addr_type addr : inst->src_addrs) {
+      bool hit = false;
+      if (inst->src_from_accum && addr >= ACCUM_SPAD_BASE) {
+        hit = _acc_spad.check_hit(addr, inst->accum_spad_id);
+      } else {
+        hit = _spad.check_hit(addr, inst->spad_id);
+      }
+      if (!hit) return true;
+    }
+  }
+  return false;
+}
+
+CoreRuntimeStats Core::get_runtime_stats() const {
+  return CoreRuntimeStats{
+      .core_id = _id,
+      .total_cycles = _core_cycle,
+      .systolic_active_cycles =
+          _stat_tot_systolic_active_cycle + _stat_systolic_active_cycle,
+      .vector_active_cycles =
+          _stat_tot_vec_compute_cycle + _stat_vec_compute_cycle,
+      .idle_cycles = _stat_tot_idle_cycle + _stat_idle_cycle,
+      .memory_wait_cycles = _stat_tot_memory_wait_cycle + _stat_memory_wait_cycle,
+      .dependency_wait_cycles =
+          _stat_tot_dependency_wait_cycle + _stat_dependency_wait_cycle,
+      .request_injection_wait_cycles =
+          _stat_tot_request_injection_wait_cycle +
+          _stat_request_injection_wait_cycle,
+      .matmul_pe_cycles = _stat_tot_matmul_cycle + _stat_matmul_cycle,
+  };
+}
+
 void Core::print_stats() {
   update_stats();
   spdlog::info(
@@ -339,6 +403,9 @@ void Core::update_stats() {
   _stat_tot_systolic_active_cycle += _stat_systolic_active_cycle;
   _stat_tot_systolic_bubble_cycle += _stat_systolic_bubble_cycle;
   _stat_tot_memory_idle_cycle += _stat_memory_idle_cycle;
+  _stat_tot_memory_wait_cycle += _stat_memory_wait_cycle;
+  _stat_tot_dependency_wait_cycle += _stat_dependency_wait_cycle;
+  _stat_tot_request_injection_wait_cycle += _stat_request_injection_wait_cycle;
   _stat_tot_idle_cycle += _stat_idle_cycle;
   _stat_tot_vec_compute_cycle += _stat_vec_compute_cycle;
   _stat_tot_matmul_cycle += _stat_matmul_cycle;
@@ -346,6 +413,9 @@ void Core::update_stats() {
   _stat_systolic_active_cycle = 0;
   _stat_systolic_bubble_cycle = 0;
   _stat_memory_idle_cycle = 0;
+  _stat_memory_wait_cycle = 0;
+  _stat_dependency_wait_cycle = 0;
+  _stat_request_injection_wait_cycle = 0;
   _stat_idle_cycle = 0;
   _stat_vec_compute_cycle = 0;
   _stat_matmul_cycle = 0;

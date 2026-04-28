@@ -10,6 +10,7 @@
 class Ssd;
 class StorageController;
 class ResidencyManager;
+struct Tile;
 
 class Model {
   public:
@@ -44,9 +45,14 @@ class Model {
 	    virtual std::vector<uint64_t> submit_data_movements(
 	        StorageController* controller, uint64_t now_ps);
 	    virtual bool data_movements_ready(StorageController* controller) const;
-	    virtual void complete_data_movements(StorageController* controller);
-	    virtual uint64_t prepare_baseline_storage(StorageController* controller,
-	                                              uint64_t now_ps);
+    virtual void complete_data_movements(StorageController* controller);
+    virtual uint64_t prepare_baseline_storage(StorageController* controller,
+                                              uint64_t now_ps);
+    virtual bool supports_pipeline_preload() const { return false; }
+    virtual void refresh_pipeline_preload(StorageController* controller);
+    virtual bool pipeline_preload_complete() const { return true; }
+    virtual bool tile_ready_for_pipeline(const Tile* tile,
+                                         bool require_full_core) const;
     void set_residency_manager(ResidencyManager* residency_manager) {
       _residency_manager = residency_manager;
     }
@@ -72,6 +78,8 @@ class Model {
     uint64_t _start_time = 0;   // pico second
     bool _started = false;
     ResidencyManager* _residency_manager = nullptr;
+    bool address_range_memory_ready(addr_type address, uint64_t bytes) const;
+    bool tile_has_full_core_compute(const Tile* tile) const;
     bool check_exist_in_exeutable(uint32_t id);
 };
 

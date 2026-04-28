@@ -43,8 +43,11 @@ class Simulator {
   void handle_model();
   void admit_preload_models();
   void schedule_ready_models();
+  size_t pipeline_preload_inflight_count() const;
   uint32_t get_dest_node(MemoryAccess* access);
   void print_simulation_time_summary(double wall_clock_seconds) const;
+  void print_memory_report(uint64_t global_time_ps) const;
+  void write_memory_report_json(uint64_t global_time_ps) const;
   SimulationConfig _config;
   uint32_t _n_cores;
   uint32_t _noc_node_per_core;

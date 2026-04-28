@@ -26,6 +26,11 @@ class TraceModel : public Model {
   virtual void complete_data_movements(StorageController* controller) override;
   virtual uint64_t prepare_baseline_storage(StorageController* controller,
                                             uint64_t now_ps) override;
+  virtual bool supports_pipeline_preload() const override { return true; }
+  virtual void refresh_pipeline_preload(StorageController* controller) override;
+  virtual bool pipeline_preload_complete() const override {
+    return _pipeline_preload_complete;
+  }
 
 	 private:
   struct PlannedDataMovement {
@@ -56,6 +61,7 @@ class TraceModel : public Model {
     addr_type hbm_addr = 0;
     uint64_t bytes = 0;
     uint64_t movement_id = 0;
+    bool marked = false;
   };
 
 	  std::string _trace_path;
@@ -65,10 +71,14 @@ class TraceModel : public Model {
   std::vector<uint64_t> _submitted_movement_ids;
   std::vector<ResidentLoad> _resident_loads;
   bool _data_movements_submitted = false;
+  bool _pipeline_preload_complete = true;
+  size_t _next_completed_range_index = 0;
   uint64_t _reuse_logical_bytes = 0;
   uint64_t _reuse_physical_bytes = 0;
 
   uint32_t register_tensor(const trace_frontend::TensorEntry& entry, bool produced);
+  Tensor* find_tensor_covering(addr_type address, uint64_t bytes) const;
+  void mark_completed_resident_loads(StorageController* controller);
   void remember_tensor_entry(const trace_frontend::TensorEntry& entry);
   void apply_trace_storage(Tensor* tensor, const trace_frontend::TensorEntry& entry);
   bool apply_reuse_layout(Tensor* tensor,

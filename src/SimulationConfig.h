@@ -126,6 +126,8 @@ struct SimulationConfig {
   uint32_t full_precision = 4;
   std::string layout;
   bool enable_fast_forward = false;
+  bool enable_pipeline_preload = false;
+  std::string memory_report_json;
 
   /*
    * This map stores the partition information: <partition_id, core_id>

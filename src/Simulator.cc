@@ -1,5 +1,6 @@
 #include "Simulator.h"
 
+#include <fstream>
 #include <filesystem>
 #include <limits>
 #include <string>
@@ -13,6 +14,33 @@ namespace {
 
 double ps_to_us(uint64_t ps) {
   return static_cast<double>(ps) / 1e6;
+}
+
+double percent(uint64_t numerator, uint64_t denominator) {
+  if (denominator == 0) return 0.0;
+  return 100.0 * static_cast<double>(numerator) /
+         static_cast<double>(denominator);
+}
+
+uint64_t tier_total_requests(const MemoryTierRuntimeStats& stats) {
+  return stats.read_requests + stats.write_requests;
+}
+
+uint64_t tier_total_bytes(const MemoryTierRuntimeStats& stats) {
+  return stats.read_bytes + stats.write_bytes;
+}
+
+double avg_latency_us(const MemoryTierRuntimeStats& stats) {
+  uint64_t requests = tier_total_requests(stats);
+  if (requests == 0) return 0.0;
+  return ps_to_us(stats.total_latency_ps) / static_cast<double>(requests);
+}
+
+double effective_bandwidth_gbps(const MemoryTierRuntimeStats& stats,
+                                uint64_t global_time_ps) {
+  if (global_time_ps == 0) return 0.0;
+  double seconds = static_cast<double>(global_time_ps) / 1e12;
+  return static_cast<double>(tier_total_bytes(stats)) / seconds / 1e9;
 }
 
 }  // namespace
@@ -152,7 +180,14 @@ void Simulator::handle_model() {
                  _waiting_to_preload_models.size());
   }
 
+  if (_scheduler && _config.enable_pipeline_preload) {
+    _scheduler->refresh_pipeline_preload(_storage_controller.get());
+  }
+
   for (auto it = _preloading_models.begin(); it != _preloading_models.end();) {
+    if (_config.enable_pipeline_preload) {
+      (*it)->refresh_pipeline_preload(_storage_controller.get());
+    }
     if ((*it)->data_movements_ready(_storage_controller.get())) {
       (*it)->complete_data_movements(_storage_controller.get());
       spdlog::info("Model {} data ready at {:.6f} us",
@@ -168,11 +203,23 @@ void Simulator::handle_model() {
   schedule_ready_models();
 }
 
+size_t Simulator::pipeline_preload_inflight_count() const {
+  size_t count = _preloading_models.size();
+  for (const auto& model : _ready_to_compute_models) {
+    if (model && model->supports_pipeline_preload() &&
+        !model->pipeline_preload_complete()) {
+      count++;
+    }
+  }
+  if (_scheduler) count += _scheduler->pipeline_preload_inflight_count();
+  return count;
+}
+
 void Simulator::admit_preload_models() {
   const uint32_t max_preloading = _config.max_preloading_models;
   while (!_waiting_to_preload_models.empty() &&
          (max_preloading == 0 ||
-          _preloading_models.size() < max_preloading)) {
+          pipeline_preload_inflight_count() < max_preloading)) {
     std::unique_ptr<Model> launch_model =
         std::move(_waiting_to_preload_models.front());
     _waiting_to_preload_models.pop_front();
@@ -186,13 +233,22 @@ void Simulator::admit_preload_models() {
     spdlog::info("Admit model {} to preload at {:.6f} us "
                  "(inflight_preloads={}/{}, waiting_remaining={})",
                  launch_model->get_name(), ps_to_us(_core_time),
-                 _preloading_models.size(), max_preloading,
+                 pipeline_preload_inflight_count(), max_preloading,
                  _waiting_to_preload_models.size());
     launch_model->set_residency_manager(_residency_manager.get());
     launch_model->initialize_model(_weight_table[weight_key]);
     launch_model->prefill_ssd_tensors(_ssd.get());
     auto movement_ids =
         launch_model->submit_data_movements(_storage_controller.get(), _core_time);
+    if (_config.enable_pipeline_preload &&
+        launch_model->supports_pipeline_preload()) {
+      spdlog::info("Model {} pipeline preload enabled; schedule before all "
+                   "{} movements finish at {:.6f} us",
+                   launch_model->get_name(), movement_ids.size(),
+                   ps_to_us(_core_time));
+      _ready_to_compute_models.push_back(std::move(launch_model));
+      continue;
+    }
     if (movement_ids.empty() ||
         launch_model->data_movements_ready(_storage_controller.get())) {
       launch_model->complete_data_movements(_storage_controller.get());
@@ -529,6 +585,171 @@ void Simulator::print_simulation_time_summary(double wall_clock_seconds) const {
   spdlog::info("wall-clock={:.6f} s",wall_clock_seconds);
 }
 
+void Simulator::print_memory_report(uint64_t global_time_ps) const {
+  spdlog::info("========== Memory Stall Report ==========");
+  uint64_t total_cycles = 0;
+  uint64_t total_systolic = 0;
+  uint64_t total_vector = 0;
+  uint64_t total_idle = 0;
+  uint64_t total_memory_wait = 0;
+  uint64_t total_dependency_wait = 0;
+  uint64_t total_injection_wait = 0;
+
+  for (const auto& core : _cores) {
+    CoreRuntimeStats stats = core->get_runtime_stats();
+    total_cycles += stats.total_cycles;
+    total_systolic += stats.systolic_active_cycles;
+    total_vector += stats.vector_active_cycles;
+    total_idle += stats.idle_cycles;
+    total_memory_wait += stats.memory_wait_cycles;
+    total_dependency_wait += stats.dependency_wait_cycles;
+    total_injection_wait += stats.request_injection_wait_cycles;
+    spdlog::info(
+        "[MemoryReport][Core {}] total={} systolic_active={:.2f}% "
+        "vector_active={:.2f}% memory_wait={:.2f}% dependency_wait={:.2f}% "
+        "request_injection_wait={:.2f}% idle={:.2f}%",
+        stats.core_id, stats.total_cycles,
+        percent(stats.systolic_active_cycles, stats.total_cycles),
+        percent(stats.vector_active_cycles, stats.total_cycles),
+        percent(stats.memory_wait_cycles, stats.total_cycles),
+        percent(stats.dependency_wait_cycles, stats.total_cycles),
+        percent(stats.request_injection_wait_cycles, stats.total_cycles),
+        percent(stats.idle_cycles, stats.total_cycles));
+  }
+
+  spdlog::info(
+      "[MemoryReport][NPU] avg_systolic_active={:.2f}% avg_vector_active={:.2f}% "
+      "avg_memory_wait={:.2f}% avg_dependency_wait={:.2f}% "
+      "avg_request_injection_wait={:.2f}% avg_idle={:.2f}%",
+      percent(total_systolic, total_cycles),
+      percent(total_vector, total_cycles),
+      percent(total_memory_wait, total_cycles),
+      percent(total_dependency_wait, total_cycles),
+      percent(total_injection_wait, total_cycles),
+      percent(total_idle, total_cycles));
+
+  auto print_tier = [&](const MemoryTierRuntimeStats& stats,
+                        double peak_gbps) {
+    double bw = effective_bandwidth_gbps(stats, global_time_ps);
+    double util = peak_gbps > 0.0 ? 100.0 * bw / peak_gbps : 0.0;
+    spdlog::info(
+        "[MemoryReport][{}] reads={} writes={} read_bytes={} write_bytes={} "
+        "effective_bw={:.3f}GB/s peak_bw={:.3f}GB/s util={:.2f}% "
+        "avg_latency={:.6f}us max_latency={:.6f}us dispatch_blocked={}",
+        stats.name, stats.read_requests, stats.write_requests, stats.read_bytes,
+        stats.write_bytes, bw, peak_gbps, util, avg_latency_us(stats),
+        ps_to_us(stats.max_latency_ps), stats.dispatch_blocked);
+    spdlog::info(
+        "[MemoryReport][{}] core_bytes={} controller_preload_bytes={}",
+        stats.name, stats.core_read_bytes + stats.core_write_bytes,
+        stats.controller_read_bytes + stats.controller_write_bytes);
+  };
+
+  if (_storage_controller) {
+    const StorageRuntimeStats& storage = _storage_controller->runtime_stats();
+    print_tier(storage.hbm, _config.max_hbm_bandwidth());
+    if (_config.ddr.enabled) print_tier(storage.ddr, _config.max_ddr_bandwidth());
+    if (_config.ssd.enabled) print_tier(storage.ssd, 0.0);
+
+    double hbm_util = _config.max_hbm_bandwidth() > 0.0
+                          ? 100.0 * effective_bandwidth_gbps(storage.hbm, global_time_ps) /
+                                _config.max_hbm_bandwidth()
+                          : 0.0;
+    double ddr_util = (_config.ddr.enabled && _config.max_ddr_bandwidth() > 0.0)
+                          ? 100.0 * effective_bandwidth_gbps(storage.ddr, global_time_ps) /
+                                _config.max_ddr_bandwidth()
+                          : 0.0;
+    double avg_memory_wait = percent(total_memory_wait, total_cycles);
+    if (avg_memory_wait > 20.0 && hbm_util < 30.0 &&
+        (!_config.ddr.enabled || ddr_util < 30.0)) {
+      spdlog::info(
+          "[MemoryReport][Hint] NPU memory_wait is high while memory BW util is "
+          "low; likely limited by request granularity, dependency serialization, "
+          "or preload readiness rather than raw HBM/DDR bandwidth.");
+    }
+    if (storage.hbm.dispatch_blocked + storage.ddr.dispatch_blocked > 0) {
+      spdlog::info(
+          "[MemoryReport][Hint] Memory dispatch saw backpressure; controller or "
+          "channel queues were full for some requests.");
+    }
+  }
+  if (_scheduler) {
+    spdlog::info("[MemoryReport][Scheduler] pipeline_data_wait_cycles={}",
+                 _scheduler->pipeline_data_wait_cycles());
+  }
+  spdlog::info("=========================================");
+}
+
+void Simulator::write_memory_report_json(uint64_t global_time_ps) const {
+  if (_config.memory_report_json.empty()) return;
+
+  json report;
+  report["simulation_time_us"] = ps_to_us(global_time_ps);
+  report["cores"] = json::array();
+  for (const auto& core : _cores) {
+    CoreRuntimeStats stats = core->get_runtime_stats();
+    report["cores"].push_back({
+        {"core_id", stats.core_id},
+        {"total_cycles", stats.total_cycles},
+        {"systolic_active_cycles", stats.systolic_active_cycles},
+        {"vector_active_cycles", stats.vector_active_cycles},
+        {"idle_cycles", stats.idle_cycles},
+        {"memory_wait_cycles", stats.memory_wait_cycles},
+        {"dependency_wait_cycles", stats.dependency_wait_cycles},
+        {"request_injection_wait_cycles", stats.request_injection_wait_cycles},
+        {"matmul_pe_cycles", stats.matmul_pe_cycles},
+    });
+  }
+
+  auto tier_json = [&](const MemoryTierRuntimeStats& stats, double peak_gbps) {
+    double bw = effective_bandwidth_gbps(stats, global_time_ps);
+    return json{
+        {"read_requests", stats.read_requests},
+        {"write_requests", stats.write_requests},
+        {"read_bytes", stats.read_bytes},
+        {"write_bytes", stats.write_bytes},
+        {"core_read_bytes", stats.core_read_bytes},
+        {"core_write_bytes", stats.core_write_bytes},
+        {"controller_read_bytes", stats.controller_read_bytes},
+        {"controller_write_bytes", stats.controller_write_bytes},
+        {"dispatch_blocked", stats.dispatch_blocked},
+        {"effective_bandwidth_gbps", bw},
+        {"configured_peak_bandwidth_gbps", peak_gbps},
+        {"bandwidth_util_percent",
+         peak_gbps > 0.0 ? 100.0 * bw / peak_gbps : 0.0},
+        {"avg_latency_us", avg_latency_us(stats)},
+        {"max_latency_us", ps_to_us(stats.max_latency_ps)},
+    };
+  };
+
+  if (_storage_controller) {
+    const StorageRuntimeStats& storage = _storage_controller->runtime_stats();
+    report["memory"]["hbm"] = tier_json(storage.hbm, _config.max_hbm_bandwidth());
+    report["memory"]["ddr"] = tier_json(storage.ddr, _config.max_ddr_bandwidth());
+    report["memory"]["ssd"] = tier_json(storage.ssd, 0.0);
+  }
+  if (_scheduler) {
+    report["scheduler"]["pipeline_data_wait_cycles"] =
+        _scheduler->pipeline_data_wait_cycles();
+  }
+
+  std::ofstream out(_config.memory_report_json);
+  if (!out) {
+    spdlog::error("Failed to open memory report JSON: {}",
+                  _config.memory_report_json);
+    return;
+  }
+  out << report.dump(2) << std::endl;
+  spdlog::info("Memory report JSON written to {}", _config.memory_report_json);
+}
+
 void Simulator::print_final_summary(double wall_clock_seconds) const {
+  const uint64_t core_time_ps = _core_cycles * _core_period;
+  const uint64_t icnt_time_ps = _icnt_cycle * _icnt_period;
+  const uint64_t dram_time_ps = _mem_cycles * _mem_period;
+  const uint64_t global_time_ps =
+      std::max({core_time_ps, icnt_time_ps, dram_time_ps, _last_sim_time_ps});
+  print_memory_report(global_time_ps);
+  write_memory_report_json(global_time_ps);
   print_simulation_time_summary(wall_clock_seconds);
 }

@@ -45,6 +45,54 @@ bool Scheduler::preserve_small_layer_core_ids(uint32_t layer_id, size_t availabl
   return it->second.total_tiles < available_cores;
 }
 
+void Scheduler::refresh_pipeline_preload(StorageController* controller) {
+  for (auto& request : _request_queue) {
+    if (request.model)
+      request.model->refresh_pipeline_preload(controller);
+  }
+}
+
+size_t Scheduler::pipeline_preload_inflight_count() const {
+  size_t count = 0;
+  for (const auto& request : _request_queue) {
+    if (request.model && request.model->supports_pipeline_preload() &&
+        !request.model->pipeline_preload_complete()) {
+      count++;
+    }
+  }
+  return count;
+}
+
+Model* Scheduler::model_for_layer(uint32_t layer_id) {
+  auto active_it = _active_layers_map.find(layer_id);
+  if (active_it != _active_layers_map.end()) {
+    uint32_t request_id = active_it->second.request_id;
+    for (auto& request : _request_queue) {
+      if (request.request_id == request_id) return request.model.get();
+    }
+  }
+  if (!_request_queue.empty()) return _request_queue.front().model.get();
+  return nullptr;
+}
+
+bool Scheduler::pipeline_tile_ready(Model* model, const Tile* tile) const {
+  if (!_config.enable_pipeline_preload || model == nullptr ||
+      !model->supports_pipeline_preload()) {
+    return true;
+  }
+  bool require_full_core = !model->pipeline_preload_complete();
+  return model->tile_ready_for_pipeline(tile, require_full_core);
+}
+
+bool Scheduler::has_pending_core_tile(uint32_t layer_id) const {
+  for (const auto& [_, queue] : _core_executable_tile_queue) {
+    for (const auto& tile : queue) {
+      if (tile != nullptr && tile->layer_id == layer_id) return true;
+    }
+  }
+  return false;
+}
+
 void Scheduler::schedule_model(std::unique_ptr<Model> model,
                                uint32_t sample_size) {
   _request_queue.push_back(Request{.request_id = generate_id(),
@@ -61,7 +109,22 @@ uint32_t Scheduler::cpu_to_partition(uint32_t cpu) {
 
 void Scheduler::issue_tile_per_core(std::vector<uint32_t>& allowed_cpu, int offset, uint32_t partition_id) {
   while(!_executable_tile_queue[partition_id].empty()) {
-    std::unique_ptr<Tile>& tile = _executable_tile_queue[partition_id].front();
+    auto tile_it = _executable_tile_queue[partition_id].begin();
+    if (_config.enable_pipeline_preload) {
+      tile_it = _executable_tile_queue[partition_id].end();
+      for (auto it = _executable_tile_queue[partition_id].begin();
+           it != _executable_tile_queue[partition_id].end(); ++it) {
+        if ((*it)->status == Tile::Status::BAR) break;
+        Model* model = model_for_layer((*it)->layer_id);
+        if (pipeline_tile_ready(model, it->get())) {
+          tile_it = it;
+          break;
+        }
+      }
+      if (tile_it == _executable_tile_queue[partition_id].end()) break;
+    }
+
+    std::unique_ptr<Tile>& tile = *tile_it;
     /* Barrier! */
     if (tile->status == Tile::Status::BAR)
       break;
@@ -79,13 +142,28 @@ void Scheduler::issue_tile_per_core(std::vector<uint32_t>& allowed_cpu, int offs
     spdlog::debug("pushed to queue[{}], tile->core_id: {}", core_id, tile->core_id);
     tile->core_id = core_id;
     _core_executable_tile_queue[core_id].push_back(std::move(tile));
-    _executable_tile_queue[partition_id].pop_front();
+    _executable_tile_queue[partition_id].erase(tile_it);
   }
 }
 
 void Scheduler::issue_tile_per_core() {
   while(!_executable_tile_queue[0].empty()) {
-    std::unique_ptr<Tile>& tile = _executable_tile_queue[0].front();
+    auto tile_it = _executable_tile_queue[0].begin();
+    if (_config.enable_pipeline_preload) {
+      tile_it = _executable_tile_queue[0].end();
+      for (auto it = _executable_tile_queue[0].begin();
+           it != _executable_tile_queue[0].end(); ++it) {
+        if ((*it)->status == Tile::Status::BAR) break;
+        Model* model = model_for_layer((*it)->layer_id);
+        if (pipeline_tile_ready(model, it->get())) {
+          tile_it = it;
+          break;
+        }
+      }
+      if (tile_it == _executable_tile_queue[0].end()) break;
+    }
+
+    std::unique_ptr<Tile>& tile = *tile_it;
     /* Barrier! */
     if (tile->status == Tile::Status::BAR)
       break;
@@ -99,7 +177,7 @@ void Scheduler::issue_tile_per_core() {
       tile->core_id = (tile->core_id + _nr_layer) % _config.num_cores;
     }
     _core_executable_tile_queue[tile->core_id].push_back(std::move(tile));
-    _executable_tile_queue[0].pop_front();
+    _executable_tile_queue[0].erase(tile_it);
   }
 }
 
@@ -121,11 +199,33 @@ std::unique_ptr<Tile> Scheduler::get_tile(uint32_t core_id) {
                     *_core_cycle);
       return tile;
     } else {
+      if (_config.enable_pipeline_preload) {
+        std::vector<uint32_t>& allowed_cpu = _partition_map.at(partition_id);
+        auto allowed_it = find(allowed_cpu.begin(), allowed_cpu.end(), core_id);
+        int offset = allowed_it == allowed_cpu.end()
+                         ? 0
+                         : static_cast<int>(allowed_it - allowed_cpu.begin());
+        issue_tile_per_core(allowed_cpu, offset, partition_id);
+        if (!_core_executable_tile_queue[core_id].empty()) {
+          std::unique_ptr<Tile> tile =
+              std::move(_core_executable_tile_queue[core_id].front());
+          _active_layers_map[tile->layer_id].launched_tiles++;
+          _core_executable_tile_queue[core_id].pop_front();
+          return tile;
+        }
+        if (_executable_tile_queue[partition_id].empty()) {
+          std::unique_ptr<Tile> empty_tile =
+              std::make_unique<Tile>(Tile{.status = Tile::Status::EMPTY});
+          return empty_tile;
+        }
+        _pipeline_data_wait_cycles++;
+      }
       std::unique_ptr<Tile>& tile = _executable_tile_queue[partition_id].front();
       int layer_id = tile->layer_id;
       if (tile->status == Tile::Status::BAR) {
         LayerStat stat = _active_layers_map[layer_id];
-        if (stat.launched_tiles == stat.finished_tiles) {
+        if (stat.launched_tiles == stat.finished_tiles &&
+            !has_pending_core_tile(layer_id)) {
           /* POP only if all lauched tiles are finished */
           _executable_tile_queue[partition_id].pop_front();
           _active_layers_map[layer_id].launched_tiles++;
@@ -148,6 +248,15 @@ std::unique_ptr<Tile> Scheduler::get_tile(uint32_t core_id) {
         std::unique_ptr<Tile> empty_tile = std::make_unique<Tile>(Tile{.status = Tile::Status::EMPTY});
         return empty_tile;
       } else {
+        if (_config.enable_pipeline_preload) {
+          Model* model = model_for_layer(layer_id);
+          if (!pipeline_tile_ready(model, tile.get())) {
+            _pipeline_data_wait_cycles++;
+            std::unique_ptr<Tile> empty_tile =
+                std::make_unique<Tile>(Tile{.status = Tile::Status::EMPTY});
+            return empty_tile;
+          }
+        }
         spdlog::error("[Scheduler] Something wrong happened...! {}", tile->optype);
         std::unique_ptr<Tile> empty_tile = std::make_unique<Tile>(Tile{.status = Tile::Status::EMPTY});
         return empty_tile;
@@ -252,6 +361,7 @@ void Scheduler::refresh_status() {
     _nr_layer++;
     _active_layers_map[new_layer->get_id()] =
         LayerStat{.id = new_layer->get_id(),
+                  .request_id = _request_queue.front().request_id,
                   .name = new_layer->get_name(),
                   .launched = true,
                   .start_cycle = *_core_cycle,

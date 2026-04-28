@@ -3,6 +3,8 @@
 #include "Model.h"
 #include "operations/Operation.h"
 
+#include <algorithm>
+
 Tensor::Tensor(uint32_t src_node, onnx::TensorProto &tensor_proto, int precision,
                bool produced = false) {
   _id = generate_id();
@@ -49,6 +51,8 @@ Tensor::Tensor(const Tensor &tensor) {
   _reuse_physical_rows = tensor._reuse_physical_rows;
   _reuse_row_stride_bytes = tensor._reuse_row_stride_bytes;
   _reuse_logical_to_physical = tensor._reuse_logical_to_physical;
+  _memory_ready_full = tensor._memory_ready_full;
+  _memory_ready_ranges = tensor._memory_ready_ranges;
 }
 
 Tensor::Tensor(uint32_t src_node, std::string name, int precision) {
@@ -117,6 +121,61 @@ void Tensor::set_reuse_layout(
   _reuse_logical_to_physical = logical_to_physical;
 }
 
+void Tensor::set_memory_pending() {
+  _memory_ready_full = false;
+  _memory_ready_ranges.clear();
+}
+
+void Tensor::mark_full_memory_ready() {
+  _memory_ready_full = true;
+  _memory_ready_ranges.clear();
+}
+
+void Tensor::mark_memory_ready(addr_type address, uint64_t bytes) {
+  if (bytes == 0 || _memory_ready_full) return;
+  addr_type tensor_begin = _address;
+  addr_type tensor_end = _address + _size;
+  addr_type ready_begin = std::max(address, tensor_begin);
+  addr_type ready_end = std::min<addr_type>(address + bytes, tensor_end);
+  if (ready_begin >= ready_end) return;
+
+  _memory_ready_ranges.push_back({ready_begin, ready_end});
+  std::sort(_memory_ready_ranges.begin(), _memory_ready_ranges.end());
+  std::vector<std::pair<addr_type, addr_type>> merged;
+  for (const auto& range : _memory_ready_ranges) {
+    if (merged.empty() || range.first > merged.back().second) {
+      merged.push_back(range);
+    } else {
+      merged.back().second = std::max(merged.back().second, range.second);
+    }
+  }
+  _memory_ready_ranges = std::move(merged);
+  if (_memory_ready_ranges.size() == 1 &&
+      _memory_ready_ranges.front().first <= tensor_begin &&
+      _memory_ready_ranges.front().second >= tensor_end) {
+    mark_full_memory_ready();
+  }
+}
+
+bool Tensor::memory_ready(addr_type address, uint64_t bytes) const {
+  if (_memory_ready_full) return true;
+  if (bytes == 0) return true;
+  addr_type request_begin = address;
+  addr_type request_end = address + bytes;
+  for (const auto& range : _memory_ready_ranges) {
+    if (range.first <= request_begin && range.second >= request_end)
+      return true;
+  }
+  return false;
+}
+
+bool Tensor::memory_ready() const {
+  if (_memory_ready_full) return true;
+  return _memory_ready_ranges.size() == 1 &&
+         _memory_ready_ranges.front().first <= _address &&
+         _memory_ready_ranges.front().second >= _address + _size;
+}
+
 void Tensor::allocate_tensor(int precision) {
   uint32_t size = 1;
   for (auto dim : _dims) {
@@ -135,6 +194,7 @@ void Tensor::allocate_tensor(int precision) {
 
 void Tensor::relocate(MemoryMedium medium) {
   _address = allocate_address_in_medium(static_cast<uint32_t>(_size), medium);
+  mark_full_memory_ready();
   const char* medium_name = "HBM";
   if (medium == MemoryMedium::DDR) medium_name = "DDR";
   if (medium == MemoryMedium::SSD) medium_name = "SSD";

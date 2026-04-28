@@ -31,6 +31,12 @@ int main(int argc, char** argv) {
       "bench_config", "Path for mem_benchmark configuration JSON");
   cmd_parser.add_command_line_option<std::string>(
       "bench_output_dir", "Output directory for mem_benchmark CSV/chart inputs");
+  cmd_parser.add_command_line_option<std::string>(
+      "pipeline_preload",
+      "Enable tile-level compute/preload overlap for trace mode [true,false]");
+  cmd_parser.add_command_line_option<std::string>(
+      "memory_report_json",
+      "Optional path to write final memory-stall report JSON");
 
   try {
     cmd_parser.parse(argc, argv);
@@ -67,6 +73,19 @@ int main(int argc, char** argv) {
   config_file >> config_json;
   config_file.close();
   SimulationConfig config = initialize_config(config_json);
+  cmd_parser.set_if_defined("memory_report_json", &config.memory_report_json);
+  std::string pipeline_preload = "false";
+  cmd_parser.set_if_defined("pipeline_preload", &pipeline_preload);
+  if (pipeline_preload == "true" || pipeline_preload == "1" ||
+      pipeline_preload == "yes" || pipeline_preload == "on") {
+    config.enable_pipeline_preload = true;
+  } else if (pipeline_preload == "false" || pipeline_preload == "0" ||
+             pipeline_preload == "no" || pipeline_preload == "off") {
+    config.enable_pipeline_preload = false;
+  } else {
+    spdlog::error("Invalid pipeline_preload value: {}", pipeline_preload);
+    return 1;
+  }
   OperationFactory::initialize(config);
 
   configure_tensor_placement_policy(config);

@@ -107,9 +107,8 @@ python3 scripts/generate_hstu_baseline_trace.py \
   --vocab 65536 \
   --num-users 1 \
   --users-per-batch 1 \
-  --candidates-per-user 512 \
-  --macro-batch-size 64 \
-  --tokens 64 \
+  --candidates-per-user 10240 \
+  --macro-batch-size 512 \
   --op-modeling split=skip,view=skip,concat=skip \
   --output example/trace_tests/baseline_intro_example \
   --models-list example/baseline_intro_example_models_list.json
@@ -140,7 +139,7 @@ python3 scripts/generate_hstu_baseline_trace.py \
 
 ```bash
 ./build/bin/Simulator \
-  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ddr_default.json \
+  --config configs/systolic_ws_256x256_c8_simple_noc_ascend910c_hbm128_ddr5_12ch_768gb.json \
   --models_list ./example/baseline_intro_example_models_list.json \
   --mode trace \
   --log_level info
