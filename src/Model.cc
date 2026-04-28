@@ -188,6 +188,36 @@ uint64_t Model::prepare_baseline_storage(StorageController* /*controller*/,
   return now_ps;
 }
 
+bool Model::initial_data_movement_stage_ready(
+    StorageController* /*controller*/) const {
+  return true;
+}
+
+std::vector<uint64_t> Model::submit_next_data_movement_stage(
+    StorageController* /*controller*/, uint64_t /*now_ps*/) {
+  return {};
+}
+
+bool Model::complete_ready_data_movement_stages(
+    StorageController* /*controller*/, uint64_t /*now_ps*/) {
+  return false;
+}
+
+bool Model::all_data_movement_stages_done(
+    StorageController* /*controller*/) const {
+  return true;
+}
+
+void Model::record_compute_start(uint32_t /*op_id*/, uint64_t /*now_ps*/) {}
+
+void Model::record_compute_finish(uint32_t /*op_id*/, uint64_t /*now_ps*/) {}
+
+void Model::record_core_phase(uint32_t /*op_id*/, const std::string& /*phase*/,
+                              uint32_t /*core_id*/, uint64_t /*start_ps*/,
+                              uint64_t /*end_ps*/, uint64_t /*bytes*/) {}
+
+void Model::release_residency_pins() {}
+
 
 void Model::set_layer_finish(uint32_t id) {
   _operation_map[id]->set_finish();
@@ -209,6 +239,7 @@ Operation* Model::get_executable_tile() {
   if (_executable_layer.size()){
     op = _executable_layer.front();
     _executable_layer.erase(_executable_layer.begin());
+    _dispatched_layers.insert(op->get_id());
   }
   return op;
 }
@@ -229,6 +260,11 @@ bool Model::check_finish() {
 }
 
 bool Model::check_exist_in_exeutable(uint32_t op_id) {
+  auto op_it = _operation_map.find(op_id);
+  if (op_it != _operation_map.end() && !op_it->second->check_finish() &&
+      _dispatched_layers.count(op_id)) {
+    return true;
+  }
   for(auto iter = _executable_layer.begin(); iter != _executable_layer.end(); iter ++) {
     if(op_id == (*iter)->get_id()) {
       return true;

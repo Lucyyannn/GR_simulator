@@ -32,6 +32,7 @@ class Tensor {
                         uint64_t row_stride_bytes,
                         const std::vector<uint32_t>& logical_to_physical);
   void set_produced() { _produced = true; }
+  void clear_produced() { _produced = false; }
   bool get_produced() { return _produced; }
   uint32_t num_child_nodes() { return _child_nodes.size(); }
   uint32_t get_child_node(uint32_t id) { return _child_nodes[id]; }

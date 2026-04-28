@@ -94,6 +94,28 @@ std::unique_ptr<Tile> Core::pop_finished_tile() {
   return result;
 }
 
+CorePhaseEvent Core::pop_phase_event() {
+  CorePhaseEvent event;
+  if (!_phase_events.empty()) {
+    event = _phase_events.front();
+    _phase_events.pop();
+  }
+  return event;
+}
+
+void Core::record_phase_event(CorePhase phase, uint32_t layer_id,
+                              cycle_type start_cycle, cycle_type end_cycle,
+                              uint64_t bytes) {
+  if (phase == CorePhase::UNKNOWN) return;
+  if (end_cycle < start_cycle) end_cycle = start_cycle;
+  _phase_events.push(CorePhaseEvent{.layer_id = layer_id,
+                                    .core_id = _id,
+                                    .phase = phase,
+                                    .start_cycle = start_cycle,
+                                    .end_cycle = end_cycle,
+                                    .bytes = bytes});
+}
+
 void Core::cycle() {
   _core_cycle++;
   _spad.cycle();
@@ -103,9 +125,9 @@ void Core::cycle() {
     if(_tiles[i]->instructions.empty()) 
       continue;
     std::unique_ptr<Instruction>& inst = _tiles[i]->instructions.front();
+    inst->my_tile = _tiles[i].get();
     if(_tiles[i]->instructions.size() == 1) {
       inst->last_inst = true;
-      inst->my_tile = _tiles[i].get();
     }
     inst->spad_id = _tiles[i]->spad_id;
     inst->accum_spad_id = _tiles[i]->accum_spad_id;
@@ -126,6 +148,7 @@ void Core::cycle() {
       }
       if (!buffer->check_allocated(inst->dest_addr, buffer_id) &&
           buffer->check_remain(inst->size, buffer_id)) {
+        inst->start_cycle = _core_cycle;
         _ld_inst_queue.push(std::move(inst));
         issued = true;
       } else {
@@ -262,6 +285,9 @@ void Core::pop_memory_request() {
 
 void Core::push_memory_response(MemoryAccess *response) {
   assert(!response->request);
+  record_phase_event(response->core_phase, response->layer_id,
+                     response->core_phase_start_cycle, _core_cycle,
+                     response->size);
   spdlog::debug("[CORE-RESP] core={} addr=0x{:x} spad=0x{:x} wr={} bid={}",
                 _id, response->dram_address, response->spad_address,
                 response->write, response->buffer_id);
@@ -432,7 +458,12 @@ void Core::handle_ld_inst_queue() {
                               .request = true,
                               .core_id = _id,
                               .start_cycle = _core_cycle,
-                              .buffer_id = buffer_id});
+                              .buffer_id = buffer_id,
+                              .core_phase = CorePhase::MOVIN,
+                              .layer_id = front->my_tile == nullptr
+                                              ? 0
+                                              : front->my_tile->layer_id,
+                              .core_phase_start_cycle = front->start_cycle});
         _request_queue.push(access);
       }
       _ld_inst_queue.pop();

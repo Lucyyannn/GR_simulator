@@ -25,6 +25,8 @@ class Core {
   virtual void pop_memory_request();
   virtual MemoryAccess* top_memory_request() { return _request_queue.front(); }
   virtual void push_memory_response(MemoryAccess* response);
+  virtual bool has_phase_event() const { return !_phase_events.empty(); }
+  virtual CorePhaseEvent pop_phase_event();
   virtual void print_stats();
   virtual void print_current_stats();
 
@@ -43,6 +45,9 @@ class Core {
   virtual cycle_type calculate_add_tree_iterations(uint32_t vector_size);
   virtual cycle_type calculate_vector_op_iterations(uint32_t vector_size);
   void add_fast_forward_stats(cycle_type cycles);
+  void record_phase_event(CorePhase phase, uint32_t layer_id,
+                          cycle_type start_cycle, cycle_type end_cycle,
+                          uint64_t bytes = 0);
 
   const uint32_t _id;
   const SimulationConfig _config;
@@ -88,6 +93,7 @@ class Core {
 
   std::queue<MemoryAccess*> _request_queue;
   std::queue<MemoryAccess*> _response_queue;
+  std::queue<CorePhaseEvent> _phase_events;
   uint32_t _waiting_write_reqs;
 
   uint32_t _current_layer_id;

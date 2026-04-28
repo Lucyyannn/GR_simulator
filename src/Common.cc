@@ -405,6 +405,18 @@ SimulationConfig initialize_config(json config) {
     const auto& pipeline = config["pipeline"];
     parsed_config.max_preloading_models =
         pipeline.value("max_preloading_models", parsed_config.max_preloading_models);
+    parsed_config.layer_preload_enabled =
+        pipeline.value("layer_preload_enabled",
+                       parsed_config.layer_preload_enabled);
+    parsed_config.layer_preload_lookahead =
+        pipeline.value("layer_preload_lookahead",
+                       parsed_config.layer_preload_lookahead);
+    parsed_config.hbm_residency_capacity_bytes =
+        read_u64(pipeline, "hbm_residency_capacity_bytes",
+                 parsed_config.hbm_residency_capacity_bytes);
+    parsed_config.pipeline_breakdown_csv =
+        pipeline.value("breakdown_csv",
+                       parsed_config.pipeline_breakdown_csv);
   } else {
     parsed_config.max_preloading_models =
         config.value("max_preloading_models", parsed_config.max_preloading_models);

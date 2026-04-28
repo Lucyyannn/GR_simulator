@@ -1,5 +1,6 @@
 #include "Simulator.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <limits>
 #include <string>
@@ -93,6 +94,10 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
   _storage_controller =
       std::make_unique<StorageController>(config, _hbm.get(), _ddr.get(), _ssd.get());
   _residency_manager = std::make_unique<ResidencyManager>();
+  _residency_manager->configure_capacity(
+      _config.hbm_residency_capacity_bytes == 0
+          ? _config.hbm.capacity_bytes
+          : _config.hbm_residency_capacity_bytes);
 
   // Create interconnect object
   if (config.icnt_type == IcntType::SIMPLE) {
@@ -153,8 +158,30 @@ void Simulator::handle_model() {
   }
 
   for (auto it = _preloading_models.begin(); it != _preloading_models.end();) {
-    if ((*it)->data_movements_ready(_storage_controller.get())) {
-      (*it)->complete_data_movements(_storage_controller.get());
+    Model* model = it->get();
+    if (model->uses_layer_preload()) {
+      model->complete_ready_data_movement_stages(_storage_controller.get(),
+                                                 _core_time);
+      if (model->has_data_movement_stage_to_submit()) {
+        model->submit_next_data_movement_stage(_storage_controller.get(),
+                                               _core_time);
+      }
+    }
+    const bool ready = model->uses_layer_preload()
+                           ? model->initial_data_movement_stage_ready(
+                                 _storage_controller.get())
+                           : model->data_movements_ready(
+                                 _storage_controller.get());
+    if (ready) {
+      if (model->uses_layer_preload()) {
+        model->complete_ready_data_movement_stages(_storage_controller.get(),
+                                                   _core_time);
+        if (model->has_data_movement_stage_to_submit())
+          model->submit_next_data_movement_stage(_storage_controller.get(),
+                                                 _core_time);
+      } else {
+        model->complete_data_movements(_storage_controller.get());
+      }
       spdlog::info("Model {} data ready at {:.6f} us",
                    (*it)->get_name(), ps_to_us(_core_time));
       _ready_to_compute_models.push_back(std::move(*it));
@@ -164,11 +191,37 @@ void Simulator::handle_model() {
     }
   }
 
+  advance_active_layer_preloads();
   admit_preload_models();
   schedule_ready_models();
 }
 
+void Simulator::advance_active_layer_preloads() {
+  for (Model* model : _active_layer_preload_models) {
+    if (model == nullptr) continue;
+    model->complete_ready_data_movement_stages(_storage_controller.get(),
+                                               _core_time);
+    if (model->has_data_movement_stage_to_submit()) {
+      model->submit_next_data_movement_stage(_storage_controller.get(),
+                                             _core_time);
+    }
+  }
+}
+
 void Simulator::admit_preload_models() {
+  for (Model* model : _active_layer_preload_models) {
+    if (model != nullptr &&
+        !model->all_data_movement_stages_done(_storage_controller.get())) {
+      return;
+    }
+  }
+  for (const auto& model : _ready_to_compute_models) {
+    if (model->uses_layer_preload() &&
+        !model->all_data_movement_stages_done(_storage_controller.get())) {
+      return;
+    }
+  }
+
   const uint32_t max_preloading = _config.max_preloading_models;
   while (!_waiting_to_preload_models.empty() &&
          (max_preloading == 0 ||
@@ -191,11 +244,32 @@ void Simulator::admit_preload_models() {
     launch_model->set_residency_manager(_residency_manager.get());
     launch_model->initialize_model(_weight_table[weight_key]);
     launch_model->prefill_ssd_tensors(_ssd.get());
-    auto movement_ids =
-        launch_model->submit_data_movements(_storage_controller.get(), _core_time);
-    if (movement_ids.empty() ||
-        launch_model->data_movements_ready(_storage_controller.get())) {
+    std::vector<uint64_t> movement_ids;
+    if (launch_model->uses_layer_preload()) {
+      movement_ids = launch_model->submit_next_data_movement_stage(
+          _storage_controller.get(), _core_time);
+    } else {
+      movement_ids = launch_model->submit_data_movements(
+          _storage_controller.get(), _core_time);
+    }
+
+    const bool ready =
+        launch_model->uses_layer_preload()
+            ? launch_model->initial_data_movement_stage_ready(
+                  _storage_controller.get())
+            : launch_model->data_movements_ready(_storage_controller.get());
+    const bool no_movement_ready =
+        movement_ids.empty() &&
+        (!launch_model->uses_layer_preload() || ready);
+    if (no_movement_ready || ready) {
       launch_model->complete_data_movements(_storage_controller.get());
+      if (launch_model->uses_layer_preload()) {
+        launch_model->complete_ready_data_movement_stages(
+            _storage_controller.get(), _core_time);
+        if (launch_model->has_data_movement_stage_to_submit())
+          launch_model->submit_next_data_movement_stage(
+              _storage_controller.get(), _core_time);
+      }
       spdlog::info("Model {} data ready at {:.6f} us",
                    launch_model->get_name(), ps_to_us(_core_time));
       _ready_to_compute_models.push_back(std::move(launch_model));
@@ -216,6 +290,10 @@ void Simulator::schedule_ready_models() {
     ready_model->set_request_time(_core_time);
     spdlog::info("Schedule model: {} at {:.6f} us",
                  ready_model->get_name(), ps_to_us(_core_time));
+    if (ready_model->uses_layer_preload() &&
+        !ready_model->all_data_movement_stages_done(_storage_controller.get())) {
+      _active_layer_preload_models.push_back(ready_model.get());
+    }
     _scheduler->schedule_model(std::move(ready_model), 1);
   }
 }
@@ -236,11 +314,14 @@ void Simulator::cycle() {
       /* Handle requested model */
       handle_model();
 
-      for (int core_id = 0; core_id < _n_cores; core_id++) {
-        std::unique_ptr<Tile> finished_tile = _cores[core_id]->pop_finished_tile();
-        if (finished_tile->status == Tile::Status::FINISH) {
-          _scheduler->finish_tile(core_id, finished_tile->layer_id);
+	      for (int core_id = 0; core_id < _n_cores; core_id++) {
+        while (_cores[core_id]->has_phase_event()) {
+          _scheduler->record_core_phase(_cores[core_id]->pop_phase_event());
         }
+	        std::unique_ptr<Tile> finished_tile = _cores[core_id]->pop_finished_tile();
+	        if (finished_tile->status == Tile::Status::FINISH) {
+	          _scheduler->finish_tile(core_id, finished_tile->layer_id);
+	        }
         // Issue new tile to core
         if (!_scheduler->empty()) {
           is_accum_tile = _scheduler->is_accum_tile(core_id, 0);
@@ -373,6 +454,15 @@ void Simulator::register_language_model(json info, std::unique_ptr<LanguageModel
 
 void Simulator::finish_language_model(uint32_t model_id) {
   _lang_scheduler->finish_model(model_id);
+}
+
+void Simulator::finish_model_compute(Model* model) {
+  if (model == nullptr) return;
+  model->release_residency_pins();
+  _active_layer_preload_models.erase(
+      std::remove(_active_layer_preload_models.begin(),
+                  _active_layer_preload_models.end(), model),
+      _active_layer_preload_models.end());
 }
 
 bool Simulator::running() {

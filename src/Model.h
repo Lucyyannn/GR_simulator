@@ -7,6 +7,8 @@
 #include "Tensor.h"
 #include "Mapping.h"
 
+#include <set>
+
 class Ssd;
 class StorageController;
 class ResidencyManager;
@@ -47,6 +49,22 @@ class Model {
 	    virtual void complete_data_movements(StorageController* controller);
 	    virtual uint64_t prepare_baseline_storage(StorageController* controller,
 	                                              uint64_t now_ps);
+    virtual bool uses_layer_preload() const { return false; }
+    virtual bool has_data_movement_stage_to_submit() const { return false; }
+    virtual bool initial_data_movement_stage_ready(
+        StorageController* controller) const;
+    virtual std::vector<uint64_t> submit_next_data_movement_stage(
+        StorageController* controller, uint64_t now_ps);
+    virtual bool complete_ready_data_movement_stages(
+        StorageController* controller, uint64_t now_ps);
+    virtual bool all_data_movement_stages_done(
+        StorageController* controller) const;
+	    virtual void record_compute_start(uint32_t op_id, uint64_t now_ps);
+	    virtual void record_compute_finish(uint32_t op_id, uint64_t now_ps);
+	    virtual void record_core_phase(uint32_t op_id, const std::string& phase,
+	                                   uint32_t core_id, uint64_t start_ps,
+	                                   uint64_t end_ps, uint64_t bytes);
+	    virtual void release_residency_pins();
     void set_residency_manager(ResidencyManager* residency_manager) {
       _residency_manager = residency_manager;
     }
@@ -62,6 +80,7 @@ class Model {
     std::map<uint32_t, std::unique_ptr<Tensor>> _tensor_map;
     std::map<std::string, uint32_t> _axis_map;
     std::vector<Operation*> _executable_layer;
+    std::set<uint32_t> _dispatched_layers;
     SimulationConfig _config;
     uint32_t _partition_id = 0;
     uint32_t _target_core = 0;

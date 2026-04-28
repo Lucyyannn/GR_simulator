@@ -120,6 +120,10 @@ struct SimulationConfig {
   /* Sheduler config */
   std::string scheduler_type;
   uint32_t max_preloading_models = 1;
+  bool layer_preload_enabled = false;
+  uint32_t layer_preload_lookahead = 1;
+  uint64_t hbm_residency_capacity_bytes = 0;
+  std::string pipeline_breakdown_csv;
 
   /* Other configs */
   uint32_t precision;

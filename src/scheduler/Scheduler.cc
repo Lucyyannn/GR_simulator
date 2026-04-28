@@ -1,6 +1,17 @@
 #include "Scheduler.h"
 #include "../Simulator.h"
 
+namespace {
+std::string core_phase_name(CorePhase phase) {
+  switch (phase) {
+    case CorePhase::MOVIN:
+      return "movin";
+    default:
+      return "unknown";
+  }
+}
+}  // namespace
+
 std::unique_ptr<Scheduler> Scheduler::create(SimulationConfig config,
                                              const cycle_type* core_cycle, const uint64_t* core_time, void* simulator) {
   if (config.scheduler_type == "simple") {
@@ -164,6 +175,44 @@ bool Scheduler::is_accum_tile(uint32_t core_id, int index) {
   }
 }
 
+void Scheduler::record_core_phase(const CorePhaseEvent& event) {
+  if (_config.pipeline_breakdown_csv.empty() ||
+      event.phase == CorePhase::UNKNOWN) {
+    return;
+  }
+
+  uint32_t request_id = 0;
+  auto active_it = _active_layers_map.find(event.layer_id);
+  if (active_it != _active_layers_map.end()) {
+    request_id = active_it->second.request_id;
+  } else {
+    auto finished_it = _layer_stat_map.find(event.layer_id);
+    if (finished_it != _layer_stat_map.end()) {
+      request_id = finished_it->second.request_id;
+    }
+  }
+
+  Model* model = nullptr;
+  if (request_id == 0) {
+    if (!_request_queue.empty()) model = _request_queue.front().model.get();
+  } else {
+    for (auto& request : _request_queue) {
+      if (request.request_id == request_id) {
+        model = request.model.get();
+        break;
+      }
+    }
+  }
+  if (model == nullptr) return;
+
+  const uint64_t core_period_ps =
+      1000000ULL / std::max<uint32_t>(_config.core_freq, 1);
+  model->record_core_phase(event.layer_id, core_phase_name(event.phase),
+                           event.core_id,
+                           event.start_cycle * core_period_ps,
+                           event.end_cycle * core_period_ps, event.bytes);
+}
+
 bool Scheduler::tile_queue_empty() {
   bool all_empty = true;
   for (int i = 0; i < _config.num_cores; i++) {
@@ -199,6 +248,7 @@ void Scheduler::finish_tile(uint32_t core_id, int layer_id) {
                  _active_layers_map[layer_id].name, *_core_cycle);
     spdlog::info("Total compute time {}",
                  *_core_cycle - _active_layers_map[layer_id].start_cycle);
+    _request_queue.front().model->record_compute_finish(layer_id, *_core_time);
     _request_queue.front().model->set_layer_finish(layer_id);
     _layer_stat_map[layer_id] = _active_layers_map[layer_id];
     _active_layers_map.erase(layer_id);
@@ -221,6 +271,7 @@ void Scheduler::refresh_status() {
       if(finished_model->check_language_model()) {
         static_cast<Simulator*>(_simulator)->finish_language_model(finished_model->get_id());
       }
+      static_cast<Simulator*>(_simulator)->finish_model_compute(finished_model.get());
       if (finished_model->check_regressive()) {
         finished_model->prepare_regressive();
         static_cast<Simulator*>(_simulator)->register_model(std::move(finished_model));
@@ -241,6 +292,8 @@ void Scheduler::refresh_status() {
 
     spdlog::info("Start layer {}", new_layer->get_name().c_str());
     _request_queue.front().model->update_start_time(*_core_time);
+    _request_queue.front().model->record_compute_start(new_layer->get_id(),
+                                                       *_core_time);
     /* Get tiles from new layer */
     _executable_tile_queue[0].insert(
         _executable_tile_queue[0].end(),
@@ -252,6 +305,7 @@ void Scheduler::refresh_status() {
     _nr_layer++;
     _active_layers_map[new_layer->get_id()] =
         LayerStat{.id = new_layer->get_id(),
+                  .request_id = _request_queue.front().request_id,
                   .name = new_layer->get_name(),
                   .launched = true,
                   .start_cycle = *_core_cycle,
@@ -287,6 +341,7 @@ void DedicatedCPUScheduler::refresh_status() {
                       (*_core_time)/1000000, *_core_cycle);
         std::unique_ptr<Model> finished_model = std::move(req->model);
         req = _request_queue.erase(req);
+        static_cast<Simulator*>(_simulator)->finish_model_compute(finished_model.get());
         if (finished_model->check_regressive()) {
           finished_model->prepare_regressive();
           static_cast<Simulator*>(_simulator)->register_model(std::move(finished_model));
@@ -414,6 +469,7 @@ void TimeMultiplexScheduler::refresh_status() {
                       (*_core_time)/1000000, *_core_cycle);
         std::unique_ptr<Model> finished_model = std::move(req->model);
         req = _request_queue.erase(req);
+        static_cast<Simulator*>(_simulator)->finish_model_compute(finished_model.get());
         if (finished_model->check_regressive()) {
           finished_model->prepare_regressive();
           static_cast<Simulator*>(_simulator)->register_model(std::move(finished_model));
@@ -539,6 +595,7 @@ void HalfSplitScheduler::refresh_status() {
                      *_core_cycle);
         std::unique_ptr<Model> finished_model = std::move(req->model);
         req = _request_queue.erase(req);
+        static_cast<Simulator*>(_simulator)->finish_model_compute(finished_model.get());
         if (finished_model->check_regressive()) {
           finished_model->prepare_regressive();
           static_cast<Simulator*>(_simulator)->register_model(std::move(finished_model));

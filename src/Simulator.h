@@ -24,6 +24,7 @@ class Simulator {
   void register_model(std::unique_ptr<Model> model);
   void register_language_model(json info, std::unique_ptr<LanguageModel> model);
   void finish_language_model(uint32_t model_id);
+  void finish_model_compute(Model* model);
   void run_simulator();
   void print_final_summary(double wall_clock_seconds) const;
   const double get_tile_ops();
@@ -42,6 +43,7 @@ class Simulator {
 	  void advance_idle_time_to(uint64_t target_ps);
   void handle_model();
   void admit_preload_models();
+  void advance_active_layer_preloads();
   void schedule_ready_models();
   uint32_t get_dest_node(MemoryAccess* access);
   void print_simulation_time_summary(double wall_clock_seconds) const;
@@ -100,6 +102,7 @@ class Simulator {
   std::deque<std::unique_ptr<Model>> _waiting_to_preload_models;
   std::deque<std::unique_ptr<Model>> _preloading_models;
   std::deque<std::unique_ptr<Model>> _ready_to_compute_models;
+  std::vector<Model*> _active_layer_preload_models;
   robin_hood::unordered_map<std::string, std::unique_ptr<Model>> _language_models;
   std::vector<std::chrono::time_point<std::chrono::high_resolution_clock>> _tile_timestamp;
 

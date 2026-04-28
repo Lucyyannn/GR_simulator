@@ -8,8 +8,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <numeric>
+#include <sstream>
 
 TraceModel::TraceModel(const std::string& trace_path,
                        json model_config,
@@ -63,6 +66,24 @@ uint32_t flattened_elems(const std::vector<uint32_t>& shape) {
   if (shape.empty()) return 1;
   return std::accumulate(shape.begin(), shape.end(), 1u,
                          std::multiplies<uint32_t>());
+}
+
+std::string medium_to_string(MemoryMedium medium) {
+  if (medium == MemoryMedium::HBM) return "hbm";
+  if (medium == MemoryMedium::DDR) return "ddr";
+  if (medium == MemoryMedium::SSD) return "ssd";
+  return "unknown";
+}
+
+std::string csv_escape(const std::string& value) {
+  if (value.find_first_of(",\"\n") == std::string::npos) return value;
+  std::string escaped = "\"";
+  for (char c : value) {
+    if (c == '"') escaped += "\"\"";
+    else escaped += c;
+  }
+  escaped += "\"";
+  return escaped;
 }
 
 }  // namespace
@@ -190,6 +211,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
             : allocate_address_in_medium(static_cast<uint32_t>(source_bytes),
                                          initial_medium);
 
+    if (layer_preload_enabled()) tensor->clear_produced();
     for (uint32_t i = 0; i < rows; ++i) {
       uint32_t row = entry.indices_values.empty() ? i : entry.indices_values[i];
       if (!entry.source_shape.empty() && entry.source_shape[0] > 0)
@@ -206,6 +228,8 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
           .batch_id = effective_batch_id(entry),
           .macro_batch_id = effective_macro_batch_id(entry),
           .user_id = effective_user_id(entry),
+          .layer_id = static_cast<int32_t>(entry.layer_id),
+          .tensor_id = tensor->get_id(),
       });
     }
     return;
@@ -216,6 +240,75 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
     std::string logical_id = effective_logical_id(entry);
     if (_residency_manager->is_resident(logical_id)) {
       tensor->set_address(_residency_manager->resident_addr(logical_id));
+      uint64_t resident_bytes =
+          tensor->has_reuse_layout()
+              ? static_cast<uint64_t>(tensor->reuse_physical_rows()) *
+                    tensor->reuse_row_stride_bytes()
+              : tensor->get_size();
+      _residency_manager->note_entry(
+          logical_id, resident_bytes,
+          effective_user_id(entry), static_cast<int32_t>(entry.layer_id),
+          entry.role, residency_next_use_rank(entry.layer_id));
+      if (layer_preload_enabled()) {
+        addr_type source_addr =
+            _residency_manager->source_addr(logical_id,
+                                            tensor->has_reuse_layout()
+                                                ? tensor_bytes_for_shape(
+                                                      entry.shape,
+                                                      _config.precision)
+                                                : tensor->get_size(),
+                                            initial_medium);
+        PlannedDataMovement movement{
+            .tensor_name = tensor->get_name(),
+            .logical_id = logical_id,
+            .role = entry.role,
+            .source = initial_medium,
+            .destination = runtime_medium,
+            .src_addr = source_addr,
+            .dst_addr = tensor->get_address(),
+            .bytes = resident_bytes,
+            .batch_id = effective_batch_id(entry),
+            .macro_batch_id = effective_macro_batch_id(entry),
+            .user_id = effective_user_id(entry),
+            .layer_id = static_cast<int32_t>(entry.layer_id),
+            .tensor_id = tensor->get_id(),
+            .makes_resident = true,
+            .reuse_if_resident = true,
+            .resident_bytes = resident_bytes,
+        };
+        if (has_reuse_layout && tensor->has_reuse_layout()) {
+          const uint64_t row_stride = tensor->reuse_row_stride_bytes();
+          std::vector<uint32_t> canonical_rows(
+              tensor->reuse_physical_rows(),
+              std::numeric_limits<uint32_t>::max());
+          const auto& map = tensor->reuse_logical_to_physical();
+          for (uint32_t logical_row = 0; logical_row < map.size();
+               ++logical_row) {
+            uint32_t physical_row = map[logical_row];
+            if (physical_row >= canonical_rows.size()) continue;
+            canonical_rows[physical_row] =
+                std::min(canonical_rows[physical_row], logical_row);
+          }
+          movement.segments.clear();
+          movement.bytes = resident_bytes;
+          for (uint32_t physical_row = 0;
+               physical_row < canonical_rows.size(); ++physical_row) {
+            uint32_t logical_row = canonical_rows[physical_row];
+            if (logical_row == std::numeric_limits<uint32_t>::max()) continue;
+            movement.segments.push_back(PlannedDataMovement::Segment{
+                .src_addr = source_addr +
+                            static_cast<addr_type>(logical_row) * row_stride,
+                .dst_addr = tensor->get_address() +
+                            static_cast<addr_type>(physical_row) * row_stride,
+                .bytes = row_stride,
+            });
+          }
+        }
+        tensor->clear_produced();
+        _data_movements.push_back(std::move(movement));
+      } else {
+        pin_resident_use(static_cast<int32_t>(entry.layer_id), logical_id);
+      }
       spdlog::debug("[TraceModel] {} uses resident {} at 0x{:x}",
                     tensor->get_name(), logical_id, tensor->get_address());
       return;
@@ -256,9 +349,12 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
           .batch_id = effective_batch_id(entry),
           .macro_batch_id = effective_macro_batch_id(entry),
           .user_id = effective_user_id(entry),
+          .layer_id = static_cast<int32_t>(entry.layer_id),
+          .tensor_id = tensor->get_id(),
           .makes_resident = true,
           .resident_bytes = physical_bytes,
       };
+      if (layer_preload_enabled()) tensor->clear_produced();
       auto add_segment = [&movement](addr_type src_addr, addr_type dst_addr,
                                      uint64_t bytes) {
         if (bytes == 0) return;
@@ -286,6 +382,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
                         static_cast<addr_type>(physical_row) * row_stride,
                     row_stride);
       }
+      note_residency_entry(movement);
       _data_movements.push_back(std::move(movement));
       _reuse_logical_bytes += logical_bytes;
       _reuse_physical_bytes += physical_bytes;
@@ -297,7 +394,8 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
     tensor->set_address(hbm_addr);
     addr_type source_addr = _residency_manager->source_addr(
         logical_id, tensor->get_size(), initial_medium);
-    _data_movements.push_back(PlannedDataMovement{
+    if (layer_preload_enabled()) tensor->clear_produced();
+    PlannedDataMovement movement{
         .tensor_name = tensor->get_name(),
         .logical_id = logical_id,
         .role = entry.role,
@@ -309,8 +407,13 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
         .batch_id = effective_batch_id(entry),
         .macro_batch_id = effective_macro_batch_id(entry),
         .user_id = effective_user_id(entry),
+        .layer_id = static_cast<int32_t>(entry.layer_id),
+        .tensor_id = tensor->get_id(),
         .makes_resident = true,
-    });
+        .resident_bytes = tensor->get_size(),
+    };
+    note_residency_entry(movement);
+    _data_movements.push_back(std::move(movement));
     return;
   }
 
@@ -328,6 +431,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
   addr_type source_addr =
       allocate_address_in_medium(static_cast<uint32_t>(tensor->get_size()),
                                  initial_medium);
+  if (layer_preload_enabled()) tensor->clear_produced();
   _data_movements.push_back(PlannedDataMovement{
       .tensor_name = tensor->get_name(),
       .logical_id = entry.logical_id,
@@ -340,6 +444,8 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
       .batch_id = effective_batch_id(entry),
       .macro_batch_id = effective_macro_batch_id(entry),
       .user_id = effective_user_id(entry),
+      .layer_id = static_cast<int32_t>(entry.layer_id),
+      .tensor_id = tensor->get_id(),
   });
 }
 
@@ -372,6 +478,14 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
   _data_movements.clear();
   _submitted_movement_ids.clear();
   _resident_loads.clear();
+  _preload_stages.clear();
+  _next_stage_to_submit = 0;
+  _operation_layer_ids.clear();
+  _operation_names.clear();
+  _compute_events.clear();
+  _dispatched_layers.clear();
+  _resident_uses_by_layer.clear();
+  _remaining_ops_by_layer.clear();
   _data_movements_submitted = false;
   _reuse_logical_bytes = 0;
   _reuse_physical_bytes = 0;
@@ -437,6 +551,22 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
 	    auto op = OperationFactory::create_from_trace(
 	        this, converted, op_entry, _target_core);
 	    if (op) {
+      int32_t op_layer_id = -1;
+      for (const auto& inp : op_entry.inputs) {
+        if (!inp.role.empty() && inp.role != "indices" &&
+            inp.role != "embedding_table") {
+          op_layer_id = static_cast<int32_t>(inp.layer_id);
+          break;
+        }
+      }
+      if (op_layer_id < 0) {
+        for (const auto& out : op_entry.outputs) {
+          if (!out.role.empty()) {
+            op_layer_id = static_cast<int32_t>(out.layer_id);
+            break;
+          }
+        }
+      }
       // Add all declared inputs first
       for (auto& inp : op_entry.inputs) {
         Tensor* t = find_tensor(inp.name);
@@ -481,7 +611,10 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
           }
         }
 	      }
-	      _operation_map[op->get_id()] = std::move(op);
+      uint32_t op_id = op->get_id();
+      _operation_layer_ids[op_id] = op_layer_id;
+      _operation_names[op_id] = op->get_name();
+	      _operation_map[op_id] = std::move(op);
       for (auto& out : op_entry.outputs) {
         Tensor* t = find_tensor(out.name);
         if (t) apply_trace_storage(t, out);
@@ -499,6 +632,10 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
       _executable_layer.push_back(val.get());
     }
   }
+  for (const auto& [_, layer_id] : _operation_layer_ids) {
+    if (layer_id >= 0) _remaining_ops_by_layer[layer_id]++;
+  }
+  build_preload_stages();
 
   auto end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> duration = end - start;
@@ -591,6 +728,7 @@ std::vector<uint64_t> TraceModel::submit_data_movements(
           .bytes = movement.resident_bytes == 0 ? movement.bytes
                                                  : movement.resident_bytes,
           .movement_id = movement_id,
+          .layer_id = movement.layer_id,
       });
     }
     spdlog::debug(
@@ -610,12 +748,473 @@ bool TraceModel::data_movements_ready(StorageController* controller) const {
 
 void TraceModel::complete_data_movements(StorageController* controller) {
   if (controller == nullptr || _residency_manager == nullptr) return;
-  for (const auto& load : _resident_loads) {
-    if (controller->movement_done(load.movement_id)) {
+  for (auto& load : _resident_loads) {
+    if (!load.completed && controller->movement_done(load.movement_id)) {
       _residency_manager->mark_resident(load.logical_id, load.hbm_addr,
                                         load.bytes);
+      pin_resident_use(load.layer_id, load.logical_id);
+      load.completed = true;
     }
   }
+}
+
+bool TraceModel::layer_preload_enabled() const {
+  return _config.layer_preload_enabled && _graph.metadata.baseline_preload;
+}
+
+bool TraceModel::uses_layer_preload() const {
+  return layer_preload_enabled() && !_preload_stages.empty();
+}
+
+int64_t TraceModel::residency_next_use_rank(int32_t layer_id) const {
+  if (layer_id < 0) return std::numeric_limits<int64_t>::max() / 2;
+  return static_cast<int64_t>(layer_id);
+}
+
+void TraceModel::note_residency_entry(
+    const PlannedDataMovement& movement) const {
+  if (_residency_manager == nullptr || !movement.makes_resident) return;
+  const uint64_t bytes =
+      movement.resident_bytes == 0 ? movement.bytes : movement.resident_bytes;
+  _residency_manager->note_entry(
+      movement.logical_id, bytes, movement.user_id, movement.layer_id,
+      movement.role, residency_next_use_rank(movement.layer_id));
+}
+
+void TraceModel::pin_resident_use(int32_t layer_id,
+                                  const std::string& logical_id) {
+  if (_residency_manager == nullptr || logical_id.empty()) return;
+  auto& logical_ids = _resident_uses_by_layer[layer_id];
+  if (logical_ids.insert(logical_id).second) {
+    _residency_manager->pin(logical_id);
+  }
+}
+
+void TraceModel::release_layer_residency_pins(int32_t layer_id) {
+  if (_residency_manager == nullptr) return;
+  auto it = _resident_uses_by_layer.find(layer_id);
+  if (it == _resident_uses_by_layer.end()) return;
+  for (const auto& logical_id : it->second) {
+    _residency_manager->unpin(logical_id);
+  }
+  spdlog::debug("[TraceModel] {} release {} residency pins for layer {}",
+                _name, it->second.size(), layer_id);
+  _resident_uses_by_layer.erase(it);
+}
+
+void TraceModel::release_residency_pins() {
+  if (_residency_manager == nullptr) return;
+  for (const auto& [_, logical_ids] : _resident_uses_by_layer) {
+    for (const auto& logical_id : logical_ids)
+      _residency_manager->unpin(logical_id);
+  }
+  _resident_uses_by_layer.clear();
+}
+
+int32_t TraceModel::stage_layer_for_movement(
+    const PlannedDataMovement& movement) const {
+  if (movement.role == "embedding_rows") return 0;
+  if (movement.layer_id >= 0) return movement.layer_id;
+  return 0;
+}
+
+std::string TraceModel::preload_type_for_role(const std::string& role) const {
+  if (role == "embedding_rows") return "candidate_embedding";
+  if (role == "kv_cache_k" || role == "kv_cache_v") return "kvcache";
+  if (role == "weight") return "weights";
+  return role.empty() ? "other" : role;
+}
+
+void TraceModel::build_preload_stages() {
+  _preload_stages.clear();
+  _next_stage_to_submit = 0;
+  if (!layer_preload_enabled() || _data_movements.empty()) return;
+
+  const std::vector<std::string> preload_type_order = {
+      "candidate_embedding", "kvcache", "weights", "other"};
+  std::map<int32_t, std::vector<size_t>> movement_indices_by_layer;
+  for (size_t movement_idx = 0; movement_idx < _data_movements.size();
+       ++movement_idx) {
+    const auto& movement = _data_movements[movement_idx];
+    int32_t layer_id = stage_layer_for_movement(movement);
+    movement_indices_by_layer[layer_id].push_back(movement_idx);
+  }
+
+  for (const auto& [layer_id, movement_indices] : movement_indices_by_layer) {
+    PreloadStage stage;
+    stage.layer_id = layer_id;
+    stage.name = layer_id == 0 ? "bootstrap_layer0"
+                               : "layer" + std::to_string(layer_id);
+    stage.movement_indices = movement_indices;
+    std::map<std::string, std::vector<size_t>> movement_indices_by_type;
+    for (size_t movement_idx : movement_indices) {
+      const auto& movement = _data_movements[movement_idx];
+      movement_indices_by_type[preload_type_for_role(movement.role)]
+          .push_back(movement_idx);
+      if (movement.segments.empty()) {
+        stage.physical_bytes += movement.bytes;
+      } else {
+        for (const auto& segment : movement.segments)
+          stage.physical_bytes += segment.bytes;
+      }
+    }
+    std::set<std::string> emitted_types;
+    for (const auto& preload_type : preload_type_order) {
+      auto type_it = movement_indices_by_type.find(preload_type);
+      if (type_it == movement_indices_by_type.end()) continue;
+      stage.subtasks.push_back(PreloadSubtask{
+          .preload_type = preload_type,
+          .movement_indices = type_it->second,
+      });
+      emitted_types.insert(preload_type);
+    }
+    for (const auto& [preload_type, type_movement_indices] :
+         movement_indices_by_type) {
+      if (emitted_types.count(preload_type)) continue;
+      stage.subtasks.push_back(PreloadSubtask{
+          .preload_type = preload_type,
+          .movement_indices = type_movement_indices,
+      });
+    }
+    _preload_stages.push_back(std::move(stage));
+  }
+}
+
+bool TraceModel::has_data_movement_stage_to_submit() const {
+  if (!uses_layer_preload()) return false;
+  if (_next_stage_to_submit >= _preload_stages.size()) return false;
+  const auto& stage = _preload_stages[_next_stage_to_submit];
+  if (stage.completed) return false;
+  for (const auto& subtask : stage.subtasks) {
+    if (subtask.submitted && !subtask.completed) return false;
+  }
+  return stage.next_subtask_to_submit < stage.subtasks.size();
+}
+
+std::vector<uint64_t> TraceModel::submit_next_data_movement_stage(
+    StorageController* controller, uint64_t now_ps) {
+  if (controller == nullptr || !has_data_movement_stage_to_submit()) return {};
+
+  PreloadStage& stage = _preload_stages[_next_stage_to_submit];
+  PreloadSubtask& subtask = stage.subtasks[stage.next_subtask_to_submit];
+  std::vector<ResidencyManager::StageLoad> stage_loads;
+  std::set<std::string> protected_ids;
+  for (size_t movement_idx : subtask.movement_indices) {
+    const auto& movement = _data_movements[movement_idx];
+    if (!movement.makes_resident || movement.destination != MemoryMedium::HBM)
+      continue;
+    const uint64_t bytes =
+        movement.resident_bytes == 0 ? movement.bytes : movement.resident_bytes;
+    stage_loads.push_back(ResidencyManager::StageLoad{
+        .logical_id = movement.logical_id,
+        .bytes = bytes,
+        .user_id = movement.user_id,
+        .layer_id = movement.layer_id,
+        .role = movement.role,
+        .next_use_rank = residency_next_use_rank(movement.layer_id),
+    });
+    protected_ids.insert(movement.logical_id);
+  }
+  if (_residency_manager != nullptr &&
+      !_residency_manager->ensure_capacity_for(
+          stage_loads, protected_ids,
+          _name + "." + stage.name + "." + subtask.preload_type)) {
+    return {};
+  }
+
+  std::vector<MigrationRequest> requests;
+  std::vector<size_t> request_movement_indices;
+  requests.reserve(subtask.movement_indices.size());
+  request_movement_indices.reserve(subtask.movement_indices.size());
+  uint64_t submitted_physical_bytes = 0;
+
+  for (size_t movement_idx : subtask.movement_indices) {
+    const auto& movement = _data_movements[movement_idx];
+    if (movement.reuse_if_resident && _residency_manager != nullptr &&
+        _residency_manager->is_resident(movement.logical_id)) {
+      pin_resident_use(movement.layer_id, movement.logical_id);
+      Tensor* tensor = get_tensor(movement.tensor_id);
+      if (tensor != nullptr) tensor->set_produced();
+      continue;
+    }
+    MigrationRequest request;
+    request.src_medium = movement.source;
+    request.dst_medium = movement.destination;
+    request.src_addr = movement.src_addr;
+    request.dst_addr = movement.dst_addr;
+    request.bytes = movement.bytes;
+    request.segments.reserve(movement.segments.size());
+    for (const auto& segment : movement.segments) {
+      request.segments.push_back(MigrationSegment{
+          .src_addr = segment.src_addr,
+          .dst_addr = segment.dst_addr,
+          .bytes = segment.bytes,
+      });
+    }
+    uint64_t request_bytes = request.segments.empty() ? request.bytes : 0;
+    for (const auto& segment : request.segments) request_bytes += segment.bytes;
+    if (request_bytes == 0) continue;
+    submitted_physical_bytes += request_bytes;
+    request_movement_indices.push_back(movement_idx);
+    requests.push_back(std::move(request));
+  }
+
+  if (!stage.submitted) {
+    stage.submitted = true;
+    stage.submitted_time_ps = now_ps;
+    stage.physical_bytes = 0;
+    stage.movement_ids.clear();
+    stage.physical_bytes_by_type.clear();
+    stage.movement_count_by_type.clear();
+  }
+  subtask.submitted = true;
+  subtask.submitted_time_ps = now_ps;
+  subtask.physical_bytes = submitted_physical_bytes;
+  subtask.movement_count = static_cast<uint32_t>(requests.size());
+  stage.physical_bytes += submitted_physical_bytes;
+  stage.physical_bytes_by_type[subtask.preload_type] += submitted_physical_bytes;
+  stage.movement_count_by_type[subtask.preload_type] +=
+      static_cast<uint32_t>(requests.size());
+  stage.next_subtask_to_submit++;
+
+  std::vector<uint64_t> movement_ids =
+      controller->submit_migration_requests(requests, now_ps);
+  subtask.movement_ids = movement_ids;
+  stage.movement_ids.insert(stage.movement_ids.end(), movement_ids.begin(),
+                            movement_ids.end());
+  _submitted_movement_ids.insert(_submitted_movement_ids.end(),
+                                 movement_ids.begin(), movement_ids.end());
+
+  for (size_t i = 0; i < request_movement_indices.size() &&
+                     i < movement_ids.size(); ++i) {
+    const auto& movement = _data_movements[request_movement_indices[i]];
+    uint64_t movement_id = movement_ids[i];
+    if (movement.makes_resident) {
+      _resident_loads.push_back(ResidentLoad{
+          .logical_id = movement.logical_id,
+          .hbm_addr = movement.dst_addr,
+          .bytes = movement.resident_bytes == 0 ? movement.bytes
+                                                 : movement.resident_bytes,
+          .movement_id = movement_id,
+          .layer_id = movement.layer_id,
+      });
+    }
+  }
+
+  spdlog::info("[TraceModel] {} submit preload {}.{} (layer={}, "
+               "movements={}, bytes={}) at {:.6f} us",
+               _name, stage.name, subtask.preload_type, stage.layer_id,
+               movement_ids.size(), subtask.physical_bytes,
+               static_cast<double>(now_ps) / 1e6);
+  return movement_ids;
+}
+
+bool TraceModel::initial_data_movement_stage_ready(
+    StorageController* controller) const {
+  if (!uses_layer_preload()) return data_movements_ready(controller);
+  if (_preload_stages.empty()) return true;
+  const auto& stage = _preload_stages.front();
+  return stage.completed;
+}
+
+void TraceModel::mark_stage_tensors_ready(const PreloadStage& stage) {
+  for (size_t movement_idx : stage.movement_indices) {
+    const auto& movement = _data_movements[movement_idx];
+    Tensor* tensor = get_tensor(movement.tensor_id);
+    if (tensor != nullptr) tensor->set_produced();
+  }
+}
+
+void TraceModel::refresh_executable_layers() {
+  for (auto& [op_id, op] : _operation_map) {
+    if (op->check_finish()) continue;
+    if (check_exist_in_exeutable(op_id)) continue;
+    if (op->check_executable()) _executable_layer.push_back(op.get());
+  }
+}
+
+bool TraceModel::complete_ready_data_movement_stages(
+    StorageController* controller, uint64_t now_ps) {
+  if (!uses_layer_preload() || controller == nullptr) return false;
+
+  bool completed_any = false;
+  for (auto& stage : _preload_stages) {
+    if (!stage.submitted || stage.completed) continue;
+    PreloadSubtask* ready_subtask = nullptr;
+    for (auto& subtask : stage.subtasks) {
+      if (!subtask.submitted || subtask.completed) continue;
+      if (!subtask.movement_ids.empty() &&
+          !controller->movements_done(subtask.movement_ids)) {
+        continue;
+      }
+      ready_subtask = &subtask;
+      break;
+    }
+    if (ready_subtask == nullptr) {
+      continue;
+    }
+
+    ready_subtask->completed = true;
+    ready_subtask->completed_time_ps = now_ps;
+    complete_data_movements(controller);
+    completed_any = true;
+    append_preload_type_event(stage, *ready_subtask);
+
+    bool all_subtasks_completed = true;
+    for (const auto& subtask : stage.subtasks) {
+      if (!subtask.completed) {
+        all_subtasks_completed = false;
+        break;
+      }
+    }
+    if (!all_subtasks_completed) continue;
+
+    stage.completed = true;
+    stage.completed_time_ps = now_ps;
+    mark_stage_tensors_ready(stage);
+    refresh_executable_layers();
+    append_pipeline_event(
+        "preload", "stage", stage.name, stage.layer_id,
+        stage.submitted_time_ps, stage.completed_time_ps, stage.physical_bytes,
+        "movements=" + std::to_string(stage.movement_ids.size()));
+    _next_stage_to_submit++;
+    spdlog::info("[TraceModel] {} complete preload stage {} at {:.6f} us "
+                 "(latency={:.6f} us)",
+                 _name, stage.name, static_cast<double>(now_ps) / 1e6,
+                 static_cast<double>(now_ps - stage.submitted_time_ps) / 1e6);
+  }
+  return completed_any;
+}
+
+void TraceModel::append_preload_type_event(
+    const PreloadStage& stage, const PreloadSubtask& subtask) const {
+  if (subtask.physical_bytes == 0) return;
+  append_pipeline_event(
+      "preload", subtask.preload_type,
+      stage.name + "." + subtask.preload_type, stage.layer_id,
+      subtask.submitted_time_ps, subtask.completed_time_ps,
+      subtask.physical_bytes,
+      "movements=" + std::to_string(subtask.movement_count));
+}
+
+bool TraceModel::all_data_movement_stages_done(
+    StorageController* controller) const {
+  if (!uses_layer_preload()) return data_movements_ready(controller);
+  for (const auto& stage : _preload_stages) {
+    if (!stage.completed) return false;
+  }
+  return true;
+}
+
+void TraceModel::record_compute_start(uint32_t op_id, uint64_t now_ps) {
+  if (_config.pipeline_breakdown_csv.empty()) return;
+  auto& event = _compute_events[op_id];
+  if (!event.started) {
+    event.started = true;
+    event.start_time_ps = now_ps;
+  }
+}
+
+void TraceModel::record_compute_finish(uint32_t op_id, uint64_t now_ps) {
+  if (_config.pipeline_breakdown_csv.empty()) return;
+  auto event_it = _compute_events.find(op_id);
+  if (event_it == _compute_events.end() || !event_it->second.started) return;
+  int32_t layer_id = -1;
+  auto layer_it = _operation_layer_ids.find(op_id);
+  if (layer_it != _operation_layer_ids.end()) layer_id = layer_it->second;
+  std::string op_name = "op" + std::to_string(op_id);
+  auto name_it = _operation_names.find(op_id);
+  if (name_it != _operation_names.end()) op_name = name_it->second;
+  append_pipeline_event("compute", "op", op_name, layer_id,
+                        event_it->second.start_time_ps, now_ps, 0,
+                        "op_id=" + std::to_string(op_id));
+  _compute_events.erase(event_it);
+
+  if (layer_id >= 0) {
+    auto remaining_it = _remaining_ops_by_layer.find(layer_id);
+    if (remaining_it != _remaining_ops_by_layer.end() &&
+        remaining_it->second > 0) {
+      remaining_it->second--;
+      if (remaining_it->second == 0) {
+        release_layer_residency_pins(layer_id);
+      }
+    }
+  }
+
+  auto phase_op_it = _core_phase_events.find(op_id);
+  if (phase_op_it != _core_phase_events.end()) {
+    for (const auto& [phase, by_core] : phase_op_it->second) {
+      for (const auto& [core_id, aggregate] : by_core) {
+        if (!aggregate.started) continue;
+        append_pipeline_event(
+            "compute", phase, op_name + ".core" + std::to_string(core_id),
+            layer_id, aggregate.start_time_ps, aggregate.end_time_ps,
+            aggregate.bytes,
+            "op_id=" + std::to_string(op_id) +
+                ";core_id=" + std::to_string(core_id) +
+                ";events=" + std::to_string(aggregate.events) +
+                ";sum_duration_ps=" +
+                std::to_string(aggregate.total_duration_ps));
+      }
+    }
+    _core_phase_events.erase(phase_op_it);
+  }
+}
+
+void TraceModel::record_core_phase(uint32_t op_id, const std::string& phase,
+                                   uint32_t core_id, uint64_t start_ps,
+                                   uint64_t end_ps, uint64_t bytes) {
+  if (_config.pipeline_breakdown_csv.empty()) return;
+  if (end_ps < start_ps) end_ps = start_ps;
+  auto& aggregate = _core_phase_events[op_id][phase][core_id];
+  if (!aggregate.started) {
+    aggregate.started = true;
+    aggregate.start_time_ps = start_ps;
+    aggregate.end_time_ps = end_ps;
+  } else {
+    aggregate.start_time_ps = std::min(aggregate.start_time_ps, start_ps);
+    aggregate.end_time_ps = std::max(aggregate.end_time_ps, end_ps);
+  }
+  aggregate.total_duration_ps += end_ps - start_ps;
+  aggregate.bytes += bytes;
+  aggregate.events++;
+}
+
+void TraceModel::append_pipeline_event(const std::string& pipe,
+                                       const std::string& phase,
+                                       const std::string& name,
+                                       int32_t layer_id,
+                                       uint64_t start_ps,
+                                       uint64_t end_ps,
+                                       uint64_t bytes,
+                                       const std::string& detail) const {
+  if (_config.pipeline_breakdown_csv.empty()) return;
+  std::filesystem::path path(_config.pipeline_breakdown_csv);
+  if (!path.parent_path().empty())
+    std::filesystem::create_directories(path.parent_path());
+
+  bool write_header = true;
+  if (std::filesystem::exists(path))
+    write_header = std::filesystem::file_size(path) == 0;
+
+  std::ofstream out(path, std::ios::app);
+  if (!out.is_open()) return;
+  if (write_header) {
+    out << "model,user_id,batch_id,macro_batch_id,layer_id,pipe,phase,name,"
+           "start_ps,end_ps,duration_ps,start_us,end_us,duration_us,bytes,detail\n";
+  }
+  uint32_t user_id = _model_config.value("user_id", 0u);
+  uint32_t batch_id = _model_config.value("batch_id", 0u);
+  uint32_t macro_id = _model_config.value("macro_batch_id", 0u);
+  out << csv_escape(_name) << ',' << user_id << ',' << batch_id << ','
+      << macro_id << ',' << layer_id << ',' << pipe << ',' << phase << ','
+      << csv_escape(name) << ',' << start_ps << ',' << end_ps << ','
+      << (end_ps >= start_ps ? end_ps - start_ps : 0) << ','
+      << static_cast<double>(start_ps) / 1e6 << ','
+      << static_cast<double>(end_ps) / 1e6 << ','
+      << static_cast<double>(end_ps >= start_ps ? end_ps - start_ps : 0) /
+             1e6
+      << ',' << bytes << ',' << csv_escape(detail) << '\n';
 }
 
 void TraceModel::prefill_ssd_tensors(Ssd* ssd) {

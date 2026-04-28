@@ -16,10 +16,11 @@ class Scheduler {
     virtual void schedule_model(std::unique_ptr<Model> model, uint32_t sampe_size);
     virtual std::unique_ptr<Tile> get_tile(uint32_t core_id);
     virtual void issue_tile_per_core();
-    virtual void issue_tile_per_core(std::vector<uint32_t>& allowed_cpu, int offset, uint32_t partition_id);
-    virtual bool is_accum_tile(uint32_t core_id, int index);
-    virtual void finish_tile(uint32_t core_id, int layer_id);
-    virtual bool empty();
+	    virtual void issue_tile_per_core(std::vector<uint32_t>& allowed_cpu, int offset, uint32_t partition_id);
+	    virtual bool is_accum_tile(uint32_t core_id, int index);
+	    virtual void finish_tile(uint32_t core_id, int layer_id);
+	    virtual void record_core_phase(const CorePhaseEvent& event);
+	    virtual bool empty();
     virtual bool tile_queue_empty();
     virtual bool can_fast_forward_waiting() const;
   protected:

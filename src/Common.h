@@ -32,11 +32,18 @@ using json = nlohmann::json;
 typedef uint64_t addr_type;
 typedef uint64_t cycle_type;
 
+struct Tile;
+
 enum class MemoryMedium {
   UNKNOWN = 0,
   HBM = 1,
   DDR = 2,
   SSD = 3,
+};
+
+enum class CorePhase {
+  UNKNOWN = 0,
+  MOVIN = 1,
 };
 
 typedef struct {
@@ -63,7 +70,19 @@ typedef struct {
   MemoryMedium destination_medium = MemoryMedium::UNKNOWN;
   bool controller_generated = false;
   bool ssd_host_request = false;
+  CorePhase core_phase = CorePhase::UNKNOWN;
+  uint32_t layer_id = 0;
+  cycle_type core_phase_start_cycle = 0;
 } MemoryAccess;
+
+typedef struct {
+  uint32_t layer_id = 0;
+  uint32_t core_id = 0;
+  CorePhase phase = CorePhase::UNKNOWN;
+  cycle_type start_cycle = 0;
+  cycle_type end_cycle = 0;
+  uint64_t bytes = 0;
+} CorePhaseEvent;
 
 enum class Opcode {
   MOVIN,
@@ -86,7 +105,6 @@ enum class Opcode {
   SWISH,
   BAR
 };
-struct Tile;
 typedef struct {
   Opcode opcode;
   cycle_type start_cycle;
