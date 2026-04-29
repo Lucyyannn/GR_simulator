@@ -46,6 +46,32 @@ def ddr_to_hbm_tensor(name, shape, dtype="float16", is_weight=False, **meta):
     )
 
 
+def source_tensor(source_medium, name, shape, dtype="float16", is_weight=False, **meta):
+    return tensor(
+        name,
+        shape,
+        dtype=dtype,
+        is_weight=is_weight,
+        initial_medium=source_medium,
+        runtime_medium=source_medium,
+        **meta,
+    )
+
+
+def source_to_hbm_tensor(
+    source_medium, name, shape, dtype="float16", is_weight=False, **meta
+):
+    return tensor(
+        name,
+        shape,
+        dtype=dtype,
+        is_weight=is_weight,
+        initial_medium=source_medium,
+        runtime_medium="hbm",
+        **meta,
+    )
+
+
 def add_op(ops, name, inputs, outputs, attrs=None):
     ops.append(
         {
@@ -141,9 +167,12 @@ def build_trace(
     kv_reuse_action_count=None,
     kv_reuse_action_offset=1,
     kv_reuse_action_stride=2,
+    source_medium="ddr",
     seed=0,
 ):
     op_modeling = op_modeling or {}
+    if source_medium not in {"ddr", "ssd"}:
+        raise ValueError(f"Unsupported source medium: {source_medium}")
     reuse_rng = random.Random(seed + user_id * 1000003 + batch_id * 9176 + macro_batch_id)
     ops = []
     indices_values = indices_values or [i % vocab for i in range(tokens)]
@@ -164,7 +193,8 @@ def build_trace(
         ops,
         "aten::embedding",
         [
-            ddr_tensor(
+            source_tensor(
+                source_medium,
                 "embedding_table",
                 [vocab, hidden],
                 is_weight=True,
@@ -181,7 +211,8 @@ def build_trace(
             ),
         ],
         [
-            ddr_to_hbm_tensor(
+            source_to_hbm_tensor(
+                source_medium,
                 f"u{user_id}.b{batch_id}.m{macro_batch_id}.x0",
                 [tokens, hidden],
                 logical_id=f"u{user_id}.b{batch_id}.m{macro_batch_id}.embedding_rows",
@@ -226,7 +257,8 @@ def build_trace(
             "aten::linear",
             [
                 hbm_tensor(current, [tokens, hidden], role="activation", **layer_meta),
-                ddr_to_hbm_tensor(
+                source_to_hbm_tensor(
+                    source_medium,
                     f"{shared_layer}.w1",
                     [hidden, hidden * 4],
                     is_weight=True,
@@ -234,7 +266,8 @@ def build_trace(
                     role="weight",
                     **layer_meta,
                 ),
-                ddr_to_hbm_tensor(
+                source_to_hbm_tensor(
+                    source_medium,
                     f"{shared_layer}.b1",
                     [hidden * 4],
                     is_weight=True,
@@ -267,7 +300,8 @@ def build_trace(
             ops,
             "aten::cat",
             [
-                ddr_to_hbm_tensor(
+                source_to_hbm_tensor(
+                    source_medium,
                     k_cache,
                     [kv_len, hidden],
                     logical_id=f"user{user_id}.{shared_layer}.kc",
@@ -306,7 +340,8 @@ def build_trace(
             ops,
             "aten::cat",
             [
-                ddr_to_hbm_tensor(
+                source_to_hbm_tensor(
+                    source_medium,
                     v_cache,
                     [kv_len, hidden],
                     logical_id=f"user{user_id}.{shared_layer}.vc",
@@ -333,7 +368,8 @@ def build_trace(
             "aten::layer_norm",
             [
                 hbm_tensor(av, [tokens, hidden], role="activation", **layer_meta),
-                ddr_to_hbm_tensor(
+                source_to_hbm_tensor(
+                    source_medium,
                     f"{shared_layer}.ln_w",
                     [hidden],
                     is_weight=True,
@@ -341,7 +377,8 @@ def build_trace(
                     role="weight",
                     **layer_meta,
                 ),
-                ddr_to_hbm_tensor(
+                source_to_hbm_tensor(
+                    source_medium,
                     f"{shared_layer}.ln_b",
                     [hidden],
                     is_weight=True,
@@ -367,7 +404,8 @@ def build_trace(
             "aten::linear",
             [
                 hbm_tensor(gated, [tokens, hidden], role="activation", **layer_meta),
-                ddr_to_hbm_tensor(
+                source_to_hbm_tensor(
+                    source_medium,
                     f"{shared_layer}.w2",
                     [hidden, hidden],
                     is_weight=True,
@@ -375,7 +413,8 @@ def build_trace(
                     role="weight",
                     **layer_meta,
                 ),
-                ddr_to_hbm_tensor(
+                source_to_hbm_tensor(
+                    source_medium,
                     f"{shared_layer}.b2",
                     [hidden],
                     is_weight=True,
@@ -405,6 +444,7 @@ def build_trace(
             "kv_reuse_enabled": kv_reuse_enabled,
             "random_seed": seed,
             "op_modeling": op_modeling,
+            "source_medium": source_medium,
         },
         "operators": ops,
     }
@@ -461,6 +501,7 @@ def write_single_trace(args, op_modeling):
         kv_reuse_action_count=args.kv_reuse_action_count,
         kv_reuse_action_offset=args.kv_reuse_action_offset,
         kv_reuse_action_stride=args.kv_reuse_action_stride,
+        source_medium=args.source_medium,
         seed=args.seed,
     )
     output = Path(args.output)
@@ -515,6 +556,7 @@ def write_pipeline_traces(args, op_modeling):
                         kv_reuse_action_count=args.kv_reuse_action_count,
                         kv_reuse_action_offset=args.kv_reuse_action_offset,
                         kv_reuse_action_stride=args.kv_reuse_action_stride,
+                        source_medium=args.source_medium,
                         seed=args.seed,
                     )
                     trace_path = output_dir / f"{shared_weight_key}.json"
@@ -547,6 +589,7 @@ def write_pipeline_traces(args, op_modeling):
                         kv_reuse_action_count=args.kv_reuse_action_count,
                         kv_reuse_action_offset=args.kv_reuse_action_offset,
                         kv_reuse_action_stride=args.kv_reuse_action_stride,
+                        source_medium=args.source_medium,
                         seed=args.seed,
                     )
                     trace_path = output_dir / f"{model_name}.json"
@@ -584,6 +627,7 @@ def write_pipeline_traces(args, op_modeling):
                 "kv_reuse_action_count": args.kv_reuse_action_count,
                 "kv_reuse_action_offset": args.kv_reuse_action_offset,
                 "kv_reuse_action_stride": args.kv_reuse_action_stride,
+                "source_medium": args.source_medium,
             },
             "models": models,
         },
@@ -606,6 +650,12 @@ def main():
     parser.add_argument("--candidates-per-user", type=int)
     parser.add_argument("--macro-batch-size", type=int)
     parser.add_argument("--batch-policy", choices=["contiguous"], default="contiguous")
+    parser.add_argument(
+        "--source-medium",
+        choices=["ddr", "ssd"],
+        default="ddr",
+        help="Initial storage medium for preload source tensors.",
+    )
     parser.add_argument("--pipeline", action="store_true")
     parser.add_argument("--enable-kv-reuse", action="store_true")
     parser.add_argument(

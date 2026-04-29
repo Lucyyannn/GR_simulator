@@ -132,8 +132,9 @@ cycle_type SystolicWS::get_vector_compute_cycles(std::unique_ptr<Instruction>& i
   cycle_type add_tree, scalar_ops, vector_ops;
   switch (inst->opcode) {
     case Opcode::LAYERNORM:
-      if (_config.layernorm_modeling == "rowwise") {
-        uint32_t rows = inst->vector_rows > 0 ? inst->vector_rows : MAX(inst->tile_m, 1);
+      {
+        uint32_t rows =
+            inst->vector_rows > 0 ? inst->vector_rows : MAX(inst->tile_m, 1);
         uint32_t bytes_per_row = inst->vector_bytes_per_row;
         if (bytes_per_row == 0) {
           bytes_per_row = rows > 0 ? std::max(1u, inst->compute_size / rows)
@@ -149,11 +150,6 @@ cycle_type SystolicWS::get_vector_compute_cycles(std::unique_ptr<Instruction>& i
                       3 * _config.core_config[_id].mul_latency);
         return (add_tree + scalar_ops + vector_ops) * rows;
       }
-      add_tree = 2 * add_tree_iter * _config.core_config[_id].add_tree_latency;
-      scalar_ops = 2 * _config.core_config[_id].scalar_mul_latency + _config.core_config[_id].scalar_sqrt_latency;
-      // 1 addition, 1 subtraction, 1 division, 2 multiplication.
-      vector_ops = vec_op_iter * (2 * _config.core_config[_id].add_latency + 3 * _config.core_config[_id].mul_latency) * inst->tile_m;
-      return add_tree + scalar_ops + vector_ops;
     case Opcode::SOFTMAX:
       // 1 add tree, 1 compare tree
       add_tree = 2 * add_tree_iter * _config.core_config[_id].add_tree_latency * inst->tile_m;
