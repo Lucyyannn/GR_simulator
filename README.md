@@ -237,28 +237,9 @@ echo '{"models":[{"name":"test_gemm","trace_path":"example/trace_tests/test_gemm
 
 ### 运行layer级pipeline，并根据breakdown绘图
 
-生成 trace 与 models：
+通过以下命令运行测试，可在run_hstu.sh中修改trace参数。run_hstu.sh脚本中默认根据910c_mini_{ddr,ssd}.json生成支持pipeline的配置文件
 ```bash
-python3 scripts/generate_hstu_baseline_trace.py \
-  --pipeline --shared-trace --compact-json \
-  --layers 3 --tokens 1024 --hidden 256 \
-  --kv-len <2048|4096> \
-  --num-users 4 --users-per-batch 2 \
-  --candidates-per-user 2048 --macro-batch-size 1024 \
-  --op-modeling split=skip,view=skip,concat=skip \
-  --output results/baseline_layerpipe/ascend910c_h<hist>/traces \
-  --models-list results/baseline_layerpipe/ascend910c_h<hist>/models.json
-  ```
-
-运行仿真并绘图：
-```bash
-./build/bin/Simulator \
-  --config results/baseline_layerpipe/ascend910c_h<hist>/layer.json \
-  --models_list results/baseline_layerpipe/ascend910c_h<hist>/models.json \
-  --mode trace --log_level info \
-  > results/baseline_layerpipe/ascend910c_h<hist>/layer.log 2>&1
-
-python3 scripts/plot_pipeline_timeline.py \
-  results/baseline_layerpipe/ascend910c_h<hist>/layer_breakdown.csv \
-  results/baseline_layerpipe/ascend910c_h<hist>/layer_timeline.png
+# --source-medium指定数据初始存放位置，这里支持DDR->HBM的baseline模式和SSD->HBM，不包含调度
+bash scripts/run_hstu.sh --source-medium ddr --result-dir results/ddr1
+bash scripts/run_hstu.sh --source-medium ssd --result-dir results/ssd1
 ```

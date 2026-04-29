@@ -1227,19 +1227,38 @@ void TraceModel::append_pipeline_event(const std::string& pipe,
 void TraceModel::prefill_ssd_tensors(Ssd* ssd) {
   if (ssd == nullptr) return;
 
-  uint64_t prefilled_tensors = 0;
+  uint64_t prefilled_ranges = 0;
   uint64_t prefilled_bytes = 0;
-  for (const auto& [_, tensor] : _tensor_map) {
-    if (tensor == nullptr) continue;
-    if (!ssd->owns_address(tensor->get_address())) continue;
-    ssd->prefill_range(tensor->get_address(), tensor->get_size());
-    prefilled_tensors++;
-    prefilled_bytes += tensor->get_size();
+  std::set<addr_type> prefilled_pages;
+  const uint64_t page_bytes = std::max<uint64_t>(1, ssd->prefill_page_bytes());
+
+  auto prefill_segment = [&](addr_type src_addr, uint64_t bytes) {
+    if (bytes == 0 || !ssd->owns_address(src_addr)) return;
+    addr_type first_page = ssd->align_prefill_page(src_addr);
+    uint64_t last_offset = bytes > 0 ? bytes - 1 : 0;
+    addr_type last_page = ssd->align_prefill_page(src_addr + last_offset);
+    for (addr_type page = first_page; page <= last_page;
+         page += static_cast<addr_type>(page_bytes)) {
+      if (!prefilled_pages.insert(page).second) continue;
+      ssd->prefill_range(page, page_bytes);
+      prefilled_ranges++;
+      prefilled_bytes += page_bytes;
+    }
+  };
+
+  for (const auto& movement : _data_movements) {
+    if (movement.source != MemoryMedium::SSD) continue;
+    if (!movement.segments.empty()) {
+      for (const auto& segment : movement.segments)
+        prefill_segment(segment.src_addr, segment.bytes);
+      continue;
+    }
+    prefill_segment(movement.src_addr, movement.bytes);
   }
 
-  if (prefilled_tensors > 0) {
+  if (prefilled_ranges > 0) {
     spdlog::info(
-        "[TraceModel] {} prefilling {} SSD tensors ({} bytes) without timing",
-        _name, prefilled_tensors, prefilled_bytes);
+        "[TraceModel] {} prefilling {} SSD source pages ({} bytes) without timing",
+        _name, prefilled_ranges, prefilled_bytes);
   }
 }

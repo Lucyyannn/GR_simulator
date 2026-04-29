@@ -262,6 +262,12 @@ void Ssd::prefill_range(addr_type base_addr, uint64_t size_bytes) {
   }
 }
 
+addr_type Ssd::align_prefill_page(addr_type addr) const {
+  return align_page_address(addr);
+}
+
+uint64_t Ssd::prefill_page_bytes() const { return page_bytes(); }
+
 void Ssd::flush_frontend_merges(uint64_t now_ps) {
   std::vector<uint64_t> ready_keys;
   ready_keys.reserve(_frontend_merges.size());
