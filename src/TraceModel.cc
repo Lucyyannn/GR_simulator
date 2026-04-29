@@ -34,7 +34,7 @@ MemoryMedium parse_medium_name(const std::string& name) {
 }
 
 bool is_resident_role(const std::string& role) {
-  return role == "weight" || role == "kv_cache_k" || role == "kv_cache_v";
+  return role == "weight" || role.rfind("kv_cache_", 0) == 0;
 }
 
 uint64_t tensor_bytes_for_shape(const std::vector<uint32_t>& shape,
@@ -827,7 +827,7 @@ int32_t TraceModel::stage_layer_for_movement(
 
 std::string TraceModel::preload_type_for_role(const std::string& role) const {
   if (role == "embedding_rows") return "candidate_embedding";
-  if (role == "kv_cache_k" || role == "kv_cache_v") return "kvcache";
+  if (role.rfind("kv_cache_", 0) == 0) return "kvcache";
   if (role == "weight") return "weights";
   return role.empty() ? "other" : role;
 }

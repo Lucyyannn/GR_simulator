@@ -104,7 +104,7 @@
     "max_preloading_models": 1,
     "layer_preload_enabled": true,
     "layer_preload_lookahead": 1,
-    "hbm_residency_capacity_bytes": 0,
+    "hbm_residency_capacity_bytes": 2147483648,
     "breakdown_csv": ""
   }
 }

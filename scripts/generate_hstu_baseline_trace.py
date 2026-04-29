@@ -450,6 +450,390 @@ def build_trace(
     }
 
 
+def build_batched_trace(
+    layers,
+    tokens,
+    hidden,
+    kv_len,
+    vocab,
+    user_ids,
+    batch_id=0,
+    macro_batch_id=0,
+    indices_values_per_user=None,
+    model_name="hstu_batched_baseline_small",
+    op_modeling=None,
+    pipeline_enabled=False,
+    kv_reuse_enabled=False,
+    source_medium="ddr",
+    seed=0,
+):
+    op_modeling = op_modeling or {}
+    if source_medium not in {"ddr", "ssd"}:
+        raise ValueError(f"Unsupported source medium: {source_medium}")
+    if kv_reuse_enabled:
+        raise ValueError("Batched pipeline traces do not support kv_reuse_enabled yet")
+
+    batch_size = len(user_ids)
+    if batch_size <= 0:
+        raise ValueError("user_ids must be non-empty for build_batched_trace")
+
+    if indices_values_per_user is None:
+        indices_values_per_user = [
+            [i % vocab for i in range(tokens)] for _ in range(batch_size)
+        ]
+    if len(indices_values_per_user) != batch_size:
+        raise ValueError(
+            "indices_values_per_user size must match batch_size in build_batched_trace"
+        )
+    for row in indices_values_per_user:
+        if len(row) != tokens:
+            raise ValueError("Each batched indices row must have length == tokens")
+
+    flat_indices_values = [
+        idx for per_user_indices in indices_values_per_user for idx in per_user_indices
+    ]
+
+    ops = []
+    base = {
+        "batch_id": batch_id,
+        "macro_batch_id": macro_batch_id,
+        "user_id": user_ids[0],
+    }
+    add_op(
+        ops,
+        "aten::embedding",
+        [
+            source_tensor(
+                source_medium,
+                "embedding_table",
+                [vocab, hidden],
+                is_weight=True,
+                logical_id="embedding.table",
+                role="embedding_table",
+                **base,
+            ),
+            hbm_tensor(
+                f"b{batch_id}.m{macro_batch_id}.candidate_ids",
+                [batch_size, tokens],
+                dtype="int64",
+                role="indices",
+                **base,
+            ),
+        ],
+        [
+            source_to_hbm_tensor(
+                source_medium,
+                f"b{batch_id}.m{macro_batch_id}.x0",
+                [batch_size, tokens, hidden],
+                logical_id=f"batch{batch_id}.macro{macro_batch_id}.embedding_rows",
+                role="embedding_rows",
+                source_logical_id="embedding.table",
+                source_shape=[vocab, hidden],
+                indices_values=flat_indices_values,
+                **base,
+            )
+        ],
+        {
+            "indices_values": ",".join(str(v) for v in flat_indices_values),
+            "modeling_mode": "preloaded_rows",
+        },
+    )
+
+    current = f"b{batch_id}.m{macro_batch_id}.x0"
+    for layer in range(layers):
+        prefix = f"b{batch_id}.m{macro_batch_id}.layer{layer}"
+        shared_layer = f"layer{layer}"
+        z = f"{prefix}.z"
+        zact = f"{prefix}.zact"
+        u = f"{prefix}.u"
+        v = f"{prefix}.v"
+        q = f"{prefix}.q"
+        k = f"{prefix}.k"
+        k_cache = f"batch{batch_id}.{shared_layer}.kc"
+        v_cache = f"batch{batch_id}.{shared_layer}.vc"
+        k_all = f"{prefix}.k_all"
+        k_all_t = f"{prefix}.k_all_t"
+        score = f"{prefix}.score"
+        attn = f"{prefix}.attn"
+        v_all = f"{prefix}.v_all"
+        av = f"{prefix}.av"
+        av_norm = f"{prefix}.av_norm"
+        gated = f"{prefix}.gated"
+        out = f"b{batch_id}.m{macro_batch_id}.x{layer + 1}"
+        layer_meta = {
+            "batch_id": batch_id,
+            "macro_batch_id": macro_batch_id,
+            "user_id": user_ids[0],
+            "layer_id": layer,
+        }
+
+        add_op(
+            ops,
+            "aten::linear",
+            [
+                hbm_tensor(
+                    current, [batch_size, tokens, hidden], role="activation", **layer_meta
+                ),
+                source_to_hbm_tensor(
+                    source_medium,
+                    f"{shared_layer}.w1",
+                    [hidden, hidden * 4],
+                    is_weight=True,
+                    logical_id=f"{shared_layer}.w1",
+                    role="weight",
+                    **layer_meta,
+                ),
+                source_to_hbm_tensor(
+                    source_medium,
+                    f"{shared_layer}.b1",
+                    [hidden * 4],
+                    is_weight=True,
+                    logical_id=f"{shared_layer}.b1",
+                    role="weight",
+                    **layer_meta,
+                ),
+            ],
+            [
+                hbm_tensor(
+                    z, [batch_size, tokens, hidden * 4], role="activation", **layer_meta
+                )
+            ],
+        )
+        add_op(
+            ops,
+            "aten::silu",
+            [hbm_tensor(z, [batch_size, tokens, hidden * 4], role="activation", **layer_meta)],
+            [
+                hbm_tensor(
+                    zact, [batch_size, tokens, hidden * 4], role="activation", **layer_meta
+                )
+            ],
+        )
+        add_op(
+            ops,
+            "aten::split",
+            [
+                hbm_tensor(
+                    zact, [batch_size, tokens, hidden * 4], role="activation", **layer_meta
+                )
+            ],
+            [
+                hbm_tensor(u, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(v, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(q, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(k, [batch_size, tokens, hidden], role="activation", **layer_meta),
+            ],
+            {"axis": 2, **op_modeling_attrs(op_modeling, "split")},
+        )
+        add_op(
+            ops,
+            "aten::cat",
+            [
+                source_to_hbm_tensor(
+                    source_medium,
+                    k_cache,
+                    [batch_size, kv_len, hidden],
+                    logical_id=f"batch{batch_id}.{shared_layer}.kc",
+                    role="kv_cache_k_batch",
+                    **layer_meta,
+                ),
+                hbm_tensor(k, [batch_size, tokens, hidden], role="activation", **layer_meta),
+            ],
+            [
+                hbm_tensor(
+                    k_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
+                )
+            ],
+            {"axis": 1, **op_modeling_attrs(op_modeling, "concat")},
+        )
+        add_op(
+            ops,
+            "aten::transpose",
+            [
+                hbm_tensor(
+                    k_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
+                )
+            ],
+            [
+                hbm_tensor(
+                    k_all_t,
+                    [batch_size, hidden, kv_len + tokens],
+                    role="activation",
+                    **layer_meta,
+                )
+            ],
+            {"dims": "0,2,1", **op_modeling_attrs(op_modeling, "view")},
+        )
+        add_op(
+            ops,
+            "aten::matmul",
+            [
+                hbm_tensor(q, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(
+                    k_all_t,
+                    [batch_size, hidden, kv_len + tokens],
+                    role="activation",
+                    **layer_meta,
+                ),
+            ],
+            [
+                hbm_tensor(
+                    score,
+                    [batch_size, tokens, kv_len + tokens],
+                    role="activation",
+                    **layer_meta,
+                )
+            ],
+        )
+        add_op(
+            ops,
+            "aten::silu",
+            [
+                hbm_tensor(
+                    score,
+                    [batch_size, tokens, kv_len + tokens],
+                    role="activation",
+                    **layer_meta,
+                )
+            ],
+            [
+                hbm_tensor(
+                    attn,
+                    [batch_size, tokens, kv_len + tokens],
+                    role="activation",
+                    **layer_meta,
+                )
+            ],
+        )
+        add_op(
+            ops,
+            "aten::cat",
+            [
+                source_to_hbm_tensor(
+                    source_medium,
+                    v_cache,
+                    [batch_size, kv_len, hidden],
+                    logical_id=f"batch{batch_id}.{shared_layer}.vc",
+                    role="kv_cache_v_batch",
+                    **layer_meta,
+                ),
+                hbm_tensor(v, [batch_size, tokens, hidden], role="activation", **layer_meta),
+            ],
+            [
+                hbm_tensor(
+                    v_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
+                )
+            ],
+            {"axis": 1, **op_modeling_attrs(op_modeling, "concat")},
+        )
+        add_op(
+            ops,
+            "aten::matmul",
+            [
+                hbm_tensor(
+                    attn,
+                    [batch_size, tokens, kv_len + tokens],
+                    role="activation",
+                    **layer_meta,
+                ),
+                hbm_tensor(
+                    v_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
+                ),
+            ],
+            [hbm_tensor(av, [batch_size, tokens, hidden], role="activation", **layer_meta)],
+        )
+        add_op(
+            ops,
+            "aten::layer_norm",
+            [
+                hbm_tensor(av, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                source_to_hbm_tensor(
+                    source_medium,
+                    f"{shared_layer}.ln_w",
+                    [hidden],
+                    is_weight=True,
+                    logical_id=f"{shared_layer}.ln_w",
+                    role="weight",
+                    **layer_meta,
+                ),
+                source_to_hbm_tensor(
+                    source_medium,
+                    f"{shared_layer}.ln_b",
+                    [hidden],
+                    is_weight=True,
+                    logical_id=f"{shared_layer}.ln_b",
+                    role="weight",
+                    **layer_meta,
+                ),
+            ],
+            [hbm_tensor(av_norm, [batch_size, tokens, hidden], role="activation", **layer_meta)],
+            {**op_modeling_attrs(op_modeling, "layer_norm")},
+        )
+        add_op(
+            ops,
+            "aten::mul",
+            [
+                hbm_tensor(
+                    av_norm, [batch_size, tokens, hidden], role="activation", **layer_meta
+                ),
+                hbm_tensor(u, [batch_size, tokens, hidden], role="activation", **layer_meta),
+            ],
+            [hbm_tensor(gated, [batch_size, tokens, hidden], role="activation", **layer_meta)],
+        )
+        add_op(
+            ops,
+            "aten::linear",
+            [
+                hbm_tensor(
+                    gated, [batch_size, tokens, hidden], role="activation", **layer_meta
+                ),
+                source_to_hbm_tensor(
+                    source_medium,
+                    f"{shared_layer}.w2",
+                    [hidden, hidden],
+                    is_weight=True,
+                    logical_id=f"{shared_layer}.w2",
+                    role="weight",
+                    **layer_meta,
+                ),
+                source_to_hbm_tensor(
+                    source_medium,
+                    f"{shared_layer}.b2",
+                    [hidden],
+                    is_weight=True,
+                    logical_id=f"{shared_layer}.b2",
+                    role="weight",
+                    **layer_meta,
+                ),
+            ],
+            [hbm_tensor(out, [batch_size, tokens, hidden], role="activation", **layer_meta)],
+        )
+        current = out
+
+    return {
+        "metadata": {
+            "format_version": "1.0",
+            "model_name": model_name,
+            "model_type": "hstu_ranking_batched",
+            "workload_type": "hstu_ranking_pipeline_batched",
+            "layout": "NHWC",
+            "num_layers": layers,
+            "batch_id": batch_id,
+            "macro_batch_id": macro_batch_id,
+            "batch_size": batch_size,
+            "user_ids": list(user_ids),
+            "pipeline_enabled": pipeline_enabled,
+            "baseline_preload": True,
+            "fail_on_unknown_op": True,
+            "kv_reuse_enabled": kv_reuse_enabled,
+            "random_seed": seed,
+            "op_modeling": op_modeling,
+            "source_medium": source_medium,
+        },
+        "operators": ops,
+    }
+
+
 def contiguous_batches(num_users, users_per_batch):
     return [
         list(range(start, min(start + users_per_batch, num_users)))
@@ -526,87 +910,55 @@ def write_pipeline_traces(args, op_modeling):
     batches = contiguous_batches(args.num_users, args.users_per_batch)
 
     models = []
-    shared_trace_paths = {}
-    shared_weight_keys = {}
+    if args.enable_kv_reuse and args.users_per_batch > 1:
+        raise ValueError(
+            "Batched pipeline traces do not support --enable-kv-reuse with users_per_batch > 1 yet"
+        )
     for batch_id, users in enumerate(batches):
         for macro_id in range(num_macros):
             start = macro_id * macro_batch_size
             end = min(start + macro_batch_size, candidates_per_user)
             tokens = end - start
-            shared_trace_path = None
-            shared_weight_key = None
-            if args.shared_trace:
-                shared_weight_key = f"hstu_shared_t{tokens}_h{args.hidden}_kv{args.kv_len}_l{args.layers}"
-                if tokens not in shared_trace_paths:
-                    indices = [rng.randrange(args.vocab) for _ in range(tokens)]
-                    trace = build_trace(
-                        args.layers,
-                        tokens,
-                        args.hidden,
-                        args.kv_len,
-                        args.vocab,
-                        user_id=0,
-                        batch_id=0,
-                        macro_batch_id=0,
-                        indices_values=indices,
-                        model_name=shared_weight_key,
-                        op_modeling=op_modeling,
-                        pipeline_enabled=True,
-                        kv_reuse_enabled=args.enable_kv_reuse,
-                        kv_reuse_action_count=args.kv_reuse_action_count,
-                        kv_reuse_action_offset=args.kv_reuse_action_offset,
-                        kv_reuse_action_stride=args.kv_reuse_action_stride,
-                        source_medium=args.source_medium,
-                        seed=args.seed,
-                    )
-                    trace_path = output_dir / f"{shared_weight_key}.json"
-                    write_json(trace_path, trace, compact=args.compact_json)
-                    shared_trace_paths[tokens] = trace_path
-                    shared_weight_keys[tokens] = shared_weight_key
-                shared_trace_path = shared_trace_paths[tokens]
-                shared_weight_key = shared_weight_keys[tokens]
-            for user_id in users:
-                model_name = f"hstu_u{user_id}_b{batch_id}_m{macro_id}"
-                if args.shared_trace:
-                    trace_path = shared_trace_path
-                    weight_key = shared_weight_key
-                else:
-                    indices = [rng.randrange(args.vocab) for _ in range(tokens)]
-                    trace = build_trace(
-                        args.layers,
-                        tokens,
-                        args.hidden,
-                        args.kv_len,
-                        args.vocab,
-                        user_id=user_id,
-                        batch_id=batch_id,
-                        macro_batch_id=macro_id,
-                        indices_values=indices,
-                        model_name=model_name,
-                        op_modeling=op_modeling,
-                        pipeline_enabled=True,
-                        kv_reuse_enabled=args.enable_kv_reuse,
-                        kv_reuse_action_count=args.kv_reuse_action_count,
-                        kv_reuse_action_offset=args.kv_reuse_action_offset,
-                        kv_reuse_action_stride=args.kv_reuse_action_stride,
-                        source_medium=args.source_medium,
-                        seed=args.seed,
-                    )
-                    trace_path = output_dir / f"{model_name}.json"
-                    write_json(trace_path, trace, compact=args.compact_json)
-                    weight_key = model_name
-                model_index = len(models)
-                models.append(
-                    {
-                        "name": model_name,
-                        "trace_path": str(trace_path),
-                        "request_time": model_index * 1e-9,
-                        "weight_key": weight_key,
-                        "user_id": user_id,
-                        "batch_id": batch_id,
-                        "macro_batch_id": macro_id,
-                    }
-                )
+            batch_size = len(users)
+            model_name = f"hstu_b{batch_id}_m{macro_id}"
+            indices_values_per_user = [
+                [rng.randrange(args.vocab) for _ in range(tokens)] for _ in users
+            ]
+            trace = build_batched_trace(
+                args.layers,
+                tokens,
+                args.hidden,
+                args.kv_len,
+                args.vocab,
+                user_ids=users,
+                batch_id=batch_id,
+                macro_batch_id=macro_id,
+                indices_values_per_user=indices_values_per_user,
+                model_name=model_name,
+                op_modeling=op_modeling,
+                pipeline_enabled=True,
+                kv_reuse_enabled=args.enable_kv_reuse,
+                source_medium=args.source_medium,
+                seed=args.seed,
+            )
+            trace_path = output_dir / f"{model_name}.json"
+            write_json(trace_path, trace, compact=args.compact_json)
+            weight_key = (
+                f"hstu_shared_b{batch_size}_t{tokens}_h{args.hidden}_kv{args.kv_len}_l{args.layers}"
+            )
+            model_index = len(models)
+            models.append(
+                {
+                    "name": model_name,
+                    "trace_path": str(trace_path),
+                    "request_time": model_index * 1e-9,
+                    "weight_key": weight_key,
+                    "batch_id": batch_id,
+                    "macro_batch_id": macro_id,
+                    "batch_size": batch_size,
+                    "user_ids": users,
+                }
+            )
 
     models_path = Path(args.models_list)
     write_json(
@@ -622,7 +974,7 @@ def write_pipeline_traces(args, op_modeling):
                 "batch_policy": args.batch_policy,
                 "random_seed": args.seed,
                 "op_modeling": op_modeling,
-                "shared_trace": args.shared_trace,
+                "shared_trace": False,
                 "kv_reuse_enabled": args.enable_kv_reuse,
                 "kv_reuse_action_count": args.kv_reuse_action_count,
                 "kv_reuse_action_offset": args.kv_reuse_action_offset,

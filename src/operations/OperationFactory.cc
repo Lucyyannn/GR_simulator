@@ -1,6 +1,7 @@
 #include "OperationFactory.h"
 
 #include "AdaptiveAvgPool.h"
+#include "BatchedMatmul.h"
 #include "Conv.h"
 #include "ConvOS.h"
 #include "ConvWS.h"
@@ -82,6 +83,8 @@ std::unique_ptr<Operation> OperationFactory::copy_operation(Operation* op) {
       return std::make_unique<GemmWS>(*dynamic_cast<GemmWS*>(op));
   } else if (op->get_optype() == "MatMul") {
       return std::make_unique<GemmWS>(*dynamic_cast<GemmWS*>(op));
+  } else if (op->get_optype() == "BatchedMatmul") {
+    return std::make_unique<BatchedMatmul>(*dynamic_cast<BatchedMatmul*>(op));
   } else if (op->get_optype() == "MaxPool") {
     return std::make_unique<MaxPool>(*dynamic_cast<MaxPool*>(op));
   } else if (op->get_optype() == "AdaptiveAveragePool" ||
@@ -124,6 +127,8 @@ std::unique_ptr<Operation> OperationFactory::create_from_trace(
       return std::make_unique<ConvOS>(_config, model, entry.name, attrs, target_core);
   } else if (optype == "Gemm") {
     return std::make_unique<GemmWS>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "BatchedMatmul") {
+    return std::make_unique<BatchedMatmul>(_config, model, entry.name, attrs, target_core);
   } else if (optype == "MaxPool") {
     return std::make_unique<MaxPool>(_config, model, entry.name, attrs, target_core);
   } else if (optype == "AdaptiveAvgPool" || optype == "AveragePool") {

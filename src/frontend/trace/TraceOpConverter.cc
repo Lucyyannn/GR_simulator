@@ -158,7 +158,11 @@ ConvertedOp TraceOpConverter::convert_linear(const OpEntry& entry) {
 
 ConvertedOp TraceOpConverter::convert_matmul(const OpEntry& entry) {
   ConvertedOp gemm;
-  gemm.optype = "Gemm";
+  bool batched =
+      entry.inputs.size() >= 2 && !entry.outputs.empty() &&
+      entry.inputs[0].shape.size() == 3 && entry.inputs[1].shape.size() == 3 &&
+      entry.outputs[0].shape.size() == 3;
+  gemm.optype = batched ? "BatchedMatmul" : "Gemm";
   gemm.attrs = entry.attrs;
 
   if (!entry.inputs.empty())

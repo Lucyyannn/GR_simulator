@@ -13,20 +13,11 @@ Usage: bash scripts/run_hstu.sh [options]
 Options:
   --source-medium {ddr|ssd}   Initial source medium for weights/KV/embedding rows. Default: ddr
   --result-dir PATH           Output directory. Default: results/run_hstu_<source-medium>
-  --layers N                  Default: 4
-  --hidden N                  Default: 256
-  --kv-len N                  Default: 1024
-  --num-users N               Default: 8
-  --users-per-batch N         Default: 4
-  --candidates-per-user N     Default: 1024
-  --macro-batch-size N        Default: 256
-  --vocab N                   Default: 128
-  --seed N                    Default: 1234
-  --op-modeling SPEC          Default: split=materialize,view=materialize,concat=materialize
   -h, --help                  Show this message
 EOF
 }
 
+# Edit the standard experiment settings here when you want to change workload size.
 SOURCE_MEDIUM="ddr"
 RESULT_DIR=""
 LAYERS=4
@@ -35,7 +26,7 @@ KV_LEN=1024
 NUM_USERS=8
 USERS_PER_BATCH=4
 CANDIDATES_PER_USER=1024
-MACRO_BATCH_SIZE=256
+MACRO_BATCH_SIZE=512
 VOCAB=128
 SEED=1234
 OP_MODELING="split=materialize,view=materialize,concat=materialize"
@@ -48,46 +39,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --result-dir)
       RESULT_DIR="$2"
-      shift 2
-      ;;
-    --layers)
-      LAYERS="$2"
-      shift 2
-      ;;
-    --hidden)
-      HIDDEN="$2"
-      shift 2
-      ;;
-    --kv-len|--history-len)
-      KV_LEN="$2"
-      shift 2
-      ;;
-    --num-users)
-      NUM_USERS="$2"
-      shift 2
-      ;;
-    --users-per-batch)
-      USERS_PER_BATCH="$2"
-      shift 2
-      ;;
-    --candidates-per-user)
-      CANDIDATES_PER_USER="$2"
-      shift 2
-      ;;
-    --macro-batch-size)
-      MACRO_BATCH_SIZE="$2"
-      shift 2
-      ;;
-    --vocab)
-      VOCAB="$2"
-      shift 2
-      ;;
-    --seed)
-      SEED="$2"
-      shift 2
-      ;;
-    --op-modeling)
-      OP_MODELING="$2"
       shift 2
       ;;
     -h|--help)
@@ -127,23 +78,30 @@ BREAKDOWN_CSV="${RESULT_DIR}/layer_breakdown.csv"
 TIMELINE_PNG="${RESULT_DIR}/layer_timeline.png"
 LOG_PATH="${RESULT_DIR}/layer.log"
 
+if [[ -d "${RESULT_DIR}" ]]; then
+  rm -rf "${RESULT_DIR}"
+fi
 mkdir -p "${RESULT_DIR}"
 
-python3 scripts/generate_hstu_baseline_trace.py \
-  --pipeline --shared-trace --compact-json \
-  --source-medium "${SOURCE_MEDIUM}" \
-  --layers "${LAYERS}" \
-  --hidden "${HIDDEN}" \
-  --kv-len "${KV_LEN}" \
-  --vocab "${VOCAB}" \
-  --seed "${SEED}" \
-  --num-users "${NUM_USERS}" \
-  --users-per-batch "${USERS_PER_BATCH}" \
-  --candidates-per-user "${CANDIDATES_PER_USER}" \
-  --macro-batch-size "${MACRO_BATCH_SIZE}" \
-  --op-modeling "${OP_MODELING}" \
-  --output "${TRACE_DIR}" \
+TRACE_ARGS=(
+  --pipeline
+  --compact-json
+  --source-medium "${SOURCE_MEDIUM}"
+  --layers "${LAYERS}"
+  --hidden "${HIDDEN}"
+  --kv-len "${KV_LEN}"
+  --vocab "${VOCAB}"
+  --seed "${SEED}"
+  --num-users "${NUM_USERS}"
+  --users-per-batch "${USERS_PER_BATCH}"
+  --candidates-per-user "${CANDIDATES_PER_USER}"
+  --macro-batch-size "${MACRO_BATCH_SIZE}"
+  --op-modeling "${OP_MODELING}"
+  --output "${TRACE_DIR}"
   --models-list "${MODELS_JSON}"
+)
+
+python3 scripts/generate_hstu_baseline_trace.py "${TRACE_ARGS[@]}"
 
 python3 - "${BASE_CONFIG}" "${RUNTIME_CONFIG}" "${BREAKDOWN_CSV}" <<'PY'
 import json
@@ -156,11 +114,16 @@ breakdown_csv = sys.argv[3]
 
 cfg = json.loads(base_config.read_text(encoding="utf-8"))
 pipeline = cfg.setdefault("pipeline", {})
+hbm_cfg = cfg.get("hbm", {})
+hbm_capacity = int(hbm_cfg.get("capacity_bytes", 0) or 0)
+if hbm_capacity == 0:
+    hbm_capacity = int(hbm_cfg.get("size_gb", 0) or 0) * (1024 ** 3)
+default_residency_cap = hbm_capacity // 4 if hbm_capacity > 0 else 0
 pipeline["max_preloading_models"] = 1
 pipeline["layer_preload_enabled"] = True
 pipeline["layer_preload_lookahead"] = pipeline.get("layer_preload_lookahead", 1)
-pipeline["hbm_residency_capacity_bytes"] = pipeline.get(
-    "hbm_residency_capacity_bytes", 0
+pipeline["hbm_residency_capacity_bytes"] = (
+    pipeline.get("hbm_residency_capacity_bytes", 0) or default_residency_cap
 )
 pipeline["breakdown_csv"] = breakdown_csv
 runtime_config.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
