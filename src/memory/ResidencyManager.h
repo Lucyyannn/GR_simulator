@@ -4,6 +4,7 @@
 
 #include <set>
 #include <string>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -38,6 +39,9 @@ class ResidencyManager {
   addr_type reserve_destination(const std::string& logical_id,
                                 uint64_t bytes,
                                 MemoryMedium medium);
+  std::vector<addr_type> reserve_packed_destinations(
+      const std::vector<std::pair<std::string, uint64_t>>& allocations,
+      MemoryMedium medium);
   void note_entry(const std::string& logical_id,
                   uint64_t bytes,
                   uint32_t user_id,

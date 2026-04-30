@@ -14,10 +14,14 @@ struct TensorEntry {
   std::string source_logical_id;
   std::vector<uint32_t> source_shape;
   std::vector<uint32_t> indices_values;
+  std::vector<uint32_t> user_ids;
+  std::vector<std::vector<uint32_t>> indices_values_per_user;
   std::string reuse_mode;
   uint32_t reuse_axis = 0;
   uint32_t reuse_physical_rows = 0;
   std::vector<uint32_t> reuse_logical_to_physical;
+  std::vector<uint32_t> reuse_physical_rows_per_user;
+  std::vector<std::vector<uint32_t>> reuse_logical_to_physical_per_user;
   std::string role;
   std::string initial_medium;
   std::string runtime_medium;

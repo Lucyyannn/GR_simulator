@@ -37,6 +37,14 @@ bool is_resident_role(const std::string& role) {
   return role == "weight" || role.rfind("kv_cache_", 0) == 0;
 }
 
+bool is_batched_kv_role(const std::string& role) {
+  return role == "kv_cache_k_batch" || role == "kv_cache_v_batch";
+}
+
+std::string kv_suffix_for_role(const std::string& role) {
+  return role.find("_v") != std::string::npos ? "vc" : "kc";
+}
+
 uint64_t tensor_bytes_for_shape(const std::vector<uint32_t>& shape,
                                 uint32_t precision) {
   if (shape.empty()) return precision;
@@ -66,6 +74,17 @@ uint32_t flattened_elems(const std::vector<uint32_t>& shape) {
   if (shape.empty()) return 1;
   return std::accumulate(shape.begin(), shape.end(), 1u,
                          std::multiplies<uint32_t>());
+}
+
+std::vector<uint32_t> users_for_entry(
+    const trace_frontend::TensorEntry& entry) {
+  if (!entry.user_ids.empty()) return entry.user_ids;
+  uint32_t count = entry.shape.empty() ? 1 : entry.shape.front();
+  std::vector<uint32_t> users;
+  users.reserve(count);
+  for (uint32_t i = 0; i < count; ++i)
+    users.push_back(entry.user_id + i);
+  return users;
 }
 
 std::string medium_to_string(MemoryMedium medium) {
@@ -184,6 +203,75 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
       runtime_medium != MemoryMedium::UNKNOWN &&
       initial_medium != runtime_medium;
 
+  if (needs_preload && entry.role == "embedding_rows" &&
+      entry.shape.size() >= 3 && !entry.indices_values_per_user.empty()) {
+    tensor->relocate(runtime_medium);
+    const std::vector<uint32_t> users = users_for_entry(entry);
+    const uint32_t batch_size = entry.shape[0];
+    const uint32_t rows_per_user = entry.shape[1];
+    const uint64_t row_bytes =
+        static_cast<uint64_t>(entry.shape.back()) * _config.precision;
+    uint64_t source_bytes = tensor_bytes_for_shape(entry.source_shape,
+                                                  _config.precision);
+    if (source_bytes == _config.precision && !entry.source_shape.empty())
+      source_bytes = tensor->get_size();
+    std::string source_id = entry.source_logical_id.empty()
+                                ? "embedding.table"
+                                : entry.source_logical_id;
+    addr_type source_base =
+        _residency_manager
+            ? _residency_manager->source_addr(source_id, source_bytes,
+                                             initial_medium)
+            : allocate_address_in_medium(static_cast<uint32_t>(source_bytes),
+                                         initial_medium);
+
+    if (layer_preload_enabled()) tensor->clear_produced();
+    for (uint32_t b = 0; b < batch_size; ++b) {
+      const uint32_t user_id = b < users.size() ? users[b] : entry.user_id + b;
+      PlannedDataMovement movement{
+          .tensor_name = tensor->get_name(),
+          .logical_id = "batch" + std::to_string(effective_batch_id(entry)) +
+                        ".macro" +
+                        std::to_string(effective_macro_batch_id(entry)) +
+                        ".user" + std::to_string(user_id) +
+                        ".embedding_rows",
+          .role = entry.role,
+          .source = initial_medium,
+          .destination = runtime_medium,
+          .src_addr = source_base,
+          .dst_addr = tensor->get_address() +
+                      static_cast<addr_type>(b) * rows_per_user * row_bytes,
+          .bytes = static_cast<uint64_t>(rows_per_user) * row_bytes,
+          .batch_id = effective_batch_id(entry),
+          .macro_batch_id = effective_macro_batch_id(entry),
+          .user_id = user_id,
+          .layer_id = static_cast<int32_t>(entry.layer_id),
+          .tensor_id = tensor->get_id(),
+      };
+      const auto& per_user_indices =
+          b < entry.indices_values_per_user.size()
+              ? entry.indices_values_per_user[b]
+              : entry.indices_values;
+      for (uint32_t i = 0; i < rows_per_user; ++i) {
+        uint32_t row = i;
+        if (!per_user_indices.empty())
+          row = per_user_indices[i % per_user_indices.size()];
+        else if (!entry.indices_values.empty())
+          row = entry.indices_values[(b * rows_per_user + i) %
+                                     entry.indices_values.size()];
+        if (!entry.source_shape.empty() && entry.source_shape[0] > 0)
+          row %= entry.source_shape[0];
+        movement.segments.push_back(PlannedDataMovement::Segment{
+            .src_addr = source_base + static_cast<addr_type>(row) * row_bytes,
+            .dst_addr = movement.dst_addr + static_cast<addr_type>(i) * row_bytes,
+            .bytes = row_bytes,
+        });
+      }
+      _data_movements.push_back(std::move(movement));
+    }
+    return;
+  }
+
   if (needs_preload && entry.role == "embedding_rows") {
     tensor->relocate(runtime_medium);
     const uint64_t row_bytes =
@@ -231,6 +319,132 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
           .layer_id = static_cast<int32_t>(entry.layer_id),
           .tensor_id = tensor->get_id(),
       });
+    }
+    return;
+  }
+
+  if (needs_preload && is_batched_kv_role(entry.role) && _residency_manager &&
+      runtime_medium == MemoryMedium::HBM && entry.shape.size() == 3) {
+    const std::vector<uint32_t> users = users_for_entry(entry);
+    const uint32_t batch_size = entry.shape[0];
+    const uint32_t logical_rows = entry.shape[1];
+    const uint64_t row_bytes =
+        static_cast<uint64_t>(entry.shape[2]) * _config.precision;
+    const bool use_reuse =
+        _graph.metadata.kv_reuse_enabled &&
+        entry.reuse_mode == "row_reuse" &&
+        entry.reuse_logical_to_physical_per_user.size() >= batch_size;
+    const uint64_t row_stride =
+        use_reuse ? round_up_to(row_bytes, std::max<uint64_t>(_config.hbm.req_size, 1))
+                  : row_bytes;
+
+    std::vector<std::string> logical_ids;
+    std::vector<uint32_t> physical_rows;
+    std::vector<uint64_t> physical_bytes;
+    std::vector<uint64_t> logical_bytes;
+    std::vector<std::vector<uint32_t>> maps(batch_size);
+    logical_ids.reserve(batch_size);
+    physical_rows.reserve(batch_size);
+    physical_bytes.reserve(batch_size);
+    logical_bytes.reserve(batch_size);
+    for (uint32_t b = 0; b < batch_size; ++b) {
+      const uint32_t user_id = b < users.size() ? users[b] : entry.user_id + b;
+      logical_ids.push_back("user" + std::to_string(user_id) + ".layer" +
+                            std::to_string(entry.layer_id) + "." +
+                            kv_suffix_for_role(entry.role));
+      uint32_t rows = logical_rows;
+      if (use_reuse) {
+        maps[b] = entry.reuse_logical_to_physical_per_user[b];
+        rows = b < entry.reuse_physical_rows_per_user.size()
+                   ? entry.reuse_physical_rows_per_user[b]
+                   : 0;
+        for (uint32_t row : maps[b]) rows = std::max(rows, row + 1);
+      }
+      physical_rows.push_back(rows);
+      physical_bytes.push_back(static_cast<uint64_t>(rows) * row_stride);
+      logical_bytes.push_back(static_cast<uint64_t>(logical_rows) * row_stride);
+    }
+
+    std::vector<addr_type> group_bases(batch_size, 0);
+    bool any_known_addr = false;
+    for (uint32_t b = 0; b < batch_size; ++b) {
+      group_bases[b] = _residency_manager->resident_addr(logical_ids[b]);
+      any_known_addr = any_known_addr || group_bases[b] != 0;
+    }
+    if (!any_known_addr) {
+      std::vector<std::pair<std::string, uint64_t>> allocations;
+      allocations.reserve(batch_size);
+      for (uint32_t b = 0; b < batch_size; ++b)
+        allocations.push_back({logical_ids[b], physical_bytes[b]});
+      group_bases =
+          _residency_manager->reserve_packed_destinations(allocations,
+                                                          runtime_medium);
+    } else {
+      for (uint32_t b = 0; b < batch_size; ++b) {
+        if (group_bases[b] == 0) {
+          group_bases[b] = _residency_manager->reserve_destination(
+              logical_ids[b], physical_bytes[b], runtime_medium);
+        }
+      }
+    }
+
+    tensor->set_address(group_bases.empty() ? tensor->get_address()
+                                            : group_bases.front());
+    tensor->set_group_layout(0, 1, row_stride, group_bases, physical_rows, maps);
+    if (layer_preload_enabled()) tensor->clear_produced();
+
+    for (uint32_t b = 0; b < batch_size; ++b) {
+      const uint32_t user_id = b < users.size() ? users[b] : entry.user_id + b;
+      addr_type source_addr = _residency_manager->source_addr(
+          logical_ids[b], logical_bytes[b], initial_medium);
+      PlannedDataMovement movement{
+          .tensor_name = tensor->get_name(),
+          .logical_id = logical_ids[b],
+          .role = entry.role,
+          .source = initial_medium,
+          .destination = runtime_medium,
+          .src_addr = source_addr,
+          .dst_addr = group_bases[b],
+          .bytes = physical_bytes[b],
+          .batch_id = effective_batch_id(entry),
+          .macro_batch_id = effective_macro_batch_id(entry),
+          .user_id = user_id,
+          .layer_id = static_cast<int32_t>(entry.layer_id),
+          .tensor_id = tensor->get_id(),
+          .makes_resident = true,
+          .reuse_if_resident = true,
+          .defer_tensor_ready = true,
+          .resident_bytes = physical_bytes[b],
+      };
+      if (use_reuse) {
+        std::vector<uint32_t> canonical_rows(
+            physical_rows[b], std::numeric_limits<uint32_t>::max());
+        for (uint32_t logical_row = 0; logical_row < maps[b].size();
+             ++logical_row) {
+          uint32_t physical_row = maps[b][logical_row];
+          if (physical_row >= canonical_rows.size()) continue;
+          canonical_rows[physical_row] =
+              std::min(canonical_rows[physical_row], logical_row);
+        }
+        for (uint32_t physical_row = 0; physical_row < canonical_rows.size();
+             ++physical_row) {
+          uint32_t logical_row = canonical_rows[physical_row];
+          if (logical_row == std::numeric_limits<uint32_t>::max()) continue;
+          movement.segments.push_back(PlannedDataMovement::Segment{
+              .src_addr = source_addr +
+                          static_cast<addr_type>(logical_row) * row_stride,
+              .dst_addr = group_bases[b] +
+                          static_cast<addr_type>(physical_row) * row_stride,
+              .bytes = row_stride,
+          });
+        }
+      }
+      note_residency_entry(movement);
+      _data_movements.push_back(std::move(movement));
+      if (use_reuse) {
+        _reuse_logical_bytes += logical_bytes[b];
+        _reuse_physical_bytes += physical_bytes[b];
+      }
     }
     return;
   }
@@ -941,7 +1155,8 @@ std::vector<uint64_t> TraceModel::submit_next_data_movement_stage(
         _residency_manager->is_resident(movement.logical_id)) {
       pin_resident_use(movement.layer_id, movement.logical_id);
       Tensor* tensor = get_tensor(movement.tensor_id);
-      if (tensor != nullptr) tensor->set_produced();
+      if (tensor != nullptr && !movement.defer_tensor_ready)
+        tensor->set_produced();
       continue;
     }
     MigrationRequest request;

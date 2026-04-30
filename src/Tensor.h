@@ -28,9 +28,29 @@ class Tensor {
   const std::vector<uint32_t>& reuse_logical_to_physical() const {
     return _reuse_logical_to_physical;
   }
+  bool has_group_layout() const { return _has_group_layout; }
+  uint32_t group_axis() const { return _group_axis; }
+  uint32_t group_row_axis() const { return _group_row_axis; }
+  uint64_t group_row_stride_bytes() const { return _group_row_stride_bytes; }
+  const std::vector<addr_type>& group_base_addrs() const {
+    return _group_base_addrs;
+  }
+  const std::vector<uint32_t>& group_physical_rows() const {
+    return _group_physical_rows;
+  }
+  const std::vector<std::vector<uint32_t>>& group_logical_to_physical() const {
+    return _group_logical_to_physical;
+  }
   void set_reuse_layout(uint32_t axis, uint32_t physical_rows,
                         uint64_t row_stride_bytes,
                         const std::vector<uint32_t>& logical_to_physical);
+  void set_group_layout(uint32_t group_axis, uint32_t row_axis,
+                        uint64_t row_stride_bytes,
+                        const std::vector<addr_type>& group_base_addrs,
+                        const std::vector<uint32_t>& group_physical_rows,
+                        const std::vector<std::vector<uint32_t>>& logical_to_physical);
+  addr_type physical_address(const std::vector<uint32_t>& coords,
+                             uint32_t precision) const;
   void set_produced() { _produced = true; }
   void clear_produced() { _produced = false; }
   bool get_produced() { return _produced; }
@@ -60,5 +80,12 @@ class Tensor {
   uint32_t _reuse_physical_rows = 0;
   uint64_t _reuse_row_stride_bytes = 0;
   std::vector<uint32_t> _reuse_logical_to_physical;
+  bool _has_group_layout = false;
+  uint32_t _group_axis = 0;
+  uint32_t _group_row_axis = 0;
+  uint64_t _group_row_stride_bytes = 0;
+  std::vector<addr_type> _group_base_addrs;
+  std::vector<uint32_t> _group_physical_rows;
+  std::vector<std::vector<uint32_t>> _group_logical_to_physical;
   friend Model;
 };

@@ -22,11 +22,11 @@ SOURCE_MEDIUM="ddr"
 RESULT_DIR=""
 LAYERS=4
 HIDDEN=256
-KV_LEN=2048
+KV_LEN=1024
 NUM_USERS=8
 USERS_PER_BATCH=4
-CANDIDATES_PER_USER=1024
-MACRO_BATCH_SIZE=512
+CANDIDATES_PER_USER=2048
+MACRO_BATCH_SIZE=1024
 VOCAB=65536
 SEED=1234
 OP_MODELING="split=materialize,view=materialize,concat=materialize"
@@ -83,6 +83,7 @@ if [[ -d "${RESULT_DIR}" ]]; then
 fi
 mkdir -p "${RESULT_DIR}"
 
+# --enable-kv-reuse
 TRACE_ARGS=(
   --pipeline
   --compact-json

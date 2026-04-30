@@ -67,6 +67,7 @@ class TraceModel : public Model {
     uint32_t tensor_id = 0;
     bool makes_resident = false;
     bool reuse_if_resident = false;
+    bool defer_tensor_ready = false;
     uint64_t resident_bytes = 0;
     std::vector<Segment> segments;
   };

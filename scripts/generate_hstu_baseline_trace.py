@@ -464,14 +464,15 @@ def build_batched_trace(
     op_modeling=None,
     pipeline_enabled=False,
     kv_reuse_enabled=False,
+    kv_reuse_action_count=None,
+    kv_reuse_action_offset=1,
+    kv_reuse_action_stride=2,
     source_medium="ddr",
     seed=0,
 ):
     op_modeling = op_modeling or {}
     if source_medium not in {"ddr", "ssd"}:
         raise ValueError(f"Unsupported source medium: {source_medium}")
-    if kv_reuse_enabled:
-        raise ValueError("Batched pipeline traces do not support kv_reuse_enabled yet")
 
     batch_size = len(user_ids)
     if batch_size <= 0:
@@ -492,6 +493,35 @@ def build_batched_trace(
     flat_indices_values = [
         idx for per_user_indices in indices_values_per_user for idx in per_user_indices
     ]
+
+    def batch_kv_reuse_meta(layer):
+        if not kv_reuse_enabled:
+            return {}
+        mappings = []
+        physical_rows = []
+        for user_id in user_ids:
+            reuse_rng = random.Random(seed + user_id * 1000003 + layer * 9176)
+            mapping = build_action_reuse_mapping(
+                kv_len,
+                kv_reuse_action_count,
+                reuse_rng,
+                kv_reuse_action_offset,
+                kv_reuse_action_stride,
+            )
+            if mapping is None:
+                logical_to_physical = list(range(kv_len))
+                rows = kv_len
+            else:
+                logical_to_physical = mapping["reuse_logical_to_physical"]
+                rows = mapping["reuse_physical_rows"]
+            mappings.append(logical_to_physical)
+            physical_rows.append(rows)
+        return {
+            "reuse_mode": "row_reuse",
+            "reuse_axis": 1,
+            "reuse_physical_rows_per_user": physical_rows,
+            "reuse_logical_to_physical_per_user": mappings,
+        }
 
     ops = []
     base = {
@@ -530,6 +560,8 @@ def build_batched_trace(
                 source_logical_id="embedding.table",
                 source_shape=[vocab, hidden],
                 indices_values=flat_indices_values,
+                user_ids=user_ids,
+                indices_values_per_user=indices_values_per_user,
                 **base,
             )
         ],
@@ -543,6 +575,7 @@ def build_batched_trace(
     for layer in range(layers):
         prefix = f"b{batch_id}.m{macro_batch_id}.layer{layer}"
         shared_layer = f"layer{layer}"
+        kv_reuse_meta = batch_kv_reuse_meta(layer)
         z = f"{prefix}.z"
         zact = f"{prefix}.zact"
         u = f"{prefix}.u"
@@ -635,6 +668,8 @@ def build_batched_trace(
                     [batch_size, kv_len, hidden],
                     logical_id=f"batch{batch_id}.{shared_layer}.kc",
                     role="kv_cache_k_batch",
+                    user_ids=user_ids,
+                    **kv_reuse_meta,
                     **layer_meta,
                 ),
                 hbm_tensor(k, [batch_size, tokens, hidden], role="activation", **layer_meta),
@@ -715,6 +750,8 @@ def build_batched_trace(
                     [batch_size, kv_len, hidden],
                     logical_id=f"batch{batch_id}.{shared_layer}.vc",
                     role="kv_cache_v_batch",
+                    user_ids=user_ids,
+                    **kv_reuse_meta,
                     **layer_meta,
                 ),
                 hbm_tensor(v, [batch_size, tokens, hidden], role="activation", **layer_meta),
@@ -910,10 +947,6 @@ def write_pipeline_traces(args, op_modeling):
     batches = contiguous_batches(args.num_users, args.users_per_batch)
 
     models = []
-    if args.enable_kv_reuse and args.users_per_batch > 1:
-        raise ValueError(
-            "Batched pipeline traces do not support --enable-kv-reuse with users_per_batch > 1 yet"
-        )
     for batch_id, users in enumerate(batches):
         for macro_id in range(num_macros):
             start = macro_id * macro_batch_size
@@ -938,6 +971,9 @@ def write_pipeline_traces(args, op_modeling):
                 op_modeling=op_modeling,
                 pipeline_enabled=True,
                 kv_reuse_enabled=args.enable_kv_reuse,
+                kv_reuse_action_count=args.kv_reuse_action_count,
+                kv_reuse_action_offset=args.kv_reuse_action_offset,
+                kv_reuse_action_stride=args.kv_reuse_action_stride,
                 source_medium=args.source_medium,
                 seed=args.seed,
             )

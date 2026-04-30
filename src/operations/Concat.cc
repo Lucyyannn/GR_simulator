@@ -153,6 +153,7 @@ void Concat::initialize_copy_tile(uint32_t input_idx, uint64_t element_offset,
 			input_tensor->has_reuse_layout() &&
 			input_tensor->reuse_axis() == _axis &&
 			input_tensor->reuse_logical_to_physical().size() == input_shape[_axis];
+	const bool group_aware = input_tensor->has_group_layout();
 
 	std::set<addr_type> input_addrs;
 	std::set<addr_type> logical_input_addrs;
@@ -166,7 +167,10 @@ void Concat::initialize_copy_tile(uint32_t input_idx, uint64_t element_offset,
 
 		logical_input_addrs.insert(_config.align_address(
 				input_addr + input_element * static_cast<uint64_t>(_config.precision)));
-		if (reuse_aware) {
+		if (group_aware) {
+			input_addrs.insert(_config.align_address(
+					input_tensor->physical_address(coords, _config.precision)));
+		} else if (reuse_aware) {
 			const auto& logical_to_physical =
 					input_tensor->reuse_logical_to_physical();
 			uint32_t logical_row = coords[_axis];
@@ -200,7 +204,8 @@ void Concat::initialize_copy_tile(uint32_t input_idx, uint64_t element_offset,
 			.opcode = Opcode::MOVIN,
 			.dest_addr = SPAD_BASE,
 			.size = static_cast<uint32_t>(
-					reuse_aware ? logical_input_addrs.size() : input_addrs.size()),
+					(reuse_aware || group_aware) ? logical_input_addrs.size()
+					                             : input_addrs.size()),
 			.src_addrs = std::vector<addr_type>(input_addrs.begin(), input_addrs.end()),
 			.operand_id = _INPUT_OPERAND + input_idx,
 	}));
@@ -208,7 +213,8 @@ void Concat::initialize_copy_tile(uint32_t input_idx, uint64_t element_offset,
 			.opcode = Opcode::COMP,
 			.dest_addr = SPAD_BASE,
 			.size = static_cast<uint32_t>(
-					reuse_aware ? logical_input_addrs.size() : input_addrs.size()),
+					(reuse_aware || group_aware) ? logical_input_addrs.size()
+					                             : input_addrs.size()),
 			.compute_size = static_cast<uint32_t>(elements * _config.precision),
 			.src_addrs = std::vector<addr_type>{SPAD_BASE},
 	}));

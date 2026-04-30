@@ -34,6 +34,28 @@ addr_type ResidencyManager::reserve_destination(const std::string& logical_id,
   return entry.resident_addr;
 }
 
+std::vector<addr_type> ResidencyManager::reserve_packed_destinations(
+    const std::vector<std::pair<std::string, uint64_t>>& allocations,
+    MemoryMedium medium) {
+  std::vector<addr_type> addrs;
+  addrs.reserve(allocations.size());
+  uint64_t total_bytes = 0;
+  for (const auto& allocation : allocations)
+    total_bytes += allocation.second;
+  addr_type base_addr =
+      allocate_address_in_medium(static_cast<uint32_t>(total_bytes), medium);
+  addr_type offset = 0;
+  for (const auto& allocation : allocations) {
+    auto& entry = _entries[allocation.first];
+    entry.bytes = std::max(entry.bytes, allocation.second);
+    entry.last_touch = ++_clock;
+    entry.resident_addr = base_addr + offset;
+    addrs.push_back(entry.resident_addr);
+    offset += allocation.second;
+  }
+  return addrs;
+}
+
 void ResidencyManager::note_entry(const std::string& logical_id,
                                   uint64_t bytes,
                                   uint32_t user_id,

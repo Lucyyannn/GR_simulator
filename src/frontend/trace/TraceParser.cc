@@ -47,6 +47,21 @@ TensorEntry parse_tensor(const nlohmann::json& j) {
     for (auto& idx : j["indices_values"])
       entry.indices_values.push_back(idx.get<uint32_t>());
   }
+  if (j.contains("user_ids") && j["user_ids"].is_array()) {
+    for (auto& user : j["user_ids"])
+      entry.user_ids.push_back(user.get<uint32_t>());
+  }
+  if (j.contains("indices_values_per_user") &&
+      j["indices_values_per_user"].is_array()) {
+    for (auto& row : j["indices_values_per_user"]) {
+      std::vector<uint32_t> values;
+      if (row.is_array()) {
+        for (auto& idx : row)
+          values.push_back(idx.get<uint32_t>());
+      }
+      entry.indices_values_per_user.push_back(std::move(values));
+    }
+  }
   entry.reuse_mode = j.value("reuse_mode", "");
   entry.reuse_axis = j.value("reuse_axis", 0);
   entry.reuse_physical_rows = j.value("reuse_physical_rows", 0);
@@ -54,6 +69,22 @@ TensorEntry parse_tensor(const nlohmann::json& j) {
       j["reuse_logical_to_physical"].is_array()) {
     for (auto& row : j["reuse_logical_to_physical"])
       entry.reuse_logical_to_physical.push_back(row.get<uint32_t>());
+  }
+  if (j.contains("reuse_physical_rows_per_user") &&
+      j["reuse_physical_rows_per_user"].is_array()) {
+    for (auto& rows : j["reuse_physical_rows_per_user"])
+      entry.reuse_physical_rows_per_user.push_back(rows.get<uint32_t>());
+  }
+  if (j.contains("reuse_logical_to_physical_per_user") &&
+      j["reuse_logical_to_physical_per_user"].is_array()) {
+    for (auto& mapping : j["reuse_logical_to_physical_per_user"]) {
+      std::vector<uint32_t> values;
+      if (mapping.is_array()) {
+        for (auto& row : mapping)
+          values.push_back(row.get<uint32_t>());
+      }
+      entry.reuse_logical_to_physical_per_user.push_back(std::move(values));
+    }
   }
   entry.role = j.value("role", "");
   entry.initial_medium = j.value("initial_medium", "");
