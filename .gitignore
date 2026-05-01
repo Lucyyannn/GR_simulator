@@ -12,3 +12,5 @@ baseline_flow.md
 .codex
 detail.csv
 *.log
+gr_experiments/
+kv_reuse_report/

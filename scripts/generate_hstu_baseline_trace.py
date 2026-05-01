@@ -3,6 +3,7 @@
 import argparse
 import json
 import random
+from collections import Counter
 from pathlib import Path
 
 
@@ -150,6 +151,172 @@ def build_action_reuse_mapping(
     }
 
 
+def _window_topk_hot_quotas(action_count, topk, hot_total):
+    if topk <= 0:
+        return []
+
+    topk = min(topk, action_count, hot_total)
+    if topk <= 0:
+        return []
+
+    weights = list(range(topk, 0, -1))
+    quotas = [1] * topk
+    remaining = hot_total - topk
+    if remaining > 0:
+        weight_sum = sum(weights)
+        extras = [remaining * w // weight_sum for w in weights]
+        quotas = [quota + extra for quota, extra in zip(quotas, extras)]
+        leftover = hot_total - sum(quotas)
+        for i in range(leftover):
+            quotas[i % topk] += 1
+    return quotas
+
+
+def build_window_topk_reuse_mapping(
+    length,
+    rng,
+    window_size=1024,
+    topk=4,
+    action_offset=1,
+    action_stride=2,
+    hot_share=0.75,
+):
+    if window_size is None or window_size <= 0:
+        return None
+    if topk is None or topk <= 0:
+        return None
+
+    action_positions = list(range(action_offset, length, action_stride))
+    if not action_positions:
+        return None
+    action_position_set = set(action_positions)
+
+    row_to_physical = {}
+    logical_to_physical = []
+    reuse_action_positions = []
+    reuse_action_ids = []
+    window_topk_actions = []
+    for window_id, window_start in enumerate(range(0, length, window_size)):
+        window_end = min(window_start + window_size, length)
+        window_action_positions = [
+            pos for pos in action_positions if window_start <= pos < window_end
+        ]
+        window_action_count = len(window_action_positions)
+
+        if window_action_count == 0:
+            for logical_row in range(window_start, window_end):
+                row_key = ("item", logical_row)
+                if row_key not in row_to_physical:
+                    row_to_physical[row_key] = len(row_to_physical)
+                logical_to_physical.append(row_to_physical[row_key])
+            continue
+
+        local_topk = min(topk, window_action_count)
+        if window_action_count <= local_topk:
+            hot_total = window_action_count
+        else:
+            hot_total = min(
+                window_action_count,
+                max(local_topk + 1, int(round(window_action_count * hot_share))),
+            )
+
+        quotas = _window_topk_hot_quotas(window_action_count, local_topk, hot_total)
+        assigned_action_ids = []
+        for action_id, quota in enumerate(quotas):
+            assigned_action_ids.extend([action_id] * quota)
+        cold_count = window_action_count - len(assigned_action_ids)
+        for cold_idx in range(cold_count):
+            assigned_action_ids.append(local_topk + cold_idx)
+
+        window_rng = random.Random(rng.randrange(1 << 63))
+        window_rng.shuffle(assigned_action_ids)
+        action_id_by_position = dict(zip(window_action_positions, assigned_action_ids))
+
+        counts = Counter(assigned_action_ids)
+        top_action_ids = [
+            action_id
+            for action_id, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[
+                :local_topk
+            ]
+        ]
+        window_topk_actions.append(
+            {
+                "window_id": window_id,
+                "window_start": window_start,
+                "window_end": window_end,
+                "action_count": window_action_count,
+                "topk": local_topk,
+                "selected_action_ids": top_action_ids,
+            }
+        )
+
+        for logical_row in range(window_start, window_end):
+            if logical_row in action_position_set:
+                action_id = action_id_by_position[logical_row]
+                reuse_action_positions.append(logical_row)
+                reuse_action_ids.append(action_id)
+                if action_id in top_action_ids:
+                    row_key = ("action", window_id, action_id)
+                else:
+                    row_key = ("cold_action", window_id, logical_row)
+            else:
+                row_key = ("item", logical_row)
+
+            if row_key not in row_to_physical:
+                row_to_physical[row_key] = len(row_to_physical)
+            logical_to_physical.append(row_to_physical[row_key])
+
+    return {
+        "reuse_mode": "row_reuse",
+        "reuse_variant": "window_topk",
+        "reuse_axis": 0,
+        "reuse_physical_rows": len(row_to_physical),
+        "reuse_logical_to_physical": logical_to_physical,
+        "reuse_action_positions": reuse_action_positions,
+        "reuse_action_ids": reuse_action_ids,
+        "reuse_window_size": window_size,
+        "reuse_topk": topk,
+        "reuse_hot_share": hot_share,
+        "reuse_window_topk_actions": window_topk_actions,
+    }
+
+
+def build_kv_reuse_mapping(
+    length,
+    rng,
+    variant="window_topk",
+    action_count=4,
+    window_size=1024,
+    topk=4,
+    hot_share=0.75,
+    action_offset=1,
+    action_stride=2,
+):
+    if variant == "global":
+        mapping = build_action_reuse_mapping(
+            length,
+            action_count,
+            rng,
+            action_offset=action_offset,
+            action_stride=action_stride,
+        )
+        if mapping is not None:
+            mapping["reuse_variant"] = "global"
+            mapping["reuse_action_count"] = action_count
+        return mapping
+    if variant == "window_topk":
+        return build_window_topk_reuse_mapping(
+            length,
+            rng,
+            window_size=window_size,
+            topk=topk,
+            hot_share=hot_share,
+            action_offset=action_offset,
+            action_stride=action_stride,
+        )
+    raise ValueError(f"Unsupported KV reuse variant: {variant}")
+
+
 def build_trace(
     layers,
     tokens,
@@ -164,7 +331,11 @@ def build_trace(
     op_modeling=None,
     pipeline_enabled=False,
     kv_reuse_enabled=False,
-    kv_reuse_action_count=None,
+    kv_reuse_variant="window_topk",
+    kv_reuse_action_count=4,
+    kv_reuse_window_size=1024,
+    kv_reuse_topk=4,
+    kv_reuse_hot_share=0.75,
     kv_reuse_action_offset=1,
     kv_reuse_action_stride=2,
     source_medium="ddr",
@@ -177,10 +348,14 @@ def build_trace(
     ops = []
     indices_values = indices_values or [i % vocab for i in range(tokens)]
     kv_reuse_meta = (
-        build_action_reuse_mapping(
+        build_kv_reuse_mapping(
             kv_len,
-            kv_reuse_action_count,
             reuse_rng,
+            variant=kv_reuse_variant,
+            action_count=kv_reuse_action_count,
+            window_size=kv_reuse_window_size,
+            topk=kv_reuse_topk,
+            hot_share=kv_reuse_hot_share,
             action_offset=kv_reuse_action_offset,
             action_stride=kv_reuse_action_stride,
         )
@@ -445,6 +620,13 @@ def build_trace(
             "random_seed": seed,
             "op_modeling": op_modeling,
             "source_medium": source_medium,
+            "kv_reuse_variant": kv_reuse_variant,
+            "kv_reuse_action_count": kv_reuse_action_count,
+            "kv_reuse_window_size": kv_reuse_window_size,
+            "kv_reuse_topk": kv_reuse_topk,
+            "kv_reuse_hot_share": kv_reuse_hot_share,
+            "kv_reuse_action_offset": kv_reuse_action_offset,
+            "kv_reuse_action_stride": kv_reuse_action_stride,
         },
         "operators": ops,
     }
@@ -464,7 +646,11 @@ def build_batched_trace(
     op_modeling=None,
     pipeline_enabled=False,
     kv_reuse_enabled=False,
-    kv_reuse_action_count=None,
+    kv_reuse_variant="window_topk",
+    kv_reuse_action_count=4,
+    kv_reuse_window_size=1024,
+    kv_reuse_topk=4,
+    kv_reuse_hot_share=0.75,
     kv_reuse_action_offset=1,
     kv_reuse_action_stride=2,
     source_medium="ddr",
@@ -499,14 +685,19 @@ def build_batched_trace(
             return {}
         mappings = []
         physical_rows = []
+        window_topk_actions = []
         for user_id in user_ids:
             reuse_rng = random.Random(seed + user_id * 1000003 + layer * 9176)
-            mapping = build_action_reuse_mapping(
+            mapping = build_kv_reuse_mapping(
                 kv_len,
-                kv_reuse_action_count,
                 reuse_rng,
-                kv_reuse_action_offset,
-                kv_reuse_action_stride,
+                variant=kv_reuse_variant,
+                action_count=kv_reuse_action_count,
+                window_size=kv_reuse_window_size,
+                topk=kv_reuse_topk,
+                hot_share=kv_reuse_hot_share,
+                action_offset=kv_reuse_action_offset,
+                action_stride=kv_reuse_action_stride,
             )
             if mapping is None:
                 logical_to_physical = list(range(kv_len))
@@ -514,14 +705,26 @@ def build_batched_trace(
             else:
                 logical_to_physical = mapping["reuse_logical_to_physical"]
                 rows = mapping["reuse_physical_rows"]
+                if "reuse_window_topk_actions" in mapping:
+                    window_topk_actions.append(mapping["reuse_window_topk_actions"])
             mappings.append(logical_to_physical)
             physical_rows.append(rows)
-        return {
+        meta = {
             "reuse_mode": "row_reuse",
+            "reuse_variant": kv_reuse_variant,
             "reuse_axis": 1,
             "reuse_physical_rows_per_user": physical_rows,
             "reuse_logical_to_physical_per_user": mappings,
+            "reuse_action_count": kv_reuse_action_count,
+            "reuse_action_offset": kv_reuse_action_offset,
+            "reuse_action_stride": kv_reuse_action_stride,
+            "reuse_window_size": kv_reuse_window_size,
+            "reuse_topk": kv_reuse_topk,
+            "reuse_hot_share": kv_reuse_hot_share,
         }
+        if window_topk_actions:
+            meta["reuse_window_topk_actions_per_user"] = window_topk_actions
+        return meta
 
     ops = []
     base = {
@@ -919,7 +1122,11 @@ def write_single_trace(args, op_modeling):
         op_modeling=op_modeling,
         pipeline_enabled=args.pipeline,
         kv_reuse_enabled=args.enable_kv_reuse,
+        kv_reuse_variant=args.kv_reuse_variant,
         kv_reuse_action_count=args.kv_reuse_action_count,
+        kv_reuse_window_size=args.kv_reuse_window_size,
+        kv_reuse_topk=args.kv_reuse_topk,
+        kv_reuse_hot_share=args.kv_reuse_hot_share,
         kv_reuse_action_offset=args.kv_reuse_action_offset,
         kv_reuse_action_stride=args.kv_reuse_action_stride,
         source_medium=args.source_medium,
@@ -971,7 +1178,11 @@ def write_pipeline_traces(args, op_modeling):
                 op_modeling=op_modeling,
                 pipeline_enabled=True,
                 kv_reuse_enabled=args.enable_kv_reuse,
+                kv_reuse_variant=args.kv_reuse_variant,
                 kv_reuse_action_count=args.kv_reuse_action_count,
+                kv_reuse_window_size=args.kv_reuse_window_size,
+                kv_reuse_topk=args.kv_reuse_topk,
+                kv_reuse_hot_share=args.kv_reuse_hot_share,
                 kv_reuse_action_offset=args.kv_reuse_action_offset,
                 kv_reuse_action_stride=args.kv_reuse_action_stride,
                 source_medium=args.source_medium,
@@ -1012,7 +1223,11 @@ def write_pipeline_traces(args, op_modeling):
                 "op_modeling": op_modeling,
                 "shared_trace": False,
                 "kv_reuse_enabled": args.enable_kv_reuse,
+                "kv_reuse_variant": args.kv_reuse_variant,
                 "kv_reuse_action_count": args.kv_reuse_action_count,
+                "kv_reuse_window_size": args.kv_reuse_window_size,
+                "kv_reuse_topk": args.kv_reuse_topk,
+                "kv_reuse_hot_share": args.kv_reuse_hot_share,
                 "kv_reuse_action_offset": args.kv_reuse_action_offset,
                 "kv_reuse_action_stride": args.kv_reuse_action_stride,
                 "source_medium": args.source_medium,
@@ -1047,12 +1262,47 @@ def main():
     parser.add_argument("--pipeline", action="store_true")
     parser.add_argument("--enable-kv-reuse", action="store_true")
     parser.add_argument(
+        "--kv-reuse-variant",
+        choices=["global", "window_topk"],
+        default="window_topk",
+        help=(
+            "KV reuse mapping variant. Use global to reproduce the original "
+            "whole-history action reuse experiments."
+        ),
+    )
+    parser.add_argument(
         "--kv-reuse-action-count",
         type=int,
         default=4,
         help=(
-            "Number of distinct synthetic actions among action rows in the "
-            "generated KV history sequence."
+            "Number of distinct synthetic actions for global action reuse. "
+            "Kept for compatibility with the original KV reuse experiments."
+        ),
+    )
+    parser.add_argument(
+        "--kv-reuse-window-size",
+        type=int,
+        default=1024,
+        help=(
+            "Logical window size used to build local reuse layout. "
+            "Reuse never crosses window boundaries."
+        ),
+    )
+    parser.add_argument(
+        "--kv-reuse-topk",
+        type=int,
+        default=4,
+        help=(
+            "Number of hot action groups retained per window."
+        ),
+    )
+    parser.add_argument(
+        "--kv-reuse-hot-share",
+        type=float,
+        default=0.75,
+        help=(
+            "Fraction of action rows in each window assigned to the hot top-k "
+            "action groups before cold rows are left unique."
         ),
     )
     parser.add_argument(
@@ -1089,6 +1339,14 @@ def main():
 
     if args.num_users < 1 or args.users_per_batch < 1:
         raise ValueError("--num-users and --users-per-batch must be positive")
+    if args.kv_reuse_action_count < 1:
+        raise ValueError("--kv-reuse-action-count must be positive")
+    if args.kv_reuse_window_size < 1:
+        raise ValueError("--kv-reuse-window-size must be positive")
+    if args.kv_reuse_topk < 1:
+        raise ValueError("--kv-reuse-topk must be positive")
+    if not (0.0 < args.kv_reuse_hot_share <= 1.0):
+        raise ValueError("--kv-reuse-hot-share must be in (0, 1]")
     if args.kv_reuse_action_stride < 1:
         raise ValueError("--kv-reuse-action-stride must be positive")
     if args.kv_reuse_action_offset < 0:

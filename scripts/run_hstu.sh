@@ -12,24 +12,38 @@ Usage: bash scripts/run_hstu.sh [options]
 
 Options:
   --source-medium {ddr|ssd}   Initial source medium for weights/KV/embedding rows. Default: ddr
+  --base-config PATH           Simulator base config. Default: configs/910c_mini_<source-medium>.json
   --result-dir PATH           Output directory. Default: results/run_hstu_<source-medium>
+  --layers N                   HSTU layer count
+  --hidden N                   Hidden dimension
+  --kv-len N                   Historical KV length
+  --num-users N                Number of users in the generated workload
+  --users-per-batch N          Users per batch
+  --candidates-per-user N      Candidates per user
+  --macro-batch-size N         Candidate macro batch size
+  --vocab N                    Embedding vocabulary size
+  --seed N                     Random seed
+  --op-modeling SPEC           Operator modeling modes, e.g. split=materialize,view=materialize,concat=materialize
+  --log-level LEVEL            Simulator log level. Default: info
   -h, --help                  Show this message
 EOF
 }
 
 # Edit the standard experiment settings here when you want to change workload size.
-SOURCE_MEDIUM="ddr"
+SOURCE_MEDIUM="${SOURCE_MEDIUM:-ddr}"
+BASE_CONFIG="${BASE_CONFIG:-}"
 RESULT_DIR=""
-LAYERS=4
-HIDDEN=256
-KV_LEN=1024
-NUM_USERS=8
-USERS_PER_BATCH=4
-CANDIDATES_PER_USER=2048
-MACRO_BATCH_SIZE=1024
-VOCAB=65536
-SEED=1234
-OP_MODELING="split=materialize,view=materialize,concat=materialize"
+LAYERS="${LAYERS:-4}"
+HIDDEN="${HIDDEN:-256}"
+KV_LEN="${KV_LEN:-1024}"
+NUM_USERS="${NUM_USERS:-8}"
+USERS_PER_BATCH="${USERS_PER_BATCH:-4}"
+CANDIDATES_PER_USER="${CANDIDATES_PER_USER:-2048}"
+MACRO_BATCH_SIZE="${MACRO_BATCH_SIZE:-1024}"
+VOCAB="${VOCAB:-65536}"
+SEED="${SEED:-1234}"
+OP_MODELING="${OP_MODELING:-split=materialize,view=materialize,concat=materialize}"
+LOG_LEVEL="${LOG_LEVEL:-info}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -37,8 +51,56 @@ while [[ $# -gt 0 ]]; do
       SOURCE_MEDIUM="$2"
       shift 2
       ;;
+    --base-config)
+      BASE_CONFIG="$2"
+      shift 2
+      ;;
     --result-dir)
       RESULT_DIR="$2"
+      shift 2
+      ;;
+    --layers)
+      LAYERS="$2"
+      shift 2
+      ;;
+    --hidden)
+      HIDDEN="$2"
+      shift 2
+      ;;
+    --kv-len|--history-len)
+      KV_LEN="$2"
+      shift 2
+      ;;
+    --num-users)
+      NUM_USERS="$2"
+      shift 2
+      ;;
+    --users-per-batch)
+      USERS_PER_BATCH="$2"
+      shift 2
+      ;;
+    --candidates-per-user)
+      CANDIDATES_PER_USER="$2"
+      shift 2
+      ;;
+    --macro-batch-size)
+      MACRO_BATCH_SIZE="$2"
+      shift 2
+      ;;
+    --vocab)
+      VOCAB="$2"
+      shift 2
+      ;;
+    --seed)
+      SEED="$2"
+      shift 2
+      ;;
+    --op-modeling)
+      OP_MODELING="$2"
+      shift 2
+      ;;
+    --log-level)
+      LOG_LEVEL="$2"
       shift 2
       ;;
     -h|--help)
@@ -61,7 +123,9 @@ case "${SOURCE_MEDIUM}" in
     ;;
 esac
 
-BASE_CONFIG="configs/910c_mini_${SOURCE_MEDIUM}.json"
+if [[ -z "${BASE_CONFIG}" ]]; then
+  BASE_CONFIG="configs/910c_mini_${SOURCE_MEDIUM}.json"
+fi
 if [[ ! -f "${BASE_CONFIG}" ]]; then
   echo "Base config not found: ${BASE_CONFIG}" >&2
   exit 1
@@ -134,7 +198,7 @@ PY
   --config "${RUNTIME_CONFIG}" \
   --models_list "${MODELS_JSON}" \
   --mode trace \
-  --log_level info \
+  --log_level "${LOG_LEVEL}" \
   > "${LOG_PATH}" 2>&1
 
 python3 scripts/plot_pipeline_timeline.py \
