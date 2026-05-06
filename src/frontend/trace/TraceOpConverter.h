@@ -32,6 +32,7 @@ class TraceOpConverter {
 	  static ConvertedOp convert_view(const OpEntry& entry);
 	  static ConvertedOp convert_softmax(const OpEntry& entry);
   static ConvertedOp convert_embedding(const OpEntry& entry);
+  static ConvertedOp convert_hstu_attention(const OpEntry& entry);
   static ConvertedOp convert_dummy(const OpEntry& entry);
 
 	  static std::string shape_to_str(const std::vector<uint32_t>& shape);

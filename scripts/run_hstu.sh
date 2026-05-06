@@ -24,6 +24,9 @@ Options:
   --vocab N                    Embedding vocabulary size
   --seed N                     Random seed
   --op-modeling SPEC           Operator modeling modes, e.g. split=materialize,view=materialize,concat=materialize
+  --attention-modeling MODE     Attention modeling mode: decomposed or fused. Default: decomposed
+  --enable-kv-reuse             Enable KV row reuse metadata in generated traces
+  --kv-reuse-variant MODE       KV reuse variant: global or window_topk. Default: window_topk
   --log-level LEVEL            Simulator log level. Default: info
   -h, --help                  Show this message
 EOF
@@ -43,6 +46,15 @@ MACRO_BATCH_SIZE="${MACRO_BATCH_SIZE:-1024}"
 VOCAB="${VOCAB:-65536}"
 SEED="${SEED:-1234}"
 OP_MODELING="${OP_MODELING:-split=materialize,view=materialize,concat=materialize}"
+ATTENTION_MODELING="${ATTENTION_MODELING:-decomposed}"
+ENABLE_KV_REUSE="${ENABLE_KV_REUSE:-0}"
+KV_REUSE_VARIANT="${KV_REUSE_VARIANT:-window_topk}"
+KV_REUSE_ACTION_COUNT="${KV_REUSE_ACTION_COUNT:-4}"
+KV_REUSE_WINDOW_SIZE="${KV_REUSE_WINDOW_SIZE:-1024}"
+KV_REUSE_TOPK="${KV_REUSE_TOPK:-4}"
+KV_REUSE_HOT_SHARE="${KV_REUSE_HOT_SHARE:-0.75}"
+KV_REUSE_ACTION_OFFSET="${KV_REUSE_ACTION_OFFSET:-1}"
+KV_REUSE_ACTION_STRIDE="${KV_REUSE_ACTION_STRIDE:-2}"
 LOG_LEVEL="${LOG_LEVEL:-info}"
 
 while [[ $# -gt 0 ]]; do
@@ -99,6 +111,42 @@ while [[ $# -gt 0 ]]; do
       OP_MODELING="$2"
       shift 2
       ;;
+    --attention-modeling)
+      ATTENTION_MODELING="$2"
+      shift 2
+      ;;
+    --enable-kv-reuse)
+      ENABLE_KV_REUSE=1
+      shift
+      ;;
+    --kv-reuse-variant)
+      KV_REUSE_VARIANT="$2"
+      shift 2
+      ;;
+    --kv-reuse-action-count)
+      KV_REUSE_ACTION_COUNT="$2"
+      shift 2
+      ;;
+    --kv-reuse-window-size)
+      KV_REUSE_WINDOW_SIZE="$2"
+      shift 2
+      ;;
+    --kv-reuse-topk)
+      KV_REUSE_TOPK="$2"
+      shift 2
+      ;;
+    --kv-reuse-hot-share)
+      KV_REUSE_HOT_SHARE="$2"
+      shift 2
+      ;;
+    --kv-reuse-action-offset)
+      KV_REUSE_ACTION_OFFSET="$2"
+      shift 2
+      ;;
+    --kv-reuse-action-stride)
+      KV_REUSE_ACTION_STRIDE="$2"
+      shift 2
+      ;;
     --log-level)
       LOG_LEVEL="$2"
       shift 2
@@ -119,6 +167,14 @@ case "${SOURCE_MEDIUM}" in
   ddr|ssd) ;;
   *)
     echo "Invalid --source-medium: ${SOURCE_MEDIUM}" >&2
+    exit 1
+    ;;
+esac
+
+case "${ATTENTION_MODELING}" in
+  decomposed|fused) ;;
+  *)
+    echo "Invalid --attention-modeling: ${ATTENTION_MODELING}" >&2
     exit 1
     ;;
 esac
@@ -147,7 +203,6 @@ if [[ -d "${RESULT_DIR}" ]]; then
 fi
 mkdir -p "${RESULT_DIR}"
 
-# --enable-kv-reuse
 TRACE_ARGS=(
   --pipeline
   --compact-json
@@ -162,9 +217,21 @@ TRACE_ARGS=(
   --candidates-per-user "${CANDIDATES_PER_USER}"
   --macro-batch-size "${MACRO_BATCH_SIZE}"
   --op-modeling "${OP_MODELING}"
+  --attention-modeling "${ATTENTION_MODELING}"
+  --kv-reuse-variant "${KV_REUSE_VARIANT}"
+  --kv-reuse-action-count "${KV_REUSE_ACTION_COUNT}"
+  --kv-reuse-window-size "${KV_REUSE_WINDOW_SIZE}"
+  --kv-reuse-topk "${KV_REUSE_TOPK}"
+  --kv-reuse-hot-share "${KV_REUSE_HOT_SHARE}"
+  --kv-reuse-action-offset "${KV_REUSE_ACTION_OFFSET}"
+  --kv-reuse-action-stride "${KV_REUSE_ACTION_STRIDE}"
   --output "${TRACE_DIR}"
   --models-list "${MODELS_JSON}"
 )
+
+if [[ "${ENABLE_KV_REUSE}" == "1" ]]; then
+  TRACE_ARGS+=(--enable-kv-reuse)
+fi
 
 python3 scripts/generate_hstu_baseline_trace.py "${TRACE_ARGS[@]}"
 

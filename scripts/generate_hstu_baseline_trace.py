@@ -329,6 +329,7 @@ def build_trace(
     indices_values=None,
     model_name="hstu_8layer_baseline_small",
     op_modeling=None,
+    attention_modeling="decomposed",
     pipeline_enabled=False,
     kv_reuse_enabled=False,
     kv_reuse_variant="window_topk",
@@ -471,73 +472,110 @@ def build_trace(
             ],
             {"axis": 1, **op_modeling_attrs(op_modeling, "split")},
         )
-        add_op(
-            ops,
-            "aten::cat",
-            [
-                source_to_hbm_tensor(
-                    source_medium,
-                    k_cache,
-                    [kv_len, hidden],
-                    logical_id=f"user{user_id}.{shared_layer}.kc",
-                    role="kv_cache_k",
-                    **(kv_reuse_meta or {}),
-                    **layer_meta,
-                ),
-                hbm_tensor(k, [tokens, hidden], role="activation", **layer_meta),
-            ],
-            [hbm_tensor(k_all, [kv_len + tokens, hidden], role="activation", **layer_meta)],
-            {"axis": 0, **op_modeling_attrs(op_modeling, "concat")},
-        )
-        add_op(
-            ops,
-            "aten::transpose",
-            [hbm_tensor(k_all, [kv_len + tokens, hidden], role="activation", **layer_meta)],
-            [hbm_tensor(k_all_t, [hidden, kv_len + tokens], role="activation", **layer_meta)],
-            {"dims": "1,0", **op_modeling_attrs(op_modeling, "view")},
-        )
-        add_op(
-            ops,
-            "aten::matmul",
-            [
-                hbm_tensor(q, [tokens, hidden], role="activation", **layer_meta),
-                hbm_tensor(k_all_t, [hidden, kv_len + tokens], role="activation", **layer_meta),
-            ],
-            [hbm_tensor(score, [tokens, kv_len + tokens], role="activation", **layer_meta)],
-        )
-        add_op(
-            ops,
-            "aten::silu",
-            [hbm_tensor(score, [tokens, kv_len + tokens], role="activation", **layer_meta)],
-            [hbm_tensor(attn, [tokens, kv_len + tokens], role="activation", **layer_meta)],
-        )
-        add_op(
-            ops,
-            "aten::cat",
-            [
-                source_to_hbm_tensor(
-                    source_medium,
-                    v_cache,
-                    [kv_len, hidden],
-                    logical_id=f"user{user_id}.{shared_layer}.vc",
-                    role="kv_cache_v",
-                    **(kv_reuse_meta or {}),
-                    **layer_meta,
-                ),
-                hbm_tensor(v, [tokens, hidden], role="activation", **layer_meta),
-            ],
-            [hbm_tensor(v_all, [kv_len + tokens, hidden], role="activation", **layer_meta)],
-            {"axis": 0, **op_modeling_attrs(op_modeling, "concat")},
-        )
-        add_op(
-            ops,
-            "aten::matmul",
-            [
-                hbm_tensor(attn, [tokens, kv_len + tokens], role="activation", **layer_meta),
-                hbm_tensor(v_all, [kv_len + tokens, hidden], role="activation", **layer_meta),
-            ],
-            [hbm_tensor(av, [tokens, hidden], role="activation", **layer_meta)],
-        )
+        if attention_modeling == "fused":
+            add_op(
+                ops,
+                "hstu::attention",
+                [
+                    hbm_tensor(q, [tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(k, [tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(v, [tokens, hidden], role="activation", **layer_meta),
+                    source_to_hbm_tensor(
+                        source_medium,
+                        k_cache,
+                        [kv_len, hidden],
+                        logical_id=f"user{user_id}.{shared_layer}.kc",
+                        role="kv_cache_k",
+                        **(kv_reuse_meta or {}),
+                        **layer_meta,
+                    ),
+                    source_to_hbm_tensor(
+                        source_medium,
+                        v_cache,
+                        [kv_len, hidden],
+                        logical_id=f"user{user_id}.{shared_layer}.vc",
+                        role="kv_cache_v",
+                        **(kv_reuse_meta or {}),
+                        **layer_meta,
+                    ),
+                ],
+                [hbm_tensor(av, [tokens, hidden], role="activation", **layer_meta)],
+                {
+                    "kv_axis": 0,
+                    "logical_kv_len": kv_len + tokens,
+                    "current_tokens": tokens,
+                    "hidden": hidden,
+                    "batch_size": 1,
+                },
+            )
+        else:
+            add_op(
+                ops,
+                "aten::cat",
+                [
+                    source_to_hbm_tensor(
+                        source_medium,
+                        k_cache,
+                        [kv_len, hidden],
+                        logical_id=f"user{user_id}.{shared_layer}.kc",
+                        role="kv_cache_k",
+                        **(kv_reuse_meta or {}),
+                        **layer_meta,
+                    ),
+                    hbm_tensor(k, [tokens, hidden], role="activation", **layer_meta),
+                ],
+                [hbm_tensor(k_all, [kv_len + tokens, hidden], role="activation", **layer_meta)],
+                {"axis": 0, **op_modeling_attrs(op_modeling, "concat")},
+            )
+            add_op(
+                ops,
+                "aten::transpose",
+                [hbm_tensor(k_all, [kv_len + tokens, hidden], role="activation", **layer_meta)],
+                [hbm_tensor(k_all_t, [hidden, kv_len + tokens], role="activation", **layer_meta)],
+                {"dims": "1,0", **op_modeling_attrs(op_modeling, "view")},
+            )
+            add_op(
+                ops,
+                "aten::matmul",
+                [
+                    hbm_tensor(q, [tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(k_all_t, [hidden, kv_len + tokens], role="activation", **layer_meta),
+                ],
+                [hbm_tensor(score, [tokens, kv_len + tokens], role="activation", **layer_meta)],
+            )
+            add_op(
+                ops,
+                "aten::silu",
+                [hbm_tensor(score, [tokens, kv_len + tokens], role="activation", **layer_meta)],
+                [hbm_tensor(attn, [tokens, kv_len + tokens], role="activation", **layer_meta)],
+            )
+            add_op(
+                ops,
+                "aten::cat",
+                [
+                    source_to_hbm_tensor(
+                        source_medium,
+                        v_cache,
+                        [kv_len, hidden],
+                        logical_id=f"user{user_id}.{shared_layer}.vc",
+                        role="kv_cache_v",
+                        **(kv_reuse_meta or {}),
+                        **layer_meta,
+                    ),
+                    hbm_tensor(v, [tokens, hidden], role="activation", **layer_meta),
+                ],
+                [hbm_tensor(v_all, [kv_len + tokens, hidden], role="activation", **layer_meta)],
+                {"axis": 0, **op_modeling_attrs(op_modeling, "concat")},
+            )
+            add_op(
+                ops,
+                "aten::matmul",
+                [
+                    hbm_tensor(attn, [tokens, kv_len + tokens], role="activation", **layer_meta),
+                    hbm_tensor(v_all, [kv_len + tokens, hidden], role="activation", **layer_meta),
+                ],
+                [hbm_tensor(av, [tokens, hidden], role="activation", **layer_meta)],
+            )
         add_op(
             ops,
             "aten::layer_norm",
@@ -619,6 +657,7 @@ def build_trace(
             "kv_reuse_enabled": kv_reuse_enabled,
             "random_seed": seed,
             "op_modeling": op_modeling,
+            "attention_modeling": attention_modeling,
             "source_medium": source_medium,
             "kv_reuse_variant": kv_reuse_variant,
             "kv_reuse_action_count": kv_reuse_action_count,
@@ -644,6 +683,7 @@ def build_batched_trace(
     indices_values_per_user=None,
     model_name="hstu_batched_baseline_small",
     op_modeling=None,
+    attention_modeling="decomposed",
     pipeline_enabled=False,
     kv_reuse_enabled=False,
     kv_reuse_variant="window_topk",
@@ -861,127 +901,166 @@ def build_batched_trace(
             ],
             {"axis": 2, **op_modeling_attrs(op_modeling, "split")},
         )
-        add_op(
-            ops,
-            "aten::cat",
-            [
-                source_to_hbm_tensor(
-                    source_medium,
-                    k_cache,
-                    [batch_size, kv_len, hidden],
-                    logical_id=f"batch{batch_id}.{shared_layer}.kc",
-                    role="kv_cache_k_batch",
-                    user_ids=user_ids,
-                    **kv_reuse_meta,
-                    **layer_meta,
-                ),
-                hbm_tensor(k, [batch_size, tokens, hidden], role="activation", **layer_meta),
-            ],
-            [
-                hbm_tensor(
-                    k_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
-                )
-            ],
-            {"axis": 1, **op_modeling_attrs(op_modeling, "concat")},
-        )
-        add_op(
-            ops,
-            "aten::transpose",
-            [
-                hbm_tensor(
-                    k_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
-                )
-            ],
-            [
-                hbm_tensor(
-                    k_all_t,
-                    [batch_size, hidden, kv_len + tokens],
-                    role="activation",
-                    **layer_meta,
-                )
-            ],
-            {"dims": "0,2,1", **op_modeling_attrs(op_modeling, "view")},
-        )
-        add_op(
-            ops,
-            "aten::matmul",
-            [
-                hbm_tensor(q, [batch_size, tokens, hidden], role="activation", **layer_meta),
-                hbm_tensor(
-                    k_all_t,
-                    [batch_size, hidden, kv_len + tokens],
-                    role="activation",
-                    **layer_meta,
-                ),
-            ],
-            [
-                hbm_tensor(
-                    score,
-                    [batch_size, tokens, kv_len + tokens],
-                    role="activation",
-                    **layer_meta,
-                )
-            ],
-        )
-        add_op(
-            ops,
-            "aten::silu",
-            [
-                hbm_tensor(
-                    score,
-                    [batch_size, tokens, kv_len + tokens],
-                    role="activation",
-                    **layer_meta,
-                )
-            ],
-            [
-                hbm_tensor(
-                    attn,
-                    [batch_size, tokens, kv_len + tokens],
-                    role="activation",
-                    **layer_meta,
-                )
-            ],
-        )
-        add_op(
-            ops,
-            "aten::cat",
-            [
-                source_to_hbm_tensor(
-                    source_medium,
-                    v_cache,
-                    [batch_size, kv_len, hidden],
-                    logical_id=f"batch{batch_id}.{shared_layer}.vc",
-                    role="kv_cache_v_batch",
-                    user_ids=user_ids,
-                    **kv_reuse_meta,
-                    **layer_meta,
-                ),
-                hbm_tensor(v, [batch_size, tokens, hidden], role="activation", **layer_meta),
-            ],
-            [
-                hbm_tensor(
-                    v_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
-                )
-            ],
-            {"axis": 1, **op_modeling_attrs(op_modeling, "concat")},
-        )
-        add_op(
-            ops,
-            "aten::matmul",
-            [
-                hbm_tensor(
-                    attn,
-                    [batch_size, tokens, kv_len + tokens],
-                    role="activation",
-                    **layer_meta,
-                ),
-                hbm_tensor(
-                    v_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
-                ),
-            ],
-            [hbm_tensor(av, [batch_size, tokens, hidden], role="activation", **layer_meta)],
-        )
+        if attention_modeling == "fused":
+            add_op(
+                ops,
+                "hstu::attention",
+                [
+                    hbm_tensor(q, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(k, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(v, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                    source_to_hbm_tensor(
+                        source_medium,
+                        k_cache,
+                        [batch_size, kv_len, hidden],
+                        logical_id=f"batch{batch_id}.{shared_layer}.kc",
+                        role="kv_cache_k_batch",
+                        user_ids=user_ids,
+                        **kv_reuse_meta,
+                        **layer_meta,
+                    ),
+                    source_to_hbm_tensor(
+                        source_medium,
+                        v_cache,
+                        [batch_size, kv_len, hidden],
+                        logical_id=f"batch{batch_id}.{shared_layer}.vc",
+                        role="kv_cache_v_batch",
+                        user_ids=user_ids,
+                        **kv_reuse_meta,
+                        **layer_meta,
+                    ),
+                ],
+                [hbm_tensor(av, [batch_size, tokens, hidden], role="activation", **layer_meta)],
+                {
+                    "kv_axis": 1,
+                    "logical_kv_len": kv_len + tokens,
+                    "current_tokens": tokens,
+                    "hidden": hidden,
+                    "batch_size": batch_size,
+                },
+            )
+        else:
+            add_op(
+                ops,
+                "aten::cat",
+                [
+                    source_to_hbm_tensor(
+                        source_medium,
+                        k_cache,
+                        [batch_size, kv_len, hidden],
+                        logical_id=f"batch{batch_id}.{shared_layer}.kc",
+                        role="kv_cache_k_batch",
+                        user_ids=user_ids,
+                        **kv_reuse_meta,
+                        **layer_meta,
+                    ),
+                    hbm_tensor(k, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                ],
+                [
+                    hbm_tensor(
+                        k_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
+                    )
+                ],
+                {"axis": 1, **op_modeling_attrs(op_modeling, "concat")},
+            )
+            add_op(
+                ops,
+                "aten::transpose",
+                [
+                    hbm_tensor(
+                        k_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
+                    )
+                ],
+                [
+                    hbm_tensor(
+                        k_all_t,
+                        [batch_size, hidden, kv_len + tokens],
+                        role="activation",
+                        **layer_meta,
+                    )
+                ],
+                {"dims": "0,2,1", **op_modeling_attrs(op_modeling, "view")},
+            )
+            add_op(
+                ops,
+                "aten::matmul",
+                [
+                    hbm_tensor(q, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(
+                        k_all_t,
+                        [batch_size, hidden, kv_len + tokens],
+                        role="activation",
+                        **layer_meta,
+                    ),
+                ],
+                [
+                    hbm_tensor(
+                        score,
+                        [batch_size, tokens, kv_len + tokens],
+                        role="activation",
+                        **layer_meta,
+                    )
+                ],
+            )
+            add_op(
+                ops,
+                "aten::silu",
+                [
+                    hbm_tensor(
+                        score,
+                        [batch_size, tokens, kv_len + tokens],
+                        role="activation",
+                        **layer_meta,
+                    )
+                ],
+                [
+                    hbm_tensor(
+                        attn,
+                        [batch_size, tokens, kv_len + tokens],
+                        role="activation",
+                        **layer_meta,
+                    )
+                ],
+            )
+            add_op(
+                ops,
+                "aten::cat",
+                [
+                    source_to_hbm_tensor(
+                        source_medium,
+                        v_cache,
+                        [batch_size, kv_len, hidden],
+                        logical_id=f"batch{batch_id}.{shared_layer}.vc",
+                        role="kv_cache_v_batch",
+                        user_ids=user_ids,
+                        **kv_reuse_meta,
+                        **layer_meta,
+                    ),
+                    hbm_tensor(v, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                ],
+                [
+                    hbm_tensor(
+                        v_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
+                    )
+                ],
+                {"axis": 1, **op_modeling_attrs(op_modeling, "concat")},
+            )
+            add_op(
+                ops,
+                "aten::matmul",
+                [
+                    hbm_tensor(
+                        attn,
+                        [batch_size, tokens, kv_len + tokens],
+                        role="activation",
+                        **layer_meta,
+                    ),
+                    hbm_tensor(
+                        v_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
+                    ),
+                ],
+                [hbm_tensor(av, [batch_size, tokens, hidden], role="activation", **layer_meta)],
+            )
         add_op(
             ops,
             "aten::layer_norm",
@@ -1068,7 +1147,15 @@ def build_batched_trace(
             "kv_reuse_enabled": kv_reuse_enabled,
             "random_seed": seed,
             "op_modeling": op_modeling,
+            "attention_modeling": attention_modeling,
             "source_medium": source_medium,
+            "kv_reuse_variant": kv_reuse_variant,
+            "kv_reuse_action_count": kv_reuse_action_count,
+            "kv_reuse_window_size": kv_reuse_window_size,
+            "kv_reuse_topk": kv_reuse_topk,
+            "kv_reuse_hot_share": kv_reuse_hot_share,
+            "kv_reuse_action_offset": kv_reuse_action_offset,
+            "kv_reuse_action_stride": kv_reuse_action_stride,
         },
         "operators": ops,
     }
@@ -1120,6 +1207,7 @@ def write_single_trace(args, op_modeling):
         indices_values=indices,
         model_name="hstu_8layer_baseline_small",
         op_modeling=op_modeling,
+        attention_modeling=args.attention_modeling,
         pipeline_enabled=args.pipeline,
         kv_reuse_enabled=args.enable_kv_reuse,
         kv_reuse_variant=args.kv_reuse_variant,
@@ -1176,6 +1264,7 @@ def write_pipeline_traces(args, op_modeling):
                 indices_values_per_user=indices_values_per_user,
                 model_name=model_name,
                 op_modeling=op_modeling,
+                attention_modeling=args.attention_modeling,
                 pipeline_enabled=True,
                 kv_reuse_enabled=args.enable_kv_reuse,
                 kv_reuse_variant=args.kv_reuse_variant,
@@ -1221,6 +1310,7 @@ def write_pipeline_traces(args, op_modeling):
                 "batch_policy": args.batch_policy,
                 "random_seed": args.seed,
                 "op_modeling": op_modeling,
+                "attention_modeling": args.attention_modeling,
                 "shared_trace": False,
                 "kv_reuse_enabled": args.enable_kv_reuse,
                 "kv_reuse_variant": args.kv_reuse_variant,
@@ -1334,6 +1424,12 @@ def main():
         "--op-modeling",
         default="",
         help="Comma-separated op modes, e.g. split=skip,view=skip,concat=materialize",
+    )
+    parser.add_argument(
+        "--attention-modeling",
+        choices=["decomposed", "fused"],
+        default="decomposed",
+        help="Use decomposed HSTU attention subgraph or one reuse-aware fused attention op.",
     )
     args = parser.parse_args()
 

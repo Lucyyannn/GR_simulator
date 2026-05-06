@@ -82,6 +82,9 @@ ConvertedOp TraceOpConverter::convert(const OpEntry& entry) {
     return convert_softmax(entry);
   if (name == "aten::embedding" || name == "embedding")
     return convert_embedding(entry);
+  if (name == "hstu::attention" || name == "hstu_attention" ||
+      name == "HSTUAttention")
+    return convert_hstu_attention(entry);
 
   spdlog::debug("[TraceOpConverter] Unknown op '{}' -> Dummy", name);
   return convert_dummy(entry);
@@ -417,6 +420,26 @@ ConvertedOp TraceOpConverter::convert_softmax(const OpEntry& entry) {
   if (sm.attrs.find("dim") == sm.attrs.end())
     sm.attrs["dim"] = "-1";
   return sm;
+}
+
+ConvertedOp TraceOpConverter::convert_hstu_attention(const OpEntry& entry) {
+  ConvertedOp attn;
+  attn.optype = "HSTUAttention";
+  attn.attrs = entry.attrs;
+
+  if (entry.inputs.size() >= 5) {
+    attn.attrs["q_shape"] = shape_to_str(entry.inputs[0].shape);
+    attn.attrs["k_shape"] = shape_to_str(entry.inputs[1].shape);
+    attn.attrs["v_shape"] = shape_to_str(entry.inputs[2].shape);
+    attn.attrs["k_cache_shape"] = shape_to_str(entry.inputs[3].shape);
+    attn.attrs["v_cache_shape"] = shape_to_str(entry.inputs[4].shape);
+  }
+  if (!entry.outputs.empty()) {
+    attn.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    attn.attrs["output_name"] = entry.outputs[0].name;
+  }
+  if (!attn.attrs.count("kv_axis")) attn.attrs["kv_axis"] = "1";
+  return attn;
 }
 
 ConvertedOp TraceOpConverter::convert_dummy(const OpEntry& entry) {

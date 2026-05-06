@@ -173,7 +173,7 @@
     "channels" : 64,
     "req_size" : 32,
     "nbl" : 1,
-    "size_gb" : 64,
+    "size_gb" : 128,
     "address_base" : "0x0",
     "config_path" : "../configs/ramulator2_configs/HBM2.yaml"
   },
@@ -186,7 +186,7 @@
     "nbl" : 1,
     "size_gb" : 768,
     "address_base" : "0x2000000000",
-    "config_path" : "../configs/ramulator2_configs/DDR4.yaml"
+    "config_path" : "../configs/ramulator2_configs/DDR5.yaml"
   },
 
   "placement" : {

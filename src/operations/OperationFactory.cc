@@ -16,6 +16,7 @@
 #include "Embedding.h"
 #include "Elementwise.h"
 #include "EmbedLayerNorm.h"
+#include "HSTUAttention.h"
 #include "LayerNorm.h"
 #include "SkipLayerNorm.h"
 #include "BiasAct.h"
@@ -97,6 +98,8 @@ std::unique_ptr<Operation> OperationFactory::copy_operation(Operation* op) {
     return std::make_unique<Flatten>(*dynamic_cast<Flatten*>(op));
   } else if (op->get_optype() == "Attention") {
     return std::make_unique<Attention>(*dynamic_cast<Attention*>(op));
+  } else if (op->get_optype() == "HSTUAttention") {
+    return std::make_unique<HSTUAttention>(*dynamic_cast<HSTUAttention*>(op));
   } else if (op->get_optype() == "Cast") {
     return std::make_unique<Dummy>(*dynamic_cast<Dummy*>(op));
   } else if (op->get_optype() == "EmbedLayerNormalization") {
@@ -157,6 +160,8 @@ std::unique_ptr<Operation> OperationFactory::create_from_trace(
     return std::make_unique<BiasAct>(_config, model, entry.name, attrs, target_core);
   } else if (optype == "Softmax") {
     return std::make_unique<Softmax>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "HSTUAttention") {
+    return std::make_unique<HSTUAttention>(_config, model, entry.name, attrs, target_core);
   }
 
   spdlog::warn("[TraceOpConverter] optype \"{}\" (from \"{}\") returned Dummy",
