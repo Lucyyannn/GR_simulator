@@ -17,6 +17,7 @@ Options:
   --layers N                   HSTU layer count
   --hidden N                   Hidden dimension
   --kv-len N                   Historical KV length
+  --history-recompute-len N     Tail history rows recomputed from embedding instead of KV cache. Default: 0
   --num-users N                Number of users in the generated workload
   --users-per-batch N          Users per batch
   --candidates-per-user N      Candidates per user
@@ -39,6 +40,7 @@ RESULT_DIR=""
 LAYERS="${LAYERS:-4}"
 HIDDEN="${HIDDEN:-256}"
 KV_LEN="${KV_LEN:-1024}"
+HISTORY_RECOMPUTE_LEN="${HISTORY_RECOMPUTE_LEN:-0}"
 NUM_USERS="${NUM_USERS:-8}"
 USERS_PER_BATCH="${USERS_PER_BATCH:-4}"
 CANDIDATES_PER_USER="${CANDIDATES_PER_USER:-2048}"
@@ -81,6 +83,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --kv-len|--history-len)
       KV_LEN="$2"
+      shift 2
+      ;;
+    --history-recompute-len)
+      HISTORY_RECOMPUTE_LEN="$2"
       shift 2
       ;;
     --num-users)
@@ -210,6 +216,7 @@ TRACE_ARGS=(
   --layers "${LAYERS}"
   --hidden "${HIDDEN}"
   --kv-len "${KV_LEN}"
+  --history-recompute-len "${HISTORY_RECOMPUTE_LEN}"
   --vocab "${VOCAB}"
   --seed "${SEED}"
   --num-users "${NUM_USERS}"

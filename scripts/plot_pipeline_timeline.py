@@ -11,20 +11,41 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
+def macro_label(row):
+    model = row.get("model", "")
+    if model:
+        return model
+    batch_id = row.get("batch_id", "")
+    macro_batch_id = row.get("macro_batch_id", "")
+    if batch_id or macro_batch_id:
+        return f"b{batch_id or '?'}_m{macro_batch_id or '?'}"
+    return "macro"
+
+
+def display_phase(row):
+    phase = row.get("phase", "") or "other"
+    if row.get("pipe") != "preload":
+        return phase
+    if phase in {"pre_attention", "candidate_embedding", "kvcache"}:
+        return "pre_attention"
+    if phase in {"post_attention", "post_attention_weights", "weights"}:
+        return "post_attention"
+    return "pre_attention"
+
+
 def load_rows(path):
     with open(path, "r", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
 
 
 def label_for(row):
-    model = row["model"]
-    layer = row["layer_id"]
     pipe = row["pipe"]
     if pipe == "preload":
-        return f"{model}:preload"
+        return f"{macro_label(row)}:preload"
+    layer = row.get("layer_id", "")
     if layer and layer != "-1":
-        return f"{model}:L{layer}:compute"
-    return f"{model}:compute"
+        return f"{macro_label(row)}:L{layer}:compute"
+    return f"{macro_label(row)}:compute"
 
 
 def plot_timeline(csv_path, output_path):
@@ -34,6 +55,12 @@ def plot_timeline(csv_path, output_path):
         for row in rows
         if row.get("pipe") in {"preload", "compute"}
         and not (row.get("pipe") == "preload" and row.get("phase") == "stage")
+        and not (
+            row.get("pipe") == "compute"
+            and row.get("phase") == "op"
+            and row.get("name") == "aten::embedding"
+            and float(row.get("duration_us", "0") or 0) < 0.01
+        )
         and float(row.get("duration_us", "0") or 0) >= 0
     ]
     if not rows:
@@ -51,8 +78,11 @@ def plot_timeline(csv_path, output_path):
     fig, ax = plt.subplots(figsize=(12, height))
     colors = {
         "stage": "#4477aa",
+        "pre_attention": "#dd8452",
         "candidate_embedding": "#dd8452",
         "kvcache": "#55a868",
+        "post_attention": "#c44e52",
+        "post_attention_weights": "#c44e52",
         "weights": "#c44e52",
         "other": "#8172b2",
         "op": "#999999",
@@ -68,7 +98,7 @@ def plot_timeline(csv_path, output_path):
             ax.broken_barh(
                 [(start, duration)],
                 (lane - 0.35, 0.7),
-                facecolors=colors.get(row.get("phase", ""), "#888888"),
+                facecolors=colors.get(display_phase(row), "#888888"),
                 edgecolors="black",
                 linewidth=0.35,
             )
@@ -76,13 +106,11 @@ def plot_timeline(csv_path, output_path):
     ax.set_yticks(range(len(labels)))
     ax.set_yticklabels(labels, fontsize=8)
     ax.set_xlabel("simulation time (us)")
-    ax.set_title("Layer Preload / Core Phase Timeline")
+    ax.set_title("Macrobatch Preload / Layer Compute Timeline")
     ax.grid(axis="x", linestyle="--", alpha=0.35)
     handles = [
-        plt.Rectangle((0, 0), 1, 1, color=colors["stage"], label="preload stage"),
-        plt.Rectangle((0, 0), 1, 1, color=colors["candidate_embedding"], label="candidate embedding"),
-        plt.Rectangle((0, 0), 1, 1, color=colors["kvcache"], label="KVCache"),
-        plt.Rectangle((0, 0), 1, 1, color=colors["weights"], label="weights"),
+        plt.Rectangle((0, 0), 1, 1, color=colors["pre_attention"], label="pre-attention preload"),
+        plt.Rectangle((0, 0), 1, 1, color=colors["post_attention_weights"], label="post-attention preload"),
         plt.Rectangle((0, 0), 1, 1, color=colors["op"], label="op span"),
         plt.Rectangle((0, 0), 1, 1, color=colors["movin"], label="MOVIN"),
     ]

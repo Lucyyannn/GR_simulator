@@ -23,6 +23,7 @@ struct TensorEntry {
   std::vector<uint32_t> reuse_physical_rows_per_user;
   std::vector<std::vector<uint32_t>> reuse_logical_to_physical_per_user;
   std::string role;
+  std::string preload_group;
   std::string initial_medium;
   std::string runtime_medium;
   uint32_t layer_id = 0;

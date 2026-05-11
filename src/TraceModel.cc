@@ -236,6 +236,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
                         ".user" + std::to_string(user_id) +
                         ".embedding_rows",
           .role = entry.role,
+          .preload_group = entry.preload_group,
           .source = initial_medium,
           .destination = runtime_medium,
           .src_addr = source_base,
@@ -252,6 +253,23 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
           b < entry.indices_values_per_user.size()
               ? entry.indices_values_per_user[b]
               : entry.indices_values;
+      auto add_segment = [&movement](addr_type src_addr, addr_type dst_addr,
+                                     uint64_t bytes) {
+        if (bytes == 0) return;
+        if (!movement.segments.empty()) {
+          auto& last = movement.segments.back();
+          if (last.src_addr + last.bytes == src_addr &&
+              last.dst_addr + last.bytes == dst_addr) {
+            last.bytes += bytes;
+            return;
+          }
+        }
+        movement.segments.push_back(PlannedDataMovement::Segment{
+            .src_addr = src_addr,
+            .dst_addr = dst_addr,
+            .bytes = bytes,
+        });
+      };
       for (uint32_t i = 0; i < rows_per_user; ++i) {
         uint32_t row = i;
         if (!per_user_indices.empty())
@@ -261,11 +279,9 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
                                      entry.indices_values.size()];
         if (!entry.source_shape.empty() && entry.source_shape[0] > 0)
           row %= entry.source_shape[0];
-        movement.segments.push_back(PlannedDataMovement::Segment{
-            .src_addr = source_base + static_cast<addr_type>(row) * row_bytes,
-            .dst_addr = movement.dst_addr + static_cast<addr_type>(i) * row_bytes,
-            .bytes = row_bytes,
-        });
+        add_segment(source_base + static_cast<addr_type>(row) * row_bytes,
+                    movement.dst_addr + static_cast<addr_type>(i) * row_bytes,
+                    row_bytes);
       }
       _data_movements.push_back(std::move(movement));
     }
@@ -308,6 +324,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
           .tensor_name = tensor->get_name(),
           .logical_id = source_id,
           .role = entry.role,
+          .preload_group = entry.preload_group,
           .source = initial_medium,
           .destination = runtime_medium,
           .src_addr = source_base + static_cast<addr_type>(row) * row_bytes,
@@ -401,6 +418,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
           .tensor_name = tensor->get_name(),
           .logical_id = logical_ids[b],
           .role = entry.role,
+          .preload_group = entry.preload_group,
           .source = initial_medium,
           .destination = runtime_medium,
           .src_addr = source_addr,
@@ -476,6 +494,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
             .tensor_name = tensor->get_name(),
             .logical_id = logical_id,
             .role = entry.role,
+            .preload_group = entry.preload_group,
             .source = initial_medium,
             .destination = runtime_medium,
             .src_addr = source_addr,
@@ -555,6 +574,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
           .tensor_name = tensor->get_name(),
           .logical_id = logical_id,
           .role = entry.role,
+          .preload_group = entry.preload_group,
           .source = initial_medium,
           .destination = runtime_medium,
           .src_addr = source_addr,
@@ -613,6 +633,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
         .tensor_name = tensor->get_name(),
         .logical_id = logical_id,
         .role = entry.role,
+        .preload_group = entry.preload_group,
         .source = initial_medium,
         .destination = runtime_medium,
         .src_addr = source_addr,
@@ -650,6 +671,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
       .tensor_name = tensor->get_name(),
       .logical_id = entry.logical_id,
       .role = entry.role,
+      .preload_group = entry.preload_group,
       .source = initial_medium,
       .destination = runtime_medium,
       .src_addr = source_addr,
@@ -1046,13 +1068,20 @@ std::string TraceModel::preload_type_for_role(const std::string& role) const {
   return role.empty() ? "other" : role;
 }
 
+std::string TraceModel::preload_type_for_movement(
+    const PlannedDataMovement& movement) const {
+  if (!movement.preload_group.empty()) return movement.preload_group;
+  return preload_type_for_role(movement.role);
+}
+
 void TraceModel::build_preload_stages() {
   _preload_stages.clear();
   _next_stage_to_submit = 0;
   if (!layer_preload_enabled() || _data_movements.empty()) return;
 
   const std::vector<std::string> preload_type_order = {
-      "candidate_embedding", "kvcache", "weights", "other"};
+      "pre_attention", "candidate_embedding", "kvcache",
+      "post_attention_weights", "weights", "other"};
   std::map<int32_t, std::vector<size_t>> movement_indices_by_layer;
   for (size_t movement_idx = 0; movement_idx < _data_movements.size();
        ++movement_idx) {
@@ -1070,7 +1099,7 @@ void TraceModel::build_preload_stages() {
     std::map<std::string, std::vector<size_t>> movement_indices_by_type;
     for (size_t movement_idx : movement_indices) {
       const auto& movement = _data_movements[movement_idx];
-      movement_indices_by_type[preload_type_for_role(movement.role)]
+      movement_indices_by_type[preload_type_for_movement(movement)]
           .push_back(movement_idx);
       if (movement.segments.empty()) {
         stage.physical_bytes += movement.bytes;
@@ -1106,8 +1135,10 @@ bool TraceModel::has_data_movement_stage_to_submit() const {
   if (_next_stage_to_submit >= _preload_stages.size()) return false;
   const auto& stage = _preload_stages[_next_stage_to_submit];
   if (stage.completed) return false;
-  for (const auto& subtask : stage.subtasks) {
-    if (subtask.submitted && !subtask.completed) return false;
+  if (!stage_compute_frontier_ready(stage)) {
+    for (const auto& subtask : stage.subtasks) {
+      if (subtask.submitted && !subtask.completed) return false;
+    }
   }
   return stage.next_subtask_to_submit < stage.subtasks.size();
 }
@@ -1236,7 +1267,7 @@ bool TraceModel::initial_data_movement_stage_ready(
   if (!uses_layer_preload()) return data_movements_ready(controller);
   if (_preload_stages.empty()) return true;
   const auto& stage = _preload_stages.front();
-  return stage.completed;
+  return stage.completed || !_executable_layer.empty();
 }
 
 void TraceModel::mark_stage_tensors_ready(const PreloadStage& stage) {
@@ -1245,6 +1276,21 @@ void TraceModel::mark_stage_tensors_ready(const PreloadStage& stage) {
     Tensor* tensor = get_tensor(movement.tensor_id);
     if (tensor != nullptr) tensor->set_produced();
   }
+}
+
+void TraceModel::mark_subtask_tensors_ready(const PreloadSubtask& subtask) {
+  for (size_t movement_idx : subtask.movement_indices) {
+    const auto& movement = _data_movements[movement_idx];
+    Tensor* tensor = get_tensor(movement.tensor_id);
+    if (tensor != nullptr) tensor->set_produced();
+  }
+}
+
+bool TraceModel::stage_compute_frontier_ready(
+    const PreloadStage& stage) const {
+  if (stage.subtasks.empty()) return true;
+  const PreloadSubtask& first_subtask = stage.subtasks.front();
+  return first_subtask.completed;
 }
 
 void TraceModel::refresh_executable_layers() {
@@ -1279,6 +1325,8 @@ bool TraceModel::complete_ready_data_movement_stages(
     ready_subtask->completed = true;
     ready_subtask->completed_time_ps = now_ps;
     complete_data_movements(controller);
+    mark_subtask_tensors_ready(*ready_subtask);
+    refresh_executable_layers();
     completed_any = true;
     append_preload_type_event(stage, *ready_subtask);
 

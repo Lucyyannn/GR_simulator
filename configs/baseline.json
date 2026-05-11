@@ -181,7 +181,7 @@
   "ddr" : {
     "enabled" : true,
     "freq" : 1600,
-    "channels" : 12,
+    "channels" : 16,
     "req_size" : 32,
     "nbl" : 1,
     "size_gb" : 768,
@@ -199,7 +199,22 @@
   "icnt_freq" : 1021,
   "icnt_injection_ports_per_core" : 3,
   "icnt_config_path" : "../configs/booksim2_configs/fly_c64_m32.icnt",
-
+  "ssd": {
+    "enabled": true,
+    "address_base": "0x800000000",
+    "capacity_bytes": "0x1000000000",
+    "nchs": 4,
+    "luns_per_ch": 4,
+    "secsz": 512,
+    "secs_per_pg": 8,
+    "pgs_per_blk": 256,
+    "blks_per_pl": 256,
+    "pls_per_lun": 1,
+    "pg_rd_lat": 40000,
+    "pg_wr_lat": 200000,
+    "blk_er_lat": 2000000,
+    "ch_xfer_lat": 0
+  },
   "precision" : 2,
   "layout" : "NHWC",
   "enable_fast_forward" : true,

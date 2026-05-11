@@ -20,7 +20,7 @@ int main(int argc, char** argv) {
   cmd_parser.add_command_line_option<std::string>(
       "models_list", "Path for the models list file");
   cmd_parser.add_command_line_option<std::string>(
-      "log_level", "Set for log level [trace, debug, info], default = info");
+      "log_level", "Set for log level [trace, debug, info, warn, error], default = info");
   cmd_parser.add_command_line_option<std::string>(
       "mode", "choose default or language mode, default = default");
   cmd_parser.add_command_line_option<std::string>(
@@ -53,6 +53,10 @@ int main(int argc, char** argv) {
     spdlog::set_level(spdlog::level::debug);
   else if (level == "info")
     spdlog::set_level(spdlog::level::info);
+  else if (level == "warn" || level == "warning")
+    spdlog::set_level(spdlog::level::warn);
+  else if (level == "error" || level == "err")
+    spdlog::set_level(spdlog::level::err);
 
   std::string config_path;
   cmd_parser.set_if_defined("config", &config_path);

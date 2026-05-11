@@ -9,8 +9,7 @@ example/trace_tests/*
 AGENTS.md
 PLAN.md
 baseline_flow.md
+task.md
 .codex
 detail.csv
 *.log
-kv_reuse_report/
-final_experiments/

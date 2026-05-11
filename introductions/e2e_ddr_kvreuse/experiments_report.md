@@ -73,9 +73,4 @@
 | 8192 | candidates_8192 | ok | ok | 15465.970 | 15191.831 | 1.773 | 3281.923 | 3283.063 | -0.035 | 9883.898 | 8833.941 | 10.623 | 640.000 | 545.000 | 14.844 | 5924.243 | 3727.522 | 37.080 | 256.000 | 161.000 | 37.109 |
 
 
-## Summary Observations
-
-1. 在 KV length sweep 中，KV Reuse 对 KV preload bytes 的降低稳定为约 37.1%，端到端时延改善随历史长度增大从 31.9% 提升到 36.3%。这说明在长历史序列下，KV 相关搬运逐渐成为更显著的系统瓶颈。
-2. 在 users-per-batch sweep 中，users/batch 从 1 增至 32 时，端到端改善保持在 33.6% 到 36.2% 区间，KV preload bytes 与 fused attention MOVIN bytes 均稳定下降。
-3. 在 candidates/macro-batch sweep 中，候选数从 512 增至 8192 时，KV preload bytes 仍稳定降低约 37.1%，但端到端改善从 35.6% 降至 1.8%。原因是候选规模增大后，当前候选相关计算和非 KV 数据搬运占比上升，KV Reuse 的收益更多体现为 KV preload 与 fused attention MOVIN 的局部改善，而不一定完全转化为端到端加速。
 

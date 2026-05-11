@@ -41,6 +41,7 @@ class HSTUAttention : public Operation {
   uint32_t _logical_kv_len = 0;
   uint32_t _current_tokens = 0;
   uint32_t _hidden = 0;
+  uint64_t _attention_score_elements = 0;
   uint64_t _dense_elements_per_tile = 1;
   uint32_t _kv_rows_per_tile = 1;
   uint64_t _output_elements_per_tile = 1;

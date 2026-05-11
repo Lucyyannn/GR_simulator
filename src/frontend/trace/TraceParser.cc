@@ -87,6 +87,7 @@ TensorEntry parse_tensor(const nlohmann::json& j) {
     }
   }
   entry.role = j.value("role", "");
+  entry.preload_group = j.value("preload_group", "");
   entry.initial_medium = j.value("initial_medium", "");
   entry.runtime_medium = j.value("runtime_medium", "");
   entry.layer_id = j.value("layer_id", 0);

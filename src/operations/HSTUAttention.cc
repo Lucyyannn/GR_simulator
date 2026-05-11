@@ -60,6 +60,8 @@ HSTUAttention::HSTUAttention(SimulationConfig config, Model* model,
   if (_attributes.count("current_tokens"))
     _current_tokens = std::stoul(get_attribute("current_tokens"));
   if (_attributes.count("hidden")) _hidden = std::stoul(get_attribute("hidden"));
+  if (_attributes.count("attention_score_elements"))
+    _attention_score_elements = std::stoull(get_attribute("attention_score_elements"));
 
   if (_logical_kv_len == 0 && _kv_axis < _k_cache_shape.size())
     _logical_kv_len = _k_cache_shape[_kv_axis] + _current_tokens;
@@ -86,6 +88,7 @@ HSTUAttention::HSTUAttention(const HSTUAttention& src) : Operation(src) {
   _logical_kv_len = src._logical_kv_len;
   _current_tokens = src._current_tokens;
   _hidden = src._hidden;
+  _attention_score_elements = src._attention_score_elements;
   _dense_elements_per_tile = src._dense_elements_per_tile;
   _kv_rows_per_tile = src._kv_rows_per_tile;
   _output_elements_per_tile = src._output_elements_per_tile;
@@ -176,8 +179,9 @@ void HSTUAttention::initialize_output_compute_tiles() {
   const uint64_t elements_total = product(output->get_dims());
   uint64_t batch_tokens = std::max<uint64_t>(1, elements_total /
       std::max<uint32_t>(_hidden, 1));
-  uint64_t score_elements =
-      batch_tokens * std::max<uint32_t>(_logical_kv_len, 1);
+  uint64_t score_elements = _attention_score_elements;
+  if (score_elements == 0)
+    score_elements = batch_tokens * std::max<uint32_t>(_logical_kv_len, 1);
   const uint64_t total_compute = std::max<uint64_t>(
       1, (elements_total + score_elements) *
              static_cast<uint64_t>(_config.precision));

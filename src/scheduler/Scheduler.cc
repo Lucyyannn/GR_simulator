@@ -282,8 +282,13 @@ void Scheduler::refresh_status() {
   bool all_empty = tile_queue_empty();
   if (!_request_queue.empty() && all_empty &&
       count_active_layers() == 0) {
-    spdlog::info("executable layer count {}",
-                 _request_queue.front().model->executable_layer_size());
+    const uint32_t executable_layers =
+        _request_queue.front().model->executable_layer_size();
+    if (executable_layers > 0) {
+      spdlog::info("executable layer count {}", executable_layers);
+    } else {
+      spdlog::debug("executable layer count 0");
+    }
     Operation* new_layer =
         _request_queue.front().model->get_executable_tile();
     /* Check executable layer exist */

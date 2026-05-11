@@ -55,6 +55,7 @@ class TraceModel : public Model {
     std::string tensor_name;
     std::string logical_id;
     std::string role;
+    std::string preload_group;
     MemoryMedium source = MemoryMedium::UNKNOWN;
     MemoryMedium destination = MemoryMedium::UNKNOWN;
     addr_type src_addr = 0;
@@ -154,6 +155,8 @@ class TraceModel : public Model {
 	  bool layer_preload_enabled() const;
 	  int32_t stage_layer_for_movement(const PlannedDataMovement& movement) const;
 	  std::string preload_type_for_role(const std::string& role) const;
+	  std::string preload_type_for_movement(
+	      const PlannedDataMovement& movement) const;
 	  int64_t residency_next_use_rank(int32_t layer_id) const;
 	  void note_residency_entry(const PlannedDataMovement& movement) const;
 	  void pin_resident_use(int32_t layer_id, const std::string& logical_id);
@@ -162,6 +165,8 @@ class TraceModel : public Model {
 	  void append_preload_type_event(const PreloadStage& stage,
 	                                 const PreloadSubtask& subtask) const;
   void mark_stage_tensors_ready(const PreloadStage& stage);
+  void mark_subtask_tensors_ready(const PreloadSubtask& subtask);
+  bool stage_compute_frontier_ready(const PreloadStage& stage) const;
   void refresh_executable_layers();
   void append_pipeline_event(const std::string& pipe,
                              const std::string& phase,

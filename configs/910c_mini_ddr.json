@@ -1,7 +1,7 @@
 {
   "num_cores": 2,
   "core_freq": 763,
-  "core_print_interval": 80000,
+  "core_print_interval": 8000,
   "core_config": {
     "core_0": {
       "core_type": "systolic_ws",

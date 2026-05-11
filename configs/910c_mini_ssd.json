@@ -1,7 +1,7 @@
 {
   "num_cores": 2,
   "core_freq": 763,
-  "core_print_interval": 80000,
+  "core_print_interval": 8000000,
   "core_config": {
     "core_0": {
       "core_type": "systolic_ws",
@@ -49,7 +49,7 @@
   "dram_latency": 10,
   "dram_size": 8,
   "dram_nbl": 1,
-  "dram_print_interval": 100000,
+  "dram_print_interval": 100000000,
   "dram_config_path": "../configs/ramulator2_configs/HBM2.yaml",
   "hbm": {
     "enabled": true,
@@ -98,7 +98,7 @@
   },
   "precision": 2,
   "layout": "NHWC",
-  "enable_fast_forward": true,
+  "enable_fast_forward": false,
   "scheduler": "simple",
   "pipeline": {
     "max_preloading_models": 1,

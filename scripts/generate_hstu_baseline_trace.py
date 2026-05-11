@@ -317,6 +317,30 @@ def build_kv_reuse_mapping(
     raise ValueError(f"Unsupported KV reuse variant: {variant}")
 
 
+def recompute_attention_score_elements(
+    batch_size, cached_kv_len, history_recompute_len, candidate_tokens
+):
+    if history_recompute_len <= 0:
+        return batch_size * candidate_tokens * (cached_kv_len + candidate_tokens)
+
+    history_scores = (
+        history_recompute_len * cached_kv_len
+        + history_recompute_len * (history_recompute_len + 1) // 2
+    )
+    candidate_scores = candidate_tokens * (
+        cached_kv_len + history_recompute_len + candidate_tokens
+    )
+    return batch_size * (history_scores + candidate_scores)
+
+
+def attention_mask_mode(history_recompute_len):
+    return (
+        "suffix_history_causal_candidate_full"
+        if history_recompute_len
+        else "baseline_full_current"
+    )
+
+
 def build_trace(
     layers,
     tokens,
@@ -341,16 +365,27 @@ def build_trace(
     kv_reuse_action_stride=2,
     source_medium="ddr",
     seed=0,
+    history_recompute_len=0,
 ):
     op_modeling = op_modeling or {}
     if source_medium not in {"ddr", "ssd"}:
         raise ValueError(f"Unsupported source medium: {source_medium}")
+    if history_recompute_len < 0 or history_recompute_len > kv_len:
+        raise ValueError("history_recompute_len must be in [0, kv_len]")
+    candidate_tokens = tokens
+    cached_kv_len = kv_len - history_recompute_len
+    active_tokens = history_recompute_len + candidate_tokens
+    score_elements = recompute_attention_score_elements(
+        1, cached_kv_len, history_recompute_len, candidate_tokens
+    )
     reuse_rng = random.Random(seed + user_id * 1000003 + batch_id * 9176 + macro_batch_id)
     ops = []
-    indices_values = indices_values or [i % vocab for i in range(tokens)]
+    indices_values = indices_values or [i % vocab for i in range(active_tokens)]
+    if len(indices_values) != active_tokens:
+        raise ValueError("indices_values length must match active token count")
     kv_reuse_meta = (
         build_kv_reuse_mapping(
-            kv_len,
+            cached_kv_len,
             reuse_rng,
             variant=kv_reuse_variant,
             action_count=kv_reuse_action_count,
@@ -380,7 +415,7 @@ def build_trace(
             ),
             hbm_tensor(
                 f"u{user_id}.b{batch_id}.m{macro_batch_id}.candidate_ids",
-                [tokens],
+                [active_tokens],
                 dtype="int64",
                 role="indices",
                 **base,
@@ -390,9 +425,10 @@ def build_trace(
             source_to_hbm_tensor(
                 source_medium,
                 f"u{user_id}.b{batch_id}.m{macro_batch_id}.x0",
-                [tokens, hidden],
+                [active_tokens, hidden],
                 logical_id=f"u{user_id}.b{batch_id}.m{macro_batch_id}.embedding_rows",
                 role="embedding_rows",
+                preload_group="pre_attention",
                 source_logical_id="embedding.table",
                 source_shape=[vocab, hidden],
                 indices_values=indices_values,
@@ -402,6 +438,8 @@ def build_trace(
         {
             "indices_values": ",".join(str(v) for v in indices_values),
             "modeling_mode": "preloaded_rows",
+            "history_recompute_len": history_recompute_len,
+            "candidate_tokens": candidate_tokens,
         },
     )
 
@@ -432,7 +470,7 @@ def build_trace(
             ops,
             "aten::linear",
             [
-                hbm_tensor(current, [tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(current, [active_tokens, hidden], role="activation", **layer_meta),
                 source_to_hbm_tensor(
                     source_medium,
                     f"{shared_layer}.w1",
@@ -440,6 +478,7 @@ def build_trace(
                     is_weight=True,
                     logical_id=f"{shared_layer}.w1",
                     role="weight",
+                    preload_group="pre_attention",
                     **layer_meta,
                 ),
                 source_to_hbm_tensor(
@@ -449,26 +488,27 @@ def build_trace(
                     is_weight=True,
                     logical_id=f"{shared_layer}.b1",
                     role="weight",
+                    preload_group="pre_attention",
                     **layer_meta,
                 ),
             ],
-            [hbm_tensor(z, [tokens, hidden * 4], role="activation", **layer_meta)],
+            [hbm_tensor(z, [active_tokens, hidden * 4], role="activation", **layer_meta)],
         )
         add_op(
             ops,
             "aten::silu",
-            [hbm_tensor(z, [tokens, hidden * 4], role="activation", **layer_meta)],
-            [hbm_tensor(zact, [tokens, hidden * 4], role="activation", **layer_meta)],
+            [hbm_tensor(z, [active_tokens, hidden * 4], role="activation", **layer_meta)],
+            [hbm_tensor(zact, [active_tokens, hidden * 4], role="activation", **layer_meta)],
         )
         add_op(
             ops,
             "aten::split",
-            [hbm_tensor(zact, [tokens, hidden * 4], role="activation", **layer_meta)],
+            [hbm_tensor(zact, [active_tokens, hidden * 4], role="activation", **layer_meta)],
             [
-                hbm_tensor(u, [tokens, hidden], role="activation", **layer_meta),
-                hbm_tensor(v, [tokens, hidden], role="activation", **layer_meta),
-                hbm_tensor(q, [tokens, hidden], role="activation", **layer_meta),
-                hbm_tensor(k, [tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(u, [active_tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(v, [active_tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(q, [active_tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(k, [active_tokens, hidden], role="activation", **layer_meta),
             ],
             {"axis": 1, **op_modeling_attrs(op_modeling, "split")},
         )
@@ -477,33 +517,40 @@ def build_trace(
                 ops,
                 "hstu::attention",
                 [
-                    hbm_tensor(q, [tokens, hidden], role="activation", **layer_meta),
-                    hbm_tensor(k, [tokens, hidden], role="activation", **layer_meta),
-                    hbm_tensor(v, [tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(q, [active_tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(k, [active_tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(v, [active_tokens, hidden], role="activation", **layer_meta),
                     source_to_hbm_tensor(
                         source_medium,
                         k_cache,
-                        [kv_len, hidden],
+                        [cached_kv_len, hidden],
                         logical_id=f"user{user_id}.{shared_layer}.kc",
                         role="kv_cache_k",
+                        preload_group="kvcache",
                         **(kv_reuse_meta or {}),
                         **layer_meta,
                     ),
                     source_to_hbm_tensor(
                         source_medium,
                         v_cache,
-                        [kv_len, hidden],
+                        [cached_kv_len, hidden],
                         logical_id=f"user{user_id}.{shared_layer}.vc",
                         role="kv_cache_v",
+                        preload_group="kvcache",
                         **(kv_reuse_meta or {}),
                         **layer_meta,
                     ),
                 ],
-                [hbm_tensor(av, [tokens, hidden], role="activation", **layer_meta)],
+                [hbm_tensor(av, [active_tokens, hidden], role="activation", **layer_meta)],
                 {
                     "kv_axis": 0,
-                    "logical_kv_len": kv_len + tokens,
-                    "current_tokens": tokens,
+                    "logical_kv_len": cached_kv_len + active_tokens,
+                    "current_tokens": active_tokens,
+                    "candidate_tokens": candidate_tokens,
+                    "history_recompute_len": history_recompute_len,
+                    "cached_kv_len": cached_kv_len,
+                    "mask_mode": attention_mask_mode(history_recompute_len),
+                    "attention_score_elements": score_elements,
                     "hidden": hidden,
                     "batch_size": 1,
                 },
@@ -516,38 +563,39 @@ def build_trace(
                     source_to_hbm_tensor(
                         source_medium,
                         k_cache,
-                        [kv_len, hidden],
+                        [cached_kv_len, hidden],
                         logical_id=f"user{user_id}.{shared_layer}.kc",
                         role="kv_cache_k",
+                        preload_group="kvcache",
                         **(kv_reuse_meta or {}),
                         **layer_meta,
                     ),
-                    hbm_tensor(k, [tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(k, [active_tokens, hidden], role="activation", **layer_meta),
                 ],
-                [hbm_tensor(k_all, [kv_len + tokens, hidden], role="activation", **layer_meta)],
+                [hbm_tensor(k_all, [cached_kv_len + active_tokens, hidden], role="activation", **layer_meta)],
                 {"axis": 0, **op_modeling_attrs(op_modeling, "concat")},
             )
             add_op(
                 ops,
                 "aten::transpose",
-                [hbm_tensor(k_all, [kv_len + tokens, hidden], role="activation", **layer_meta)],
-                [hbm_tensor(k_all_t, [hidden, kv_len + tokens], role="activation", **layer_meta)],
+                [hbm_tensor(k_all, [cached_kv_len + active_tokens, hidden], role="activation", **layer_meta)],
+                [hbm_tensor(k_all_t, [hidden, cached_kv_len + active_tokens], role="activation", **layer_meta)],
                 {"dims": "1,0", **op_modeling_attrs(op_modeling, "view")},
             )
             add_op(
                 ops,
                 "aten::matmul",
                 [
-                    hbm_tensor(q, [tokens, hidden], role="activation", **layer_meta),
-                    hbm_tensor(k_all_t, [hidden, kv_len + tokens], role="activation", **layer_meta),
+                    hbm_tensor(q, [active_tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(k_all_t, [hidden, cached_kv_len + active_tokens], role="activation", **layer_meta),
                 ],
-                [hbm_tensor(score, [tokens, kv_len + tokens], role="activation", **layer_meta)],
+                [hbm_tensor(score, [active_tokens, cached_kv_len + active_tokens], role="activation", **layer_meta)],
             )
             add_op(
                 ops,
                 "aten::silu",
-                [hbm_tensor(score, [tokens, kv_len + tokens], role="activation", **layer_meta)],
-                [hbm_tensor(attn, [tokens, kv_len + tokens], role="activation", **layer_meta)],
+                [hbm_tensor(score, [active_tokens, cached_kv_len + active_tokens], role="activation", **layer_meta)],
+                [hbm_tensor(attn, [active_tokens, cached_kv_len + active_tokens], role="activation", **layer_meta)],
             )
             add_op(
                 ops,
@@ -556,31 +604,32 @@ def build_trace(
                     source_to_hbm_tensor(
                         source_medium,
                         v_cache,
-                        [kv_len, hidden],
+                        [cached_kv_len, hidden],
                         logical_id=f"user{user_id}.{shared_layer}.vc",
                         role="kv_cache_v",
+                        preload_group="kvcache",
                         **(kv_reuse_meta or {}),
                         **layer_meta,
                     ),
-                    hbm_tensor(v, [tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(v, [active_tokens, hidden], role="activation", **layer_meta),
                 ],
-                [hbm_tensor(v_all, [kv_len + tokens, hidden], role="activation", **layer_meta)],
+                [hbm_tensor(v_all, [cached_kv_len + active_tokens, hidden], role="activation", **layer_meta)],
                 {"axis": 0, **op_modeling_attrs(op_modeling, "concat")},
             )
             add_op(
                 ops,
                 "aten::matmul",
                 [
-                    hbm_tensor(attn, [tokens, kv_len + tokens], role="activation", **layer_meta),
-                    hbm_tensor(v_all, [kv_len + tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(attn, [active_tokens, cached_kv_len + active_tokens], role="activation", **layer_meta),
+                    hbm_tensor(v_all, [cached_kv_len + active_tokens, hidden], role="activation", **layer_meta),
                 ],
-                [hbm_tensor(av, [tokens, hidden], role="activation", **layer_meta)],
+                [hbm_tensor(av, [active_tokens, hidden], role="activation", **layer_meta)],
             )
         add_op(
             ops,
             "aten::layer_norm",
             [
-                hbm_tensor(av, [tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(av, [active_tokens, hidden], role="activation", **layer_meta),
                 source_to_hbm_tensor(
                     source_medium,
                     f"{shared_layer}.ln_w",
@@ -588,6 +637,7 @@ def build_trace(
                     is_weight=True,
                     logical_id=f"{shared_layer}.ln_w",
                     role="weight",
+                    preload_group="post_attention_weights",
                     **layer_meta,
                 ),
                 source_to_hbm_tensor(
@@ -597,26 +647,27 @@ def build_trace(
                     is_weight=True,
                     logical_id=f"{shared_layer}.ln_b",
                     role="weight",
+                    preload_group="post_attention_weights",
                     **layer_meta,
                 ),
             ],
-            [hbm_tensor(av_norm, [tokens, hidden], role="activation", **layer_meta)],
+            [hbm_tensor(av_norm, [active_tokens, hidden], role="activation", **layer_meta)],
             {**op_modeling_attrs(op_modeling, "layer_norm")},
         )
         add_op(
             ops,
             "aten::mul",
             [
-                hbm_tensor(av_norm, [tokens, hidden], role="activation", **layer_meta),
-                hbm_tensor(u, [tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(av_norm, [active_tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(u, [active_tokens, hidden], role="activation", **layer_meta),
             ],
-            [hbm_tensor(gated, [tokens, hidden], role="activation", **layer_meta)],
+            [hbm_tensor(gated, [active_tokens, hidden], role="activation", **layer_meta)],
         )
         add_op(
             ops,
             "aten::linear",
             [
-                hbm_tensor(gated, [tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(gated, [active_tokens, hidden], role="activation", **layer_meta),
                 source_to_hbm_tensor(
                     source_medium,
                     f"{shared_layer}.w2",
@@ -624,6 +675,7 @@ def build_trace(
                     is_weight=True,
                     logical_id=f"{shared_layer}.w2",
                     role="weight",
+                    preload_group="post_attention_weights",
                     **layer_meta,
                 ),
                 source_to_hbm_tensor(
@@ -633,10 +685,11 @@ def build_trace(
                     is_weight=True,
                     logical_id=f"{shared_layer}.b2",
                     role="weight",
+                    preload_group="post_attention_weights",
                     **layer_meta,
                 ),
             ],
-            [hbm_tensor(out, [tokens, hidden], role="activation", **layer_meta)],
+            [hbm_tensor(out, [active_tokens, hidden], role="activation", **layer_meta)],
         )
         current = out
 
@@ -666,6 +719,11 @@ def build_trace(
             "kv_reuse_hot_share": kv_reuse_hot_share,
             "kv_reuse_action_offset": kv_reuse_action_offset,
             "kv_reuse_action_stride": kv_reuse_action_stride,
+            "candidate_tokens": candidate_tokens,
+            "history_recompute_len": history_recompute_len,
+            "cached_kv_len": cached_kv_len,
+            "active_tokens": active_tokens,
+            "attention_mask_mode": attention_mask_mode(history_recompute_len),
         },
         "operators": ops,
     }
@@ -695,10 +753,16 @@ def build_batched_trace(
     kv_reuse_action_stride=2,
     source_medium="ddr",
     seed=0,
+    history_recompute_len=0,
 ):
     op_modeling = op_modeling or {}
     if source_medium not in {"ddr", "ssd"}:
         raise ValueError(f"Unsupported source medium: {source_medium}")
+    if history_recompute_len < 0 or history_recompute_len > kv_len:
+        raise ValueError("history_recompute_len must be in [0, kv_len]")
+    candidate_tokens = tokens
+    cached_kv_len = kv_len - history_recompute_len
+    active_tokens = history_recompute_len + candidate_tokens
 
     batch_size = len(user_ids)
     if batch_size <= 0:
@@ -706,15 +770,15 @@ def build_batched_trace(
 
     if indices_values_per_user is None:
         indices_values_per_user = [
-            [i % vocab for i in range(tokens)] for _ in range(batch_size)
+            [i % vocab for i in range(active_tokens)] for _ in range(batch_size)
         ]
     if len(indices_values_per_user) != batch_size:
         raise ValueError(
             "indices_values_per_user size must match batch_size in build_batched_trace"
         )
     for row in indices_values_per_user:
-        if len(row) != tokens:
-            raise ValueError("Each batched indices row must have length == tokens")
+        if len(row) != active_tokens:
+            raise ValueError("Each batched indices row must match active token count")
 
     flat_indices_values = [
         idx for per_user_indices in indices_values_per_user for idx in per_user_indices
@@ -729,7 +793,7 @@ def build_batched_trace(
         for user_id in user_ids:
             reuse_rng = random.Random(seed + user_id * 1000003 + layer * 9176)
             mapping = build_kv_reuse_mapping(
-                kv_len,
+                cached_kv_len,
                 reuse_rng,
                 variant=kv_reuse_variant,
                 action_count=kv_reuse_action_count,
@@ -740,8 +804,8 @@ def build_batched_trace(
                 action_stride=kv_reuse_action_stride,
             )
             if mapping is None:
-                logical_to_physical = list(range(kv_len))
-                rows = kv_len
+                logical_to_physical = list(range(cached_kv_len))
+                rows = cached_kv_len
             else:
                 logical_to_physical = mapping["reuse_logical_to_physical"]
                 rows = mapping["reuse_physical_rows"]
@@ -787,7 +851,7 @@ def build_batched_trace(
             ),
             hbm_tensor(
                 f"b{batch_id}.m{macro_batch_id}.candidate_ids",
-                [batch_size, tokens],
+                [batch_size, active_tokens],
                 dtype="int64",
                 role="indices",
                 **base,
@@ -797,9 +861,10 @@ def build_batched_trace(
             source_to_hbm_tensor(
                 source_medium,
                 f"b{batch_id}.m{macro_batch_id}.x0",
-                [batch_size, tokens, hidden],
+                [batch_size, active_tokens, hidden],
                 logical_id=f"batch{batch_id}.macro{macro_batch_id}.embedding_rows",
                 role="embedding_rows",
+                preload_group="pre_attention",
                 source_logical_id="embedding.table",
                 source_shape=[vocab, hidden],
                 indices_values=flat_indices_values,
@@ -811,6 +876,8 @@ def build_batched_trace(
         {
             "indices_values": ",".join(str(v) for v in flat_indices_values),
             "modeling_mode": "preloaded_rows",
+            "history_recompute_len": history_recompute_len,
+            "candidate_tokens": candidate_tokens,
         },
     )
 
@@ -848,7 +915,7 @@ def build_batched_trace(
             "aten::linear",
             [
                 hbm_tensor(
-                    current, [batch_size, tokens, hidden], role="activation", **layer_meta
+                    current, [batch_size, active_tokens, hidden], role="activation", **layer_meta
                 ),
                 source_to_hbm_tensor(
                     source_medium,
@@ -857,6 +924,7 @@ def build_batched_trace(
                     is_weight=True,
                     logical_id=f"{shared_layer}.w1",
                     role="weight",
+                    preload_group="pre_attention",
                     **layer_meta,
                 ),
                 source_to_hbm_tensor(
@@ -866,22 +934,23 @@ def build_batched_trace(
                     is_weight=True,
                     logical_id=f"{shared_layer}.b1",
                     role="weight",
+                    preload_group="pre_attention",
                     **layer_meta,
                 ),
             ],
             [
                 hbm_tensor(
-                    z, [batch_size, tokens, hidden * 4], role="activation", **layer_meta
+                    z, [batch_size, active_tokens, hidden * 4], role="activation", **layer_meta
                 )
             ],
         )
         add_op(
             ops,
             "aten::silu",
-            [hbm_tensor(z, [batch_size, tokens, hidden * 4], role="activation", **layer_meta)],
+            [hbm_tensor(z, [batch_size, active_tokens, hidden * 4], role="activation", **layer_meta)],
             [
                 hbm_tensor(
-                    zact, [batch_size, tokens, hidden * 4], role="activation", **layer_meta
+                    zact, [batch_size, active_tokens, hidden * 4], role="activation", **layer_meta
                 )
             ],
         )
@@ -890,14 +959,14 @@ def build_batched_trace(
             "aten::split",
             [
                 hbm_tensor(
-                    zact, [batch_size, tokens, hidden * 4], role="activation", **layer_meta
+                    zact, [batch_size, active_tokens, hidden * 4], role="activation", **layer_meta
                 )
             ],
             [
-                hbm_tensor(u, [batch_size, tokens, hidden], role="activation", **layer_meta),
-                hbm_tensor(v, [batch_size, tokens, hidden], role="activation", **layer_meta),
-                hbm_tensor(q, [batch_size, tokens, hidden], role="activation", **layer_meta),
-                hbm_tensor(k, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(u, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(v, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(q, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(k, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
             ],
             {"axis": 2, **op_modeling_attrs(op_modeling, "split")},
         )
@@ -906,15 +975,16 @@ def build_batched_trace(
                 ops,
                 "hstu::attention",
                 [
-                    hbm_tensor(q, [batch_size, tokens, hidden], role="activation", **layer_meta),
-                    hbm_tensor(k, [batch_size, tokens, hidden], role="activation", **layer_meta),
-                    hbm_tensor(v, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(q, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(k, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(v, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
                     source_to_hbm_tensor(
                         source_medium,
                         k_cache,
-                        [batch_size, kv_len, hidden],
+                        [batch_size, cached_kv_len, hidden],
                         logical_id=f"batch{batch_id}.{shared_layer}.kc",
                         role="kv_cache_k_batch",
+                        preload_group="kvcache",
                         user_ids=user_ids,
                         **kv_reuse_meta,
                         **layer_meta,
@@ -922,19 +992,30 @@ def build_batched_trace(
                     source_to_hbm_tensor(
                         source_medium,
                         v_cache,
-                        [batch_size, kv_len, hidden],
+                        [batch_size, cached_kv_len, hidden],
                         logical_id=f"batch{batch_id}.{shared_layer}.vc",
                         role="kv_cache_v_batch",
+                        preload_group="kvcache",
                         user_ids=user_ids,
                         **kv_reuse_meta,
                         **layer_meta,
                     ),
                 ],
-                [hbm_tensor(av, [batch_size, tokens, hidden], role="activation", **layer_meta)],
+                [hbm_tensor(av, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
                 {
                     "kv_axis": 1,
-                    "logical_kv_len": kv_len + tokens,
-                    "current_tokens": tokens,
+                    "logical_kv_len": cached_kv_len + active_tokens,
+                    "current_tokens": active_tokens,
+                    "candidate_tokens": candidate_tokens,
+                    "history_recompute_len": history_recompute_len,
+                    "cached_kv_len": cached_kv_len,
+                    "mask_mode": attention_mask_mode(history_recompute_len),
+                    "attention_score_elements": recompute_attention_score_elements(
+                        batch_size,
+                        cached_kv_len,
+                        history_recompute_len,
+                        candidate_tokens,
+                    ),
                     "hidden": hidden,
                     "batch_size": batch_size,
                 },
@@ -947,18 +1028,19 @@ def build_batched_trace(
                     source_to_hbm_tensor(
                         source_medium,
                         k_cache,
-                        [batch_size, kv_len, hidden],
+                        [batch_size, cached_kv_len, hidden],
                         logical_id=f"batch{batch_id}.{shared_layer}.kc",
                         role="kv_cache_k_batch",
+                        preload_group="kvcache",
                         user_ids=user_ids,
                         **kv_reuse_meta,
                         **layer_meta,
                     ),
-                    hbm_tensor(k, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(k, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
                 ],
                 [
                     hbm_tensor(
-                        k_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
+                        k_all, [batch_size, cached_kv_len + active_tokens, hidden], role="activation", **layer_meta
                     )
                 ],
                 {"axis": 1, **op_modeling_attrs(op_modeling, "concat")},
@@ -968,13 +1050,13 @@ def build_batched_trace(
                 "aten::transpose",
                 [
                     hbm_tensor(
-                        k_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
+                        k_all, [batch_size, cached_kv_len + active_tokens, hidden], role="activation", **layer_meta
                     )
                 ],
                 [
                     hbm_tensor(
                         k_all_t,
-                        [batch_size, hidden, kv_len + tokens],
+                        [batch_size, hidden, cached_kv_len + active_tokens],
                         role="activation",
                         **layer_meta,
                     )
@@ -985,10 +1067,10 @@ def build_batched_trace(
                 ops,
                 "aten::matmul",
                 [
-                    hbm_tensor(q, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(q, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
                     hbm_tensor(
                         k_all_t,
-                        [batch_size, hidden, kv_len + tokens],
+                        [batch_size, hidden, cached_kv_len + active_tokens],
                         role="activation",
                         **layer_meta,
                     ),
@@ -996,7 +1078,7 @@ def build_batched_trace(
                 [
                     hbm_tensor(
                         score,
-                        [batch_size, tokens, kv_len + tokens],
+                        [batch_size, active_tokens, cached_kv_len + active_tokens],
                         role="activation",
                         **layer_meta,
                     )
@@ -1008,7 +1090,7 @@ def build_batched_trace(
                 [
                     hbm_tensor(
                         score,
-                        [batch_size, tokens, kv_len + tokens],
+                        [batch_size, active_tokens, cached_kv_len + active_tokens],
                         role="activation",
                         **layer_meta,
                     )
@@ -1016,7 +1098,7 @@ def build_batched_trace(
                 [
                     hbm_tensor(
                         attn,
-                        [batch_size, tokens, kv_len + tokens],
+                        [batch_size, active_tokens, cached_kv_len + active_tokens],
                         role="activation",
                         **layer_meta,
                     )
@@ -1029,18 +1111,19 @@ def build_batched_trace(
                     source_to_hbm_tensor(
                         source_medium,
                         v_cache,
-                        [batch_size, kv_len, hidden],
+                        [batch_size, cached_kv_len, hidden],
                         logical_id=f"batch{batch_id}.{shared_layer}.vc",
                         role="kv_cache_v_batch",
+                        preload_group="kvcache",
                         user_ids=user_ids,
                         **kv_reuse_meta,
                         **layer_meta,
                     ),
-                    hbm_tensor(v, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                    hbm_tensor(v, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
                 ],
                 [
                     hbm_tensor(
-                        v_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
+                        v_all, [batch_size, cached_kv_len + active_tokens, hidden], role="activation", **layer_meta
                     )
                 ],
                 {"axis": 1, **op_modeling_attrs(op_modeling, "concat")},
@@ -1051,21 +1134,21 @@ def build_batched_trace(
                 [
                     hbm_tensor(
                         attn,
-                        [batch_size, tokens, kv_len + tokens],
+                        [batch_size, active_tokens, cached_kv_len + active_tokens],
                         role="activation",
                         **layer_meta,
                     ),
                     hbm_tensor(
-                        v_all, [batch_size, kv_len + tokens, hidden], role="activation", **layer_meta
+                        v_all, [batch_size, cached_kv_len + active_tokens, hidden], role="activation", **layer_meta
                     ),
                 ],
-                [hbm_tensor(av, [batch_size, tokens, hidden], role="activation", **layer_meta)],
+                [hbm_tensor(av, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
             )
         add_op(
             ops,
             "aten::layer_norm",
             [
-                hbm_tensor(av, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(av, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
                 source_to_hbm_tensor(
                     source_medium,
                     f"{shared_layer}.ln_w",
@@ -1073,6 +1156,7 @@ def build_batched_trace(
                     is_weight=True,
                     logical_id=f"{shared_layer}.ln_w",
                     role="weight",
+                    preload_group="post_attention_weights",
                     **layer_meta,
                 ),
                 source_to_hbm_tensor(
@@ -1082,10 +1166,11 @@ def build_batched_trace(
                     is_weight=True,
                     logical_id=f"{shared_layer}.ln_b",
                     role="weight",
+                    preload_group="post_attention_weights",
                     **layer_meta,
                 ),
             ],
-            [hbm_tensor(av_norm, [batch_size, tokens, hidden], role="activation", **layer_meta)],
+            [hbm_tensor(av_norm, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
             {**op_modeling_attrs(op_modeling, "layer_norm")},
         )
         add_op(
@@ -1093,18 +1178,18 @@ def build_batched_trace(
             "aten::mul",
             [
                 hbm_tensor(
-                    av_norm, [batch_size, tokens, hidden], role="activation", **layer_meta
+                    av_norm, [batch_size, active_tokens, hidden], role="activation", **layer_meta
                 ),
-                hbm_tensor(u, [batch_size, tokens, hidden], role="activation", **layer_meta),
+                hbm_tensor(u, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
             ],
-            [hbm_tensor(gated, [batch_size, tokens, hidden], role="activation", **layer_meta)],
+            [hbm_tensor(gated, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
         )
         add_op(
             ops,
             "aten::linear",
             [
                 hbm_tensor(
-                    gated, [batch_size, tokens, hidden], role="activation", **layer_meta
+                    gated, [batch_size, active_tokens, hidden], role="activation", **layer_meta
                 ),
                 source_to_hbm_tensor(
                     source_medium,
@@ -1113,6 +1198,7 @@ def build_batched_trace(
                     is_weight=True,
                     logical_id=f"{shared_layer}.w2",
                     role="weight",
+                    preload_group="post_attention_weights",
                     **layer_meta,
                 ),
                 source_to_hbm_tensor(
@@ -1122,10 +1208,11 @@ def build_batched_trace(
                     is_weight=True,
                     logical_id=f"{shared_layer}.b2",
                     role="weight",
+                    preload_group="post_attention_weights",
                     **layer_meta,
                 ),
             ],
-            [hbm_tensor(out, [batch_size, tokens, hidden], role="activation", **layer_meta)],
+            [hbm_tensor(out, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
         )
         current = out
 
@@ -1156,6 +1243,11 @@ def build_batched_trace(
             "kv_reuse_hot_share": kv_reuse_hot_share,
             "kv_reuse_action_offset": kv_reuse_action_offset,
             "kv_reuse_action_stride": kv_reuse_action_stride,
+            "candidate_tokens": candidate_tokens,
+            "history_recompute_len": history_recompute_len,
+            "cached_kv_len": cached_kv_len,
+            "active_tokens": active_tokens,
+            "attention_mask_mode": attention_mask_mode(history_recompute_len),
         },
         "operators": ops,
     }
@@ -1197,7 +1289,8 @@ def write_json(path, data, compact=False):
 
 def write_single_trace(args, op_modeling):
     rng = random.Random(args.seed)
-    indices = [rng.randrange(args.vocab) for _ in range(args.tokens)]
+    active_tokens = args.tokens + args.history_recompute_len
+    indices = [rng.randrange(args.vocab) for _ in range(active_tokens)]
     trace = build_trace(
         args.layers,
         args.tokens,
@@ -1219,6 +1312,7 @@ def write_single_trace(args, op_modeling):
         kv_reuse_action_stride=args.kv_reuse_action_stride,
         source_medium=args.source_medium,
         seed=args.seed,
+        history_recompute_len=args.history_recompute_len,
     )
     output = Path(args.output)
     write_json(output, trace, compact=args.compact_json)
@@ -1249,9 +1343,15 @@ def write_pipeline_traces(args, op_modeling):
             tokens = end - start
             batch_size = len(users)
             model_name = f"hstu_b{batch_id}_m{macro_id}"
-            indices_values_per_user = [
-                [rng.randrange(args.vocab) for _ in range(tokens)] for _ in users
-            ]
+            indices_values_per_user = []
+            for user in users:
+                history_rng = random.Random(args.seed + user * 1000003)
+                history_indices = [
+                    history_rng.randrange(args.vocab)
+                    for _ in range(args.history_recompute_len)
+                ]
+                candidate_indices = [rng.randrange(args.vocab) for _ in range(tokens)]
+                indices_values_per_user.append(history_indices + candidate_indices)
             trace = build_batched_trace(
                 args.layers,
                 tokens,
@@ -1276,11 +1376,12 @@ def write_pipeline_traces(args, op_modeling):
                 kv_reuse_action_stride=args.kv_reuse_action_stride,
                 source_medium=args.source_medium,
                 seed=args.seed,
+                history_recompute_len=args.history_recompute_len,
             )
             trace_path = output_dir / f"{model_name}.json"
             write_json(trace_path, trace, compact=args.compact_json)
             weight_key = (
-                f"hstu_shared_b{batch_size}_t{tokens}_h{args.hidden}_kv{args.kv_len}_l{args.layers}"
+                f"hstu_shared_b{batch_size}_t{tokens}_hr{args.history_recompute_len}_h{args.hidden}_kv{args.kv_len}_l{args.layers}"
             )
             model_index = len(models)
             models.append(
@@ -1321,6 +1422,8 @@ def write_pipeline_traces(args, op_modeling):
                 "kv_reuse_action_offset": args.kv_reuse_action_offset,
                 "kv_reuse_action_stride": args.kv_reuse_action_stride,
                 "source_medium": args.source_medium,
+                "history_recompute_len": args.history_recompute_len,
+                "attention_mask_mode": attention_mask_mode(args.history_recompute_len),
             },
             "models": models,
         },
@@ -1336,6 +1439,15 @@ def main():
     parser.add_argument("--tokens", type=int, default=4)
     parser.add_argument("--hidden", type=int, default=16)
     parser.add_argument("--kv-len", "--history-len", dest="kv_len", type=int, default=4)
+    parser.add_argument(
+        "--history-recompute-len",
+        type=int,
+        default=0,
+        help=(
+            "Number of tail history rows recomputed from embedding instead of "
+            "loaded from KV cache. 0 preserves baseline."
+        ),
+    )
     parser.add_argument("--vocab", type=int, default=128)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--num-users", type=int, default=1)
@@ -1447,6 +1559,10 @@ def main():
         raise ValueError("--kv-reuse-action-stride must be positive")
     if args.kv_reuse_action_offset < 0:
         raise ValueError("--kv-reuse-action-offset must be non-negative")
+    if args.history_recompute_len < 0:
+        raise ValueError("--history-recompute-len must be non-negative")
+    if args.history_recompute_len > args.kv_len:
+        raise ValueError("--history-recompute-len must be <= --kv-len")
     op_modeling = parse_op_modeling(args.op_modeling)
     multi_trace = (
         args.pipeline
