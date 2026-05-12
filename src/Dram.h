@@ -10,6 +10,12 @@
 #include "ramulator/Ramulator.hpp"
 #include "ramulator2.hh"
 
+struct MemoryBandwidthStats {
+  std::vector<double> channel_utilization_percent;
+  std::vector<uint64_t> channel_reads;
+  std::vector<uint64_t> channel_writes;
+  double average_utilization_percent = 0.0;
+};
 
 class Dram {
  public:
@@ -33,6 +39,7 @@ class Dram {
   }
   uint64_t current_time_ps() const { return _time_ps; }
   virtual void print_stat() {}
+  virtual MemoryBandwidthStats get_bandwidth_stats() const { return {}; }
 
  protected:
   SimulationConfig _config;
@@ -80,6 +87,7 @@ class DramRamulator : public Dram {
   virtual MemoryAccess* top(uint32_t cid) override;
   virtual void pop(uint32_t cid) override;
   virtual void print_stat() override;
+  virtual MemoryBandwidthStats get_bandwidth_stats() const override;
 
  private:
   std::unique_ptr<ram::Ramulator> _mem;
@@ -104,6 +112,7 @@ class Ramulator2Memory : public Dram {
   virtual MemoryAccess* top(uint32_t cid) override;
   virtual void pop(uint32_t cid) override;
   virtual void print_stat() override;
+  virtual MemoryBandwidthStats get_bandwidth_stats() const override;
 
  protected:
   TieredMemoryConfig _tier_config;

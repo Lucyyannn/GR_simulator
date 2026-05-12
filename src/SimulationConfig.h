@@ -124,6 +124,7 @@ struct SimulationConfig {
   uint32_t layer_preload_lookahead = 1;
   uint64_t hbm_residency_capacity_bytes = 0;
   std::string pipeline_breakdown_csv;
+  std::string hardware_summary_csv;
 
   /* Other configs */
   uint32_t precision;

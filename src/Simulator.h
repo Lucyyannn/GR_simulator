@@ -47,6 +47,14 @@ class Simulator {
   void schedule_ready_models();
   uint32_t get_dest_node(MemoryAccess* access);
   void print_simulation_time_summary(double wall_clock_seconds) const;
+  uint64_t final_sim_time_ps() const;
+  std::string hardware_summary_csv_path() const;
+  void write_final_hardware_summary_csv(uint64_t sim_time_ps) const;
+  void append_memory_hardware_summary_rows(std::ostream& out,
+                                           const std::string& name,
+                                           const Dram* memory,
+                                           const TieredMemoryConfig& tier,
+                                           uint64_t sim_time_ps) const;
   SimulationConfig _config;
   uint32_t _n_cores;
   uint32_t _noc_node_per_core;

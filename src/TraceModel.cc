@@ -33,8 +33,13 @@ MemoryMedium parse_medium_name(const std::string& name) {
   return MemoryMedium::UNKNOWN;
 }
 
+bool is_weight_entry(const trace_frontend::TensorEntry& entry) {
+  return entry.is_weight || entry.role == "weight" ||
+         entry.role == "embedding_table";
+}
+
 bool is_resident_role(const std::string& role) {
-  return role == "weight" || role.rfind("kv_cache_", 0) == 0;
+  return role.rfind("kv_cache_", 0) == 0;
 }
 
 bool is_batched_kv_role(const std::string& role) {
@@ -202,6 +207,24 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
       initial_medium != MemoryMedium::UNKNOWN &&
       runtime_medium != MemoryMedium::UNKNOWN &&
       initial_medium != runtime_medium;
+
+  if (is_weight_entry(entry)) {
+    std::string logical_id = effective_logical_id(entry);
+    if (logical_id.empty()) logical_id = entry.name;
+    addr_type hbm_addr = 0;
+    if (_residency_manager != nullptr) {
+      hbm_addr = _residency_manager->reserve_destination(
+          logical_id, tensor->get_size(), MemoryMedium::HBM);
+    } else {
+      tensor->relocate(MemoryMedium::HBM);
+      hbm_addr = tensor->get_address();
+    }
+    tensor->set_address(hbm_addr);
+    tensor->set_produced();
+    spdlog::debug("[TraceModel] {} weight {} resident in HBM at 0x{:x}",
+                  _name, logical_id, hbm_addr);
+    return;
+  }
 
   if (needs_preload && entry.role == "embedding_rows" &&
       entry.shape.size() >= 3 && !entry.indices_values_per_user.empty()) {

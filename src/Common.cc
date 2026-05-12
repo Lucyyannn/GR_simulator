@@ -417,6 +417,9 @@ SimulationConfig initialize_config(json config) {
     parsed_config.pipeline_breakdown_csv =
         pipeline.value("breakdown_csv",
                        parsed_config.pipeline_breakdown_csv);
+    parsed_config.hardware_summary_csv =
+        pipeline.value("hardware_summary_csv",
+                       parsed_config.hardware_summary_csv);
   } else {
     parsed_config.max_preloading_models =
         config.value("max_preloading_models", parsed_config.max_preloading_models);

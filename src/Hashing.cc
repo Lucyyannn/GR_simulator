@@ -4,7 +4,21 @@
 #include <math.h>
 #include <string.h>
 #include <bitset>
+#include <cstdint>
 #include "Hashing.h"
+
+unsigned hash_channel(new_addr_type higher_bits, unsigned channel_count) {
+  assert(channel_count > 0);
+
+  uint64_t x = higher_bits;
+  x ^= x >> 33;
+  x *= 0xff51afd7ed558ccdULL;
+  x ^= x >> 33;
+  x *= 0xc4ceb9fe1a85ec53ULL;
+  x ^= x >> 33;
+
+  return x % channel_count;
+}
 
 unsigned ipoly_hash_function(new_addr_type higher_bits, unsigned index,
                              unsigned bank_set_num) {

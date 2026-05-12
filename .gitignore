@@ -7,7 +7,6 @@ docs/
 .continue/
 example/trace_tests/*
 AGENTS.md
-PLAN.md
 baseline_flow.md
 task.md
 .codex

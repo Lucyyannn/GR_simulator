@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <limits>
+#include <sstream>
 #include <string>
+#include <vector>
 
 #include "SystolicOS.h"
 #include "SystolicWS.h"
@@ -14,6 +17,24 @@ namespace {
 
 double ps_to_us(uint64_t ps) {
   return static_cast<double>(ps) / 1e6;
+}
+
+std::string csv_value(double value) {
+  std::ostringstream ss;
+  ss << value;
+  return ss.str();
+}
+
+std::string csv_value(uint64_t value) {
+  return std::to_string(value);
+}
+
+void write_csv_row(std::ostream& out, const std::vector<std::string>& columns) {
+  for (size_t i = 0; i < columns.size(); i++) {
+    if (i > 0) out << ',';
+    out << columns[i];
+  }
+  out << '\n';
 }
 
 }  // namespace
@@ -606,11 +627,7 @@ const double Simulator::get_tile_ops() {
 }
 
 void Simulator::print_simulation_time_summary(double wall_clock_seconds) const {
-  const uint64_t core_time_ps = _core_cycles * _core_period;
-  const uint64_t icnt_time_ps = _icnt_cycle * _icnt_period;
-  const uint64_t dram_time_ps = _mem_cycles * _mem_period;
-  const uint64_t global_time_ps =
-      std::max({core_time_ps, icnt_time_ps, dram_time_ps, _last_sim_time_ps});
+  const uint64_t global_time_ps = final_sim_time_ps();
 
   spdlog::info(
       "simulation time : {:.6f} us | cycles: core={}, icnt={}, mem={}",
@@ -621,4 +638,197 @@ void Simulator::print_simulation_time_summary(double wall_clock_seconds) const {
 
 void Simulator::print_final_summary(double wall_clock_seconds) const {
   print_simulation_time_summary(wall_clock_seconds);
+  write_final_hardware_summary_csv(final_sim_time_ps());
+}
+
+uint64_t Simulator::final_sim_time_ps() const {
+  const uint64_t core_time_ps = _core_cycles * _core_period;
+  const uint64_t icnt_time_ps = _icnt_cycle * _icnt_period;
+  const uint64_t dram_time_ps = _mem_cycles * _mem_period;
+  return std::max({core_time_ps, icnt_time_ps, dram_time_ps, _last_sim_time_ps});
+}
+
+std::string Simulator::hardware_summary_csv_path() const {
+  if (!_config.hardware_summary_csv.empty()) return _config.hardware_summary_csv;
+  if (!_config.pipeline_breakdown_csv.empty()) {
+    fs::path path(_config.pipeline_breakdown_csv);
+    return path.parent_path().append("hardware_summary.csv").string();
+  }
+  return "hardware_summary.csv";
+}
+
+void Simulator::append_memory_hardware_summary_rows(std::ostream& out,
+                                                    const std::string& name,
+                                                    const Dram* memory,
+                                                    const TieredMemoryConfig& tier,
+                                                    uint64_t sim_time_ps) const {
+  const MemoryBandwidthStats stats =
+      memory == nullptr ? MemoryBandwidthStats{} : memory->get_bandwidth_stats();
+  const double seconds = static_cast<double>(sim_time_ps) / 1e12;
+  const double channel_peak_GBps =
+      tier.freq == 0 || tier.req_size == 0
+          ? 0.0
+          : static_cast<double>(tier.freq) *
+                static_cast<double>(tier.req_size) /
+                static_cast<double>(std::max(tier.nbl, 1u)) / 1000.0;
+
+  uint64_t total_reads = 0;
+  uint64_t total_writes = 0;
+  uint64_t total_read_bytes = 0;
+  uint64_t total_write_bytes = 0;
+  double total_bandwidth_GBps = 0.0;
+  const size_t channel_count =
+      std::max(stats.channel_reads.size(), stats.channel_writes.size());
+  for (size_t ch = 0; ch < channel_count; ch++) {
+    const uint64_t reads =
+        ch < stats.channel_reads.size() ? stats.channel_reads[ch] : 0;
+    const uint64_t writes =
+        ch < stats.channel_writes.size() ? stats.channel_writes[ch] : 0;
+    const uint64_t read_bytes = reads * static_cast<uint64_t>(tier.req_size);
+    const uint64_t write_bytes = writes * static_cast<uint64_t>(tier.req_size);
+    const uint64_t bytes = read_bytes + write_bytes;
+    const double bandwidth_GBps =
+        seconds <= 0.0 ? 0.0 : static_cast<double>(bytes) / seconds / 1e9;
+    const double bandwidth_util =
+        channel_peak_GBps <= 0.0 ? 0.0 : bandwidth_GBps * 100.0 / channel_peak_GBps;
+    write_csv_row(out, {
+        name, "channel", std::to_string(ch), csv_value(bandwidth_util),
+        csv_value(bandwidth_GBps), csv_value(bandwidth_util),
+        csv_value(channel_peak_GBps), csv_value(ps_to_us(sim_time_ps)), "", "",
+        csv_value(reads), csv_value(writes), csv_value(read_bytes),
+        csv_value(write_bytes), csv_value(bytes), "", "", "", "", "", "", "",
+        "", "", csv_value(static_cast<uint64_t>(tier.req_size)),
+    });
+    total_reads += reads;
+    total_writes += writes;
+    total_read_bytes += read_bytes;
+    total_write_bytes += write_bytes;
+    total_bandwidth_GBps += bandwidth_GBps;
+  }
+  const uint64_t total_bytes = total_read_bytes + total_write_bytes;
+  const double peak_bandwidth_GBps =
+      channel_peak_GBps * static_cast<double>(channel_count);
+  const double bandwidth_util =
+      peak_bandwidth_GBps <= 0.0
+          ? 0.0
+          : total_bandwidth_GBps * 100.0 / peak_bandwidth_GBps;
+  write_csv_row(out, {
+      name, "overall", "all", csv_value(bandwidth_util),
+      csv_value(total_bandwidth_GBps), csv_value(bandwidth_util),
+      csv_value(peak_bandwidth_GBps), csv_value(ps_to_us(sim_time_ps)), "", "",
+      csv_value(total_reads), csv_value(total_writes), csv_value(total_read_bytes),
+      csv_value(total_write_bytes), csv_value(total_bytes), "", "", "", "", "", "",
+      "", "", "", csv_value(static_cast<uint64_t>(tier.req_size)),
+  });
+}
+
+void Simulator::write_final_hardware_summary_csv(uint64_t sim_time_ps) const {
+  const std::string output_path = hardware_summary_csv_path();
+  fs::path path(output_path);
+  if (!path.parent_path().empty()) fs::create_directories(path.parent_path());
+
+  std::ofstream out(output_path);
+  if (!out.is_open()) {
+    spdlog::warn("Failed to write hardware summary CSV: {}", output_path);
+    return;
+  }
+
+  out << "component,scope,index,utilization_percent,bandwidth_GBps,"
+         "bandwidth_utilization_percent,peak_bandwidth_GBps,sim_time_us,"
+         "cycles,active_cycles,reads,writes,read_bytes,write_bytes,bytes,"
+         "iops,read_iops,write_iops,read_bandwidth_GBps,write_bandwidth_GBps,"
+         "read_peak_bandwidth_GBps,write_peak_bandwidth_GBps,"
+         "read_bandwidth_utilization_percent,"
+         "write_bandwidth_utilization_percent,request_size_bytes\n";
+
+  double weighted_core_util = 0.0;
+  uint64_t total_core_cycles = 0;
+  uint64_t total_core_active_cycles = 0;
+  for (size_t core_id = 0; core_id < _cores.size(); core_id++) {
+    const Core* core = _cores[core_id].get();
+    const double util = core ? core->get_core_utilization_percent() : 0.0;
+    const uint64_t cycles = core ? core->get_total_cycles() : 0;
+    const uint64_t active_cycles = core ? core->get_compute_cycles() : 0;
+    write_csv_row(out, {
+        "NPU", "core", std::to_string(core_id), csv_value(util), "", "", "",
+        csv_value(ps_to_us(sim_time_ps)), csv_value(cycles),
+        csv_value(active_cycles), "", "", "", "", "", "", "", "", "", "", "",
+        "", "", "", "",
+    });
+    weighted_core_util += util * static_cast<double>(cycles);
+    total_core_cycles += cycles;
+    total_core_active_cycles += active_cycles;
+  }
+  const double npu_util =
+      total_core_cycles == 0
+          ? 0.0
+          : weighted_core_util / static_cast<double>(total_core_cycles);
+  write_csv_row(out, {
+      "NPU", "overall", "all", csv_value(npu_util), "", "", "",
+      csv_value(ps_to_us(sim_time_ps)), csv_value(total_core_cycles),
+      csv_value(total_core_active_cycles), "", "", "", "", "", "", "", "", "",
+      "", "", "", "", "", "",
+  });
+
+  append_memory_hardware_summary_rows(out, "HBM", _hbm.get(), _config.hbm,
+                                      sim_time_ps);
+  append_memory_hardware_summary_rows(out, "DDR", _ddr.get(), _config.ddr,
+                                      sim_time_ps);
+
+  if (_ssd) {
+    const double read_peak = _ssd->read_peak_bandwidth_GBps();
+    const double write_peak = _ssd->write_peak_bandwidth_GBps();
+    write_csv_row(out, {
+        "SSD", "overall", "all",
+        csv_value(_ssd->bandwidth_utilization_percent(sim_time_ps)),
+        csv_value(_ssd->bandwidth_GBps(sim_time_ps)),
+        csv_value(_ssd->bandwidth_utilization_percent(sim_time_ps)), "",
+        csv_value(ps_to_us(sim_time_ps)), "", "",
+        csv_value(_ssd->total_reads()), csv_value(_ssd->total_writes()),
+        csv_value(_ssd->read_bytes()), csv_value(_ssd->write_bytes()),
+        csv_value(_ssd->total_bytes()), csv_value(_ssd->iops(sim_time_ps)),
+        csv_value(_ssd->read_iops(sim_time_ps)),
+        csv_value(_ssd->write_iops(sim_time_ps)),
+        csv_value(_ssd->read_bandwidth_GBps(sim_time_ps)),
+        csv_value(_ssd->write_bandwidth_GBps(sim_time_ps)),
+        csv_value(read_peak), csv_value(write_peak),
+        csv_value(_ssd->read_bandwidth_utilization_percent(sim_time_ps)),
+        csv_value(_ssd->write_bandwidth_utilization_percent(sim_time_ps)), "",
+    });
+    write_csv_row(out, {
+        "SSD", "read", "all",
+        csv_value(_ssd->read_bandwidth_utilization_percent(sim_time_ps)),
+        csv_value(_ssd->read_bandwidth_GBps(sim_time_ps)),
+        csv_value(_ssd->read_bandwidth_utilization_percent(sim_time_ps)),
+        csv_value(read_peak), csv_value(ps_to_us(sim_time_ps)), "", "",
+        csv_value(_ssd->total_reads()), "0", csv_value(_ssd->read_bytes()),
+        "0", csv_value(_ssd->read_bytes()),
+        csv_value(_ssd->read_iops(sim_time_ps)),
+        csv_value(_ssd->read_iops(sim_time_ps)), "0",
+        csv_value(_ssd->read_bandwidth_GBps(sim_time_ps)), "0",
+        csv_value(read_peak), "", 
+        csv_value(_ssd->read_bandwidth_utilization_percent(sim_time_ps)),
+        "", "",
+    });
+    write_csv_row(out, {
+        "SSD", "write", "all",
+        csv_value(_ssd->write_bandwidth_utilization_percent(sim_time_ps)),
+        csv_value(_ssd->write_bandwidth_GBps(sim_time_ps)),
+        csv_value(_ssd->write_bandwidth_utilization_percent(sim_time_ps)),
+        csv_value(write_peak), csv_value(ps_to_us(sim_time_ps)), "", "",
+        "0", csv_value(_ssd->total_writes()), "0",
+        csv_value(_ssd->write_bytes()), csv_value(_ssd->write_bytes()),
+        csv_value(_ssd->write_iops(sim_time_ps)), "0",
+        csv_value(_ssd->write_iops(sim_time_ps)), "0",
+        csv_value(_ssd->write_bandwidth_GBps(sim_time_ps)), "",
+        csv_value(write_peak), "",
+        csv_value(_ssd->write_bandwidth_utilization_percent(sim_time_ps)), "",
+    });
+  } else {
+    write_csv_row(out, {
+        "SSD", "overall", "all", "0", "0", "0", "",
+        csv_value(ps_to_us(sim_time_ps)), "", "", "0", "0", "0", "0", "0",
+        "0", "0", "0", "0", "0", "", "", "0", "0", "",
+    });
+  }
 }

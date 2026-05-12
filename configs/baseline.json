@@ -181,7 +181,7 @@
   "ddr" : {
     "enabled" : true,
     "freq" : 1600,
-    "channels" : 16,
+    "channels" : 12,
     "req_size" : 32,
     "nbl" : 1,
     "size_gb" : 768,

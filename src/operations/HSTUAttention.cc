@@ -40,6 +40,11 @@ uint32_t capped_u32(uint64_t value) {
       std::min<uint64_t>(value, std::numeric_limits<uint32_t>::max()));
 }
 
+uint64_t ceil_div_u64(uint64_t value, uint64_t divisor) {
+  if (divisor == 0) return 0;
+  return (value + divisor - 1) / divisor;
+}
+
 }  // namespace
 
 HSTUAttention::HSTUAttention(SimulationConfig config, Model* model,
@@ -165,10 +170,11 @@ void HSTUAttention::initialize_kv_cache_tiles(uint32_t input_idx) {
     const bool reuse_aware = cache->has_group_layout() ||
         (cache->has_reuse_layout() && cache->reuse_axis() == _kv_axis);
     const uint32_t logical_request_count = static_cast<uint32_t>(
-        reuse_aware ? logical_addrs.size() : physical_addrs.size());
+        reuse_aware ? physical_addrs.size() : logical_addrs.size());
     initialize_movin_compute_tile(_INPUT_OPERAND + input_idx, physical_addrs,
                                   logical_request_count,
-                                  capped_u32(logical_addrs.size() *
+                                  capped_u32((reuse_aware ? physical_addrs.size()
+                                                          : logical_addrs.size()) *
                                              _config.dram_req_size));
   }
 }
@@ -177,29 +183,31 @@ void HSTUAttention::initialize_output_compute_tiles() {
   Tensor* q = get_input(0);
   Tensor* output = get_output(0);
   const uint64_t elements_total = product(output->get_dims());
-  uint64_t batch_tokens = std::max<uint64_t>(1, elements_total /
-      std::max<uint32_t>(_hidden, 1));
+  const uint32_t hidden = std::max<uint32_t>(_hidden, 1);
+  const uint64_t batch_tokens = std::max<uint64_t>(1, elements_total / hidden);
   uint64_t score_elements = _attention_score_elements;
   if (score_elements == 0)
     score_elements = batch_tokens * std::max<uint32_t>(_logical_kv_len, 1);
-  const uint64_t total_compute = std::max<uint64_t>(
-      1, (elements_total + score_elements) *
-             static_cast<uint64_t>(_config.precision));
+  const uint64_t tokens_per_tile =
+      std::max<uint64_t>(1, _output_elements_per_tile / hidden);
 
-  for (uint64_t offset = 0; offset < elements_total;
-       offset += _output_elements_per_tile) {
-    const uint64_t elements =
-        std::min(elements_total - offset, _output_elements_per_tile);
+  for (uint64_t token_offset = 0; token_offset < batch_tokens;
+       token_offset += tokens_per_tile) {
+    const uint64_t tokens =
+        std::min(batch_tokens - token_offset, tokens_per_tile);
+    const uint64_t offset = token_offset * hidden;
+    const uint64_t elements = tokens * hidden;
     std::set<addr_type> q_addrs;
     std::set<addr_type> out_addrs;
     collect_dense_addresses(q, offset, elements, q_addrs);
     collect_output_addresses(offset, elements, out_addrs);
     if (q_addrs.empty() || out_addrs.empty()) continue;
 
-    const uint32_t bytes = capped_u32(elements * _config.precision);
-    const uint32_t compute_size = capped_u32(
-        std::max<uint64_t>(1, total_compute * elements /
-                                  std::max<uint64_t>(elements_total, 1)));
+    const uint64_t tile_score_elements = std::max<uint64_t>(
+        1, ceil_div_u64(score_elements * tokens, batch_tokens));
+    const uint32_t effective_kv_len =
+        capped_u32(std::max<uint64_t>(1, ceil_div_u64(tile_score_elements,
+                                                      tokens)));
     auto tile = std::make_unique<Tile>(Tile{
         .status = Tile::Status::INITIALIZED,
         .optype = _name,
@@ -214,22 +222,59 @@ void HSTUAttention::initialize_output_compute_tiles() {
         .src_addrs = std::vector<addr_type>(q_addrs.begin(), q_addrs.end()),
         .operand_id = _INPUT_OPERAND,
     }));
-    tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
-        .opcode = Opcode::COMP,
-        .dest_addr = SPAD_BASE,
-        .size = static_cast<uint32_t>(q_addrs.size()),
-        .compute_size = std::max<uint32_t>(compute_size, bytes),
-        .src_addrs = std::vector<addr_type>{SPAD_BASE},
-    }));
+    append_gemm_compute(tile.get(), capped_u32(tokens), hidden,
+                        effective_kv_len, ACCUM_SPAD_BASE);
+    append_silu_compute(tile.get(), tile_score_elements);
+    append_gemm_compute(tile.get(), capped_u32(tokens), effective_kv_len,
+                        hidden, ACCUM_SPAD_BASE);
     tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
         .opcode = Opcode::MOVOUT,
-        .dest_addr = SPAD_BASE,
+        .dest_addr = ACCUM_SPAD_BASE,
         .size = static_cast<uint32_t>(out_addrs.size()),
         .src_addrs = std::vector<addr_type>(out_addrs.begin(), out_addrs.end()),
         .operand_id = _OUTPUT_OPERAND,
     }));
     _tiles.push_back(std::move(tile));
   }
+}
+
+void HSTUAttention::append_gemm_compute(Tile* tile, uint32_t n, uint32_t c,
+                                        uint32_t m, addr_type dest_addr) {
+  const uint32_t loop_size =
+      std::max<uint32_t>(1, _config.core_config[target_core].core_height);
+  for (uint32_t m_offset = 0; m_offset < m; m_offset += loop_size) {
+    const uint32_t m_loop = std::min<uint32_t>(loop_size, m - m_offset);
+    for (uint32_t c_offset = 0; c_offset < c; c_offset += loop_size) {
+      const uint32_t c_loop = std::min<uint32_t>(loop_size, c - c_offset);
+      for (uint32_t n_offset = 0; n_offset < n; n_offset += loop_size) {
+        const uint32_t n_loop = std::min<uint32_t>(loop_size, n - n_offset);
+        tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
+            .opcode = Opcode::GEMM_PRELOAD,
+            .dest_addr = dest_addr,
+            .size = std::max<uint32_t>(n_loop, 1),
+            .compute_size = std::max<uint32_t>(n_loop, 1),
+            .src_addrs = std::vector<addr_type>{SPAD_BASE, SPAD_BASE},
+            .tile_m = m_loop,
+            .tile_k = c_loop,
+            .tile_n = n_loop,
+        }));
+      }
+    }
+  }
+}
+
+void HSTUAttention::append_silu_compute(Tile* tile, uint64_t score_elements) {
+  const uint64_t bytes =
+      std::max<uint64_t>(1, score_elements * _config.precision);
+  tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
+      .opcode = Opcode::SWISH,
+      .dest_addr = SPAD_BASE,
+      .size = std::max<uint32_t>(
+          1, capped_u32(ceil_div_u64(bytes, _config.dram_req_size))),
+      .compute_size = capped_u32(bytes),
+      .src_addrs = std::vector<addr_type>{ACCUM_SPAD_BASE},
+      .src_from_accum = true,
+  }));
 }
 
 void HSTUAttention::initialize_movin_compute_tile(

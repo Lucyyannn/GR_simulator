@@ -6,12 +6,12 @@
 #include "Hashing.h"
 
 uint32_t Dram::get_channel_id(MemoryAccess* access) {
-  uint32_t channel_id;
-  if (_n_ch >= 16)
-    channel_id = ipoly_hash_function((new_addr_type)access->dram_address/_address_req_size, 0, _n_ch);
-  else
-    channel_id = ipoly_hash_function((new_addr_type)access->dram_address/_address_req_size, 0, 16) % _n_ch;
-  return channel_id;
+  const new_addr_type addr_unit =
+      (new_addr_type)access->dram_address / _address_req_size;
+  if (_n_ch == 16 || _n_ch == 32 || _n_ch == 64) {
+    return ipoly_hash_function(addr_unit, 0, _n_ch);
+  }
+  return hash_channel(addr_unit, _n_ch);
 }
 
 void Dram::advance_to(uint64_t now_ps) {
@@ -199,6 +199,26 @@ void DramRamulator::print_stat() {
   _mem->print_stats();
 }
 
+MemoryBandwidthStats DramRamulator::get_bandwidth_stats() const {
+  MemoryBandwidthStats stats;
+  stats.channel_utilization_percent.resize(_n_ch, 0.0);
+  stats.channel_reads.resize(_n_ch, 0);
+  stats.channel_writes.resize(_n_ch, 0);
+  if (_n_ch == 0 || _cycles == 0) return stats;
+
+  double util_sum = 0.0;
+  for (uint32_t ch = 0; ch < _n_ch; ch++) {
+    const uint64_t requests = _total_processed_requests[ch] + _processed_requests[ch];
+    const double util =
+        static_cast<double>(requests) * 100.0 / static_cast<double>(_cycles);
+    stats.channel_utilization_percent[ch] = util;
+    stats.channel_reads[ch] = requests;
+    util_sum += util;
+  }
+  stats.average_utilization_percent = util_sum / static_cast<double>(_n_ch);
+  return stats;
+}
+
 Ramulator2Memory::Ramulator2Memory(const SimulationConfig& config,
                                    const TieredMemoryConfig& tier_config,
                                    std::string device_name)
@@ -289,6 +309,35 @@ void Ramulator2Memory::print_stat() {
   for (int ch = 0; ch < _n_ch; ch++) {
     _mem[ch]->print(stdout);
   }
+}
+
+MemoryBandwidthStats Ramulator2Memory::get_bandwidth_stats() const {
+  MemoryBandwidthStats stats;
+  stats.channel_utilization_percent.resize(_n_ch, 0.0);
+  stats.channel_reads.resize(_n_ch, 0);
+  stats.channel_writes.resize(_n_ch, 0);
+  if (_n_ch == 0) return stats;
+
+  double util_sum = 0.0;
+  for (uint32_t ch = 0; ch < _n_ch; ch++) {
+    const auto& mem = _mem[ch];
+    if (!mem) continue;
+    const uint64_t cycles = mem->get_cycle_count();
+    const uint64_t reads = mem->get_total_reads();
+    const uint64_t writes = mem->get_total_writes();
+    const double util =
+        cycles == 0
+            ? 0.0
+            : static_cast<double>(reads + writes) * 100.0 *
+                  static_cast<double>(mem->get_nbl()) /
+                  static_cast<double>(cycles);
+    stats.channel_utilization_percent[ch] = util;
+    stats.channel_reads[ch] = reads;
+    stats.channel_writes[ch] = writes;
+    util_sum += util;
+  }
+  stats.average_utilization_percent = util_sum / static_cast<double>(_n_ch);
+  return stats;
 }
 
 Ddr::Ddr(const SimulationConfig& config)

@@ -317,18 +317,58 @@ def build_kv_reuse_mapping(
     raise ValueError(f"Unsupported KV reuse variant: {variant}")
 
 
+def clamp_ratio(value):
+    return max(0.0, min(1.0, float(value)))
+
+
+def compressed_rows_for_ratio(logical_rows, reuse_ratio):
+    if logical_rows <= 0:
+        return 0
+    ratio = clamp_ratio(reuse_ratio)
+    if ratio <= 0:
+        return logical_rows
+    return max(1, int(round(logical_rows * (1.0 - ratio))))
+
+
+def build_ratio_reuse_mapping(length, reuse_ratio, reuse_axis=0):
+    physical_rows = compressed_rows_for_ratio(length, reuse_ratio)
+    if physical_rows >= length:
+        return {}
+    logical_to_physical = [
+        min(physical_rows - 1, (logical_row * physical_rows) // max(length, 1))
+        for logical_row in range(length)
+    ]
+    return {
+        "reuse_mode": "row_reuse",
+        "reuse_variant": "ratio",
+        "reuse_axis": reuse_axis,
+        "reuse_physical_rows": physical_rows,
+        "reuse_logical_to_physical": logical_to_physical,
+        "reuse_ratio": clamp_ratio(reuse_ratio),
+    }
+
+
 def recompute_attention_score_elements(
-    batch_size, cached_kv_len, history_recompute_len, candidate_tokens
+    batch_size,
+    cached_kv_len,
+    history_recompute_len,
+    candidate_tokens,
+    kv_reuse_ratio=0.0,
 ):
+    effective_cached_kv_len = compressed_rows_for_ratio(
+        cached_kv_len, kv_reuse_ratio
+    )
     if history_recompute_len <= 0:
-        return batch_size * candidate_tokens * (cached_kv_len + candidate_tokens)
+        return batch_size * candidate_tokens * (
+            effective_cached_kv_len + candidate_tokens
+        )
 
     history_scores = (
-        history_recompute_len * cached_kv_len
+        history_recompute_len * effective_cached_kv_len
         + history_recompute_len * (history_recompute_len + 1) // 2
     )
     candidate_scores = candidate_tokens * (
-        cached_kv_len + history_recompute_len + candidate_tokens
+        effective_cached_kv_len + history_recompute_len + candidate_tokens
     )
     return batch_size * (history_scores + candidate_scores)
 
@@ -363,6 +403,7 @@ def build_trace(
     kv_reuse_hot_share=0.75,
     kv_reuse_action_offset=1,
     kv_reuse_action_stride=2,
+    kv_reuse_ratio=0.0,
     source_medium="ddr",
     seed=0,
     history_recompute_len=0,
@@ -375,16 +416,29 @@ def build_trace(
     candidate_tokens = tokens
     cached_kv_len = kv_len - history_recompute_len
     active_tokens = history_recompute_len + candidate_tokens
+    kv_reuse_ratio = clamp_ratio(kv_reuse_ratio if kv_reuse_enabled else 0.0)
+    effective_cached_kv_len = compressed_rows_for_ratio(
+        cached_kv_len, kv_reuse_ratio
+    )
     score_elements = recompute_attention_score_elements(
-        1, cached_kv_len, history_recompute_len, candidate_tokens
+        1,
+        cached_kv_len,
+        history_recompute_len,
+        candidate_tokens,
+        kv_reuse_ratio,
     )
     reuse_rng = random.Random(seed + user_id * 1000003 + batch_id * 9176 + macro_batch_id)
     ops = []
     indices_values = indices_values or [i % vocab for i in range(active_tokens)]
     if len(indices_values) != active_tokens:
         raise ValueError("indices_values length must match active token count")
-    kv_reuse_meta = (
-        build_kv_reuse_mapping(
+    kv_reuse_meta = None
+    if kv_reuse_enabled and kv_reuse_ratio > 0:
+        kv_reuse_meta = build_ratio_reuse_mapping(
+            cached_kv_len, kv_reuse_ratio, reuse_axis=0
+        )
+    elif kv_reuse_enabled:
+        kv_reuse_meta = build_kv_reuse_mapping(
             cached_kv_len,
             reuse_rng,
             variant=kv_reuse_variant,
@@ -395,9 +449,6 @@ def build_trace(
             action_offset=kv_reuse_action_offset,
             action_stride=kv_reuse_action_stride,
         )
-        if kv_reuse_enabled
-        else None
-    )
 
     base = common_meta(user_id, batch_id, macro_batch_id)
     add_op(
@@ -549,6 +600,7 @@ def build_trace(
                     "candidate_tokens": candidate_tokens,
                     "history_recompute_len": history_recompute_len,
                     "cached_kv_len": cached_kv_len,
+                    "effective_cached_kv_len": effective_cached_kv_len,
                     "mask_mode": attention_mask_mode(history_recompute_len),
                     "attention_score_elements": score_elements,
                     "hidden": hidden,
@@ -719,9 +771,11 @@ def build_trace(
             "kv_reuse_hot_share": kv_reuse_hot_share,
             "kv_reuse_action_offset": kv_reuse_action_offset,
             "kv_reuse_action_stride": kv_reuse_action_stride,
+            "kv_reuse_ratio": kv_reuse_ratio,
             "candidate_tokens": candidate_tokens,
             "history_recompute_len": history_recompute_len,
             "cached_kv_len": cached_kv_len,
+            "effective_cached_kv_len": effective_cached_kv_len,
             "active_tokens": active_tokens,
             "attention_mask_mode": attention_mask_mode(history_recompute_len),
         },
@@ -751,6 +805,7 @@ def build_batched_trace(
     kv_reuse_hot_share=0.75,
     kv_reuse_action_offset=1,
     kv_reuse_action_stride=2,
+    kv_reuse_ratio=0.0,
     source_medium="ddr",
     seed=0,
     history_recompute_len=0,
@@ -763,6 +818,10 @@ def build_batched_trace(
     candidate_tokens = tokens
     cached_kv_len = kv_len - history_recompute_len
     active_tokens = history_recompute_len + candidate_tokens
+    kv_reuse_ratio = clamp_ratio(kv_reuse_ratio if kv_reuse_enabled else 0.0)
+    effective_cached_kv_len = compressed_rows_for_ratio(
+        cached_kv_len, kv_reuse_ratio
+    )
 
     batch_size = len(user_ids)
     if batch_size <= 0:
@@ -787,6 +846,27 @@ def build_batched_trace(
     def batch_kv_reuse_meta(layer):
         if not kv_reuse_enabled:
             return {}
+        if kv_reuse_ratio > 0:
+            physical_rows = [
+                compressed_rows_for_ratio(cached_kv_len, kv_reuse_ratio)
+                for _ in user_ids
+            ]
+            mappings = [
+                build_ratio_reuse_mapping(
+                    cached_kv_len, kv_reuse_ratio, reuse_axis=1
+                )["reuse_logical_to_physical"]
+                for _ in user_ids
+            ]
+            return {
+                "reuse_mode": "row_reuse",
+                "reuse_variant": "ratio",
+                "reuse_axis": 1,
+                "reuse_physical_rows_per_user": physical_rows,
+                "reuse_logical_to_physical_per_user": mappings,
+                "reuse_ratio": kv_reuse_ratio,
+                "reuse_window_size": kv_reuse_window_size,
+                "reuse_topk": kv_reuse_topk,
+            }
         mappings = []
         physical_rows = []
         window_topk_actions = []
@@ -1009,12 +1089,14 @@ def build_batched_trace(
                     "candidate_tokens": candidate_tokens,
                     "history_recompute_len": history_recompute_len,
                     "cached_kv_len": cached_kv_len,
+                    "effective_cached_kv_len": effective_cached_kv_len,
                     "mask_mode": attention_mask_mode(history_recompute_len),
                     "attention_score_elements": recompute_attention_score_elements(
                         batch_size,
                         cached_kv_len,
                         history_recompute_len,
                         candidate_tokens,
+                        kv_reuse_ratio,
                     ),
                     "hidden": hidden,
                     "batch_size": batch_size,
@@ -1243,9 +1325,11 @@ def build_batched_trace(
             "kv_reuse_hot_share": kv_reuse_hot_share,
             "kv_reuse_action_offset": kv_reuse_action_offset,
             "kv_reuse_action_stride": kv_reuse_action_stride,
+            "kv_reuse_ratio": kv_reuse_ratio,
             "candidate_tokens": candidate_tokens,
             "history_recompute_len": history_recompute_len,
             "cached_kv_len": cached_kv_len,
+            "effective_cached_kv_len": effective_cached_kv_len,
             "active_tokens": active_tokens,
             "attention_mask_mode": attention_mask_mode(history_recompute_len),
         },
@@ -1310,6 +1394,7 @@ def write_single_trace(args, op_modeling):
         kv_reuse_hot_share=args.kv_reuse_hot_share,
         kv_reuse_action_offset=args.kv_reuse_action_offset,
         kv_reuse_action_stride=args.kv_reuse_action_stride,
+        kv_reuse_ratio=args.kv_reuse_ratio,
         source_medium=args.source_medium,
         seed=args.seed,
         history_recompute_len=args.history_recompute_len,
@@ -1345,11 +1430,12 @@ def write_pipeline_traces(args, op_modeling):
             model_name = f"hstu_b{batch_id}_m{macro_id}"
             indices_values_per_user = []
             for user in users:
-                history_rng = random.Random(args.seed + user * 1000003)
-                history_indices = [
-                    history_rng.randrange(args.vocab)
-                    for _ in range(args.history_recompute_len)
-                ]
+                # history_rng = random.Random(args.seed + user * 1000003)
+                # history_indices = [
+                #     history_rng.randrange(args.vocab)
+                #     for _ in range(args.history_recompute_len)
+                # ]
+                history_indices = list(range(args.history_recompute_len))
                 candidate_indices = [rng.randrange(args.vocab) for _ in range(tokens)]
                 indices_values_per_user.append(history_indices + candidate_indices)
             trace = build_batched_trace(
@@ -1374,6 +1460,7 @@ def write_pipeline_traces(args, op_modeling):
                 kv_reuse_hot_share=args.kv_reuse_hot_share,
                 kv_reuse_action_offset=args.kv_reuse_action_offset,
                 kv_reuse_action_stride=args.kv_reuse_action_stride,
+                kv_reuse_ratio=args.kv_reuse_ratio,
                 source_medium=args.source_medium,
                 seed=args.seed,
                 history_recompute_len=args.history_recompute_len,
@@ -1421,6 +1508,7 @@ def write_pipeline_traces(args, op_modeling):
                 "kv_reuse_hot_share": args.kv_reuse_hot_share,
                 "kv_reuse_action_offset": args.kv_reuse_action_offset,
                 "kv_reuse_action_stride": args.kv_reuse_action_stride,
+                "kv_reuse_ratio": args.kv_reuse_ratio,
                 "source_medium": args.source_medium,
                 "history_recompute_len": args.history_recompute_len,
                 "attention_mask_mode": attention_mask_mode(args.history_recompute_len),
@@ -1459,7 +1547,7 @@ def main():
         "--source-medium",
         choices=["ddr", "ssd"],
         default="ddr",
-        help="Initial storage medium for preload source tensors.",
+        help="Initial storage medium for non-weight preload source tensors.",
     )
     parser.add_argument("--pipeline", action="store_true")
     parser.add_argument("--enable-kv-reuse", action="store_true")
@@ -1505,6 +1593,15 @@ def main():
         help=(
             "Fraction of action rows in each window assigned to the hot top-k "
             "action groups before cold rows are left unique."
+        ),
+    )
+    parser.add_argument(
+        "--kv-reuse-ratio",
+        type=float,
+        default=0.0,
+        help=(
+            "Fraction of cached history KV rows compressed by KV reuse. "
+            "This directly reduces fused attention score/aggregation work."
         ),
     )
     parser.add_argument(
@@ -1555,6 +1652,8 @@ def main():
         raise ValueError("--kv-reuse-topk must be positive")
     if not (0.0 < args.kv_reuse_hot_share <= 1.0):
         raise ValueError("--kv-reuse-hot-share must be in (0, 1]")
+    if not (0.0 <= args.kv_reuse_ratio < 1.0):
+        raise ValueError("--kv-reuse-ratio must be in [0, 1)")
     if args.kv_reuse_action_stride < 1:
         raise ValueError("--kv-reuse-action-stride must be positive")
     if args.kv_reuse_action_offset < 0:

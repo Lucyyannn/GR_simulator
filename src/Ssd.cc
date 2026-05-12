@@ -15,7 +15,8 @@ Ssd::Ssd(const SsdConfig& cfg, uint32_t tick_freq_mhz)
       _tick_period_ps((uint64_t)(1000000.0 /
                                  (tick_freq_mhz > 0 ? tick_freq_mhz : 1000))),
       _stat_ch_reads(cfg.nchs, 0),
-      _stat_ch_writes(cfg.nchs, 0) {
+      _stat_ch_writes(cfg.nchs, 0),
+      _stat_ch_busy_ns(cfg.nchs, 0) {
   init_geometry();
   spdlog::info(
       "[SSD] Initialized FEMU-bbssd-compatible model: {} channels x {} LUNs, "
@@ -345,27 +346,34 @@ uint64_t Ssd::ssd_advance_status(const Ppa& ppa, SsdCmd cmd,
   NandLun& lun = get_lun(ppa);
   SsdChannelState& ch = _channels[ppa.ch];
   uint64_t nand_stime = std::max(lun.next_lun_avail_time, cmd_stime_ns);
+  uint64_t op_busy_ns = 0;
   uint64_t lat = 0;
 
   switch (cmd) {
     case SsdCmd::NAND_READ:
-      lun.next_lun_avail_time = nand_stime + static_cast<uint64_t>(_cfg.pg_rd_lat);
+      op_busy_ns = static_cast<uint64_t>(_cfg.pg_rd_lat);
+      lun.next_lun_avail_time = nand_stime + op_busy_ns;
       lat = lun.next_lun_avail_time - cmd_stime_ns;
       if (ppa.ch < static_cast<int>(_stat_ch_reads.size())) _stat_ch_reads[ppa.ch]++;
       break;
     case SsdCmd::NAND_WRITE:
-      lun.next_lun_avail_time = nand_stime + static_cast<uint64_t>(_cfg.pg_wr_lat);
+      op_busy_ns = static_cast<uint64_t>(_cfg.pg_wr_lat);
+      lun.next_lun_avail_time = nand_stime + op_busy_ns;
       lat = lun.next_lun_avail_time - cmd_stime_ns;
       if (ppa.ch < static_cast<int>(_stat_ch_writes.size())) _stat_ch_writes[ppa.ch]++;
       break;
     case SsdCmd::NAND_ERASE:
-      lun.next_lun_avail_time =
-          nand_stime + static_cast<uint64_t>(_cfg.blk_er_lat);
+      op_busy_ns = static_cast<uint64_t>(_cfg.blk_er_lat);
+      lun.next_lun_avail_time = nand_stime + op_busy_ns;
       lat = lun.next_lun_avail_time - cmd_stime_ns;
       break;
   }
+  if (ppa.ch < static_cast<int>(_stat_ch_busy_ns.size()))
+    _stat_ch_busy_ns[ppa.ch] += op_busy_ns;
 
   if (_cfg.ch_xfer_lat > 0 && cmd != SsdCmd::NAND_ERASE) {
+    if (ppa.ch < static_cast<int>(_stat_ch_busy_ns.size()))
+      _stat_ch_busy_ns[ppa.ch] += static_cast<uint64_t>(_cfg.ch_xfer_lat);
     if (cmd == SsdCmd::NAND_READ) {
       uint64_t chnl_stime = std::max(ch.next_ch_avail_time, lun.next_lun_avail_time);
       ch.next_ch_avail_time = chnl_stime + static_cast<uint64_t>(_cfg.ch_xfer_lat);
@@ -656,11 +664,13 @@ void Ssd::process_queued_host_requests(uint64_t now_ps) {
     } else if (request->write) {
       lat_ns = process_write(*request, issue_time_ns);
       _stat_writes++;
+      _stat_write_bytes += request->size_bytes;
       _stat_total_write_lat_ns += lat_ns;
       _stat_max_write_lat_ns = std::max(_stat_max_write_lat_ns, lat_ns);
     } else {
       lat_ns = process_read(*request, issue_time_ns);
       _stat_reads++;
+      _stat_read_bytes += request->size_bytes;
       _stat_total_read_lat_ns += lat_ns;
       _stat_max_read_lat_ns = std::max(_stat_max_read_lat_ns, lat_ns);
     }
@@ -753,4 +763,77 @@ void Ssd::print_stat() {
         ch < static_cast<int>(_stat_ch_writes.size()) ? _stat_ch_writes[ch] : 0;
     spdlog::info("[SSD] CH{}: reads={} writes={}", ch, ch_rd, ch_wr);
   }
+}
+
+double Ssd::bandwidth_GBps(uint64_t sim_time_ps) const {
+  if (sim_time_ps == 0) return 0.0;
+  const double seconds = static_cast<double>(sim_time_ps) / 1e12;
+  return static_cast<double>(total_bytes()) / seconds / 1e9;
+}
+
+double Ssd::read_bandwidth_GBps(uint64_t sim_time_ps) const {
+  if (sim_time_ps == 0) return 0.0;
+  const double seconds = static_cast<double>(sim_time_ps) / 1e12;
+  return static_cast<double>(_stat_read_bytes) / seconds / 1e9;
+}
+
+double Ssd::write_bandwidth_GBps(uint64_t sim_time_ps) const {
+  if (sim_time_ps == 0) return 0.0;
+  const double seconds = static_cast<double>(sim_time_ps) / 1e12;
+  return static_cast<double>(_stat_write_bytes) / seconds / 1e9;
+}
+
+double Ssd::read_peak_bandwidth_GBps() const {
+  if (_cfg.pg_rd_lat <= 0 || _cfg.nchs <= 0 || _cfg.luns_per_ch <= 0)
+    return 0.0;
+  const double page_bytes =
+      static_cast<double>(_cfg.secsz) * static_cast<double>(_cfg.secs_per_pg);
+  const double parallelism =
+      static_cast<double>(_cfg.nchs) * static_cast<double>(_cfg.luns_per_ch);
+  const double latency_seconds = static_cast<double>(_cfg.pg_rd_lat) / 1e9;
+  return page_bytes * parallelism / latency_seconds / 1e9;
+}
+
+double Ssd::write_peak_bandwidth_GBps() const {
+  if (_cfg.pg_wr_lat <= 0 || _cfg.nchs <= 0 || _cfg.luns_per_ch <= 0)
+    return 0.0;
+  const double page_bytes =
+      static_cast<double>(_cfg.secsz) * static_cast<double>(_cfg.secs_per_pg);
+  const double parallelism =
+      static_cast<double>(_cfg.nchs) * static_cast<double>(_cfg.luns_per_ch);
+  const double latency_seconds = static_cast<double>(_cfg.pg_wr_lat) / 1e9;
+  return page_bytes * parallelism / latency_seconds / 1e9;
+}
+
+double Ssd::read_bandwidth_utilization_percent(uint64_t sim_time_ps) const {
+  const double peak = read_peak_bandwidth_GBps();
+  return peak <= 0.0 ? 0.0 : read_bandwidth_GBps(sim_time_ps) * 100.0 / peak;
+}
+
+double Ssd::write_bandwidth_utilization_percent(uint64_t sim_time_ps) const {
+  const double peak = write_peak_bandwidth_GBps();
+  return peak <= 0.0 ? 0.0 : write_bandwidth_GBps(sim_time_ps) * 100.0 / peak;
+}
+
+double Ssd::bandwidth_utilization_percent(uint64_t sim_time_ps) const {
+  return read_bandwidth_utilization_percent(sim_time_ps) +
+         write_bandwidth_utilization_percent(sim_time_ps);
+}
+
+double Ssd::iops(uint64_t sim_time_ps) const {
+  if (sim_time_ps == 0) return 0.0;
+  const double seconds = static_cast<double>(sim_time_ps) / 1e12;
+  return static_cast<double>(_stat_reads + _stat_writes) / seconds;
+}
+
+double Ssd::read_iops(uint64_t sim_time_ps) const {
+  if (sim_time_ps == 0) return 0.0;
+  const double seconds = static_cast<double>(sim_time_ps) / 1e12;
+  return static_cast<double>(_stat_reads) / seconds;
+}
+
+double Ssd::write_iops(uint64_t sim_time_ps) const {
+  if (sim_time_ps == 0) return 0.0;
+  const double seconds = static_cast<double>(sim_time_ps) / 1e12;
+  return static_cast<double>(_stat_writes) / seconds;
 }

@@ -68,6 +68,20 @@ class Ssd {
 
   uint64_t total_reads() const { return _stat_reads; }
   uint64_t total_writes() const { return _stat_writes; }
+  uint64_t read_bytes() const { return _stat_read_bytes; }
+  uint64_t write_bytes() const { return _stat_write_bytes; }
+  uint64_t total_bytes() const { return _stat_read_bytes + _stat_write_bytes; }
+  double bandwidth_GBps(uint64_t sim_time_ps) const;
+  double read_bandwidth_GBps(uint64_t sim_time_ps) const;
+  double write_bandwidth_GBps(uint64_t sim_time_ps) const;
+  double read_peak_bandwidth_GBps() const;
+  double write_peak_bandwidth_GBps() const;
+  double read_bandwidth_utilization_percent(uint64_t sim_time_ps) const;
+  double write_bandwidth_utilization_percent(uint64_t sim_time_ps) const;
+  double bandwidth_utilization_percent(uint64_t sim_time_ps) const;
+  double iops(uint64_t sim_time_ps) const;
+  double read_iops(uint64_t sim_time_ps) const;
+  double write_iops(uint64_t sim_time_ps) const;
 
  private:
   enum NandStatus : uint8_t {
@@ -276,6 +290,8 @@ class Ssd {
 
   uint64_t _stat_reads = 0;
   uint64_t _stat_writes = 0;
+  uint64_t _stat_read_bytes = 0;
+  uint64_t _stat_write_bytes = 0;
   uint64_t _stat_total_read_lat_ns = 0;
   uint64_t _stat_total_write_lat_ns = 0;
   uint64_t _stat_max_lat_ns = 0;
@@ -285,6 +301,7 @@ class Ssd {
   uint64_t _stat_gc_runs = 0;
   std::vector<uint64_t> _stat_ch_reads;
   std::vector<uint64_t> _stat_ch_writes;
+  std::vector<uint64_t> _stat_ch_busy_ns;
 };
 
 #endif  // SSD_H

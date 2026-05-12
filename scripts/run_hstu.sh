@@ -5,13 +5,14 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 cd "${REPO_ROOT}"
+export ONNXIM_HOME="${REPO_ROOT}"
 
 usage() {
   cat <<'EOF'
 Usage: bash scripts/run_hstu.sh [options]
 
 Options:
-  --source-medium {ddr|ssd}   Initial source medium for weights/KV/embedding rows. Default: ddr
+  --source-medium {ddr|ssd}   Initial source medium for KV/embedding rows. Default: ddr
   --base-config PATH           Simulator base config. Default: configs/910c_mini_<source-medium>.json
   --result-dir PATH           Output directory. Default: results/run_hstu_<source-medium>
   --layers N                   HSTU layer count
@@ -28,6 +29,7 @@ Options:
   --attention-modeling MODE     Attention modeling mode: decomposed or fused. Default: decomposed
   --enable-kv-reuse             Enable KV row reuse metadata in generated traces
   --kv-reuse-variant MODE       KV reuse variant: global or window_topk. Default: window_topk
+  --kv-reuse-ratio R            KV reuse compression ratio for cached KV rows. Default: 0
   --log-level LEVEL            Simulator log level. Default: info
   -h, --help                  Show this message
 EOF
@@ -54,6 +56,7 @@ KV_REUSE_VARIANT="${KV_REUSE_VARIANT:-window_topk}"
 KV_REUSE_ACTION_COUNT="${KV_REUSE_ACTION_COUNT:-4}"
 KV_REUSE_WINDOW_SIZE="${KV_REUSE_WINDOW_SIZE:-1024}"
 KV_REUSE_TOPK="${KV_REUSE_TOPK:-4}"
+KV_REUSE_RATIO="${KV_REUSE_RATIO:-0}"
 KV_REUSE_HOT_SHARE="${KV_REUSE_HOT_SHARE:-0.75}"
 KV_REUSE_ACTION_OFFSET="${KV_REUSE_ACTION_OFFSET:-1}"
 KV_REUSE_ACTION_STRIDE="${KV_REUSE_ACTION_STRIDE:-2}"
@@ -141,6 +144,10 @@ while [[ $# -gt 0 ]]; do
       KV_REUSE_TOPK="$2"
       shift 2
       ;;
+    --kv-reuse-ratio)
+      KV_REUSE_RATIO="$2"
+      shift 2
+      ;;
     --kv-reuse-hot-share)
       KV_REUSE_HOT_SHARE="$2"
       shift 2
@@ -201,6 +208,7 @@ TRACE_DIR="${RESULT_DIR}/traces"
 MODELS_JSON="${RESULT_DIR}/models.json"
 RUNTIME_CONFIG="${RESULT_DIR}/runtime_config.json"
 BREAKDOWN_CSV="${RESULT_DIR}/layer_breakdown.csv"
+HARDWARE_SUMMARY_CSV="${RESULT_DIR}/hardware_summary.csv"
 TIMELINE_PNG="${RESULT_DIR}/layer_timeline.png"
 LOG_PATH="${RESULT_DIR}/layer.log"
 
@@ -229,6 +237,7 @@ TRACE_ARGS=(
   --kv-reuse-action-count "${KV_REUSE_ACTION_COUNT}"
   --kv-reuse-window-size "${KV_REUSE_WINDOW_SIZE}"
   --kv-reuse-topk "${KV_REUSE_TOPK}"
+  --kv-reuse-ratio "${KV_REUSE_RATIO}"
   --kv-reuse-hot-share "${KV_REUSE_HOT_SHARE}"
   --kv-reuse-action-offset "${KV_REUSE_ACTION_OFFSET}"
   --kv-reuse-action-stride "${KV_REUSE_ACTION_STRIDE}"
@@ -242,7 +251,7 @@ fi
 
 python3 scripts/generate_hstu_baseline_trace.py "${TRACE_ARGS[@]}"
 
-python3 - "${BASE_CONFIG}" "${RUNTIME_CONFIG}" "${BREAKDOWN_CSV}" <<'PY'
+python3 - "${BASE_CONFIG}" "${RUNTIME_CONFIG}" "${BREAKDOWN_CSV}" "${HARDWARE_SUMMARY_CSV}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -250,6 +259,7 @@ from pathlib import Path
 base_config = Path(sys.argv[1])
 runtime_config = Path(sys.argv[2])
 breakdown_csv = sys.argv[3]
+hardware_summary_csv = sys.argv[4]
 
 cfg = json.loads(base_config.read_text(encoding="utf-8"))
 pipeline = cfg.setdefault("pipeline", {})
@@ -265,6 +275,7 @@ pipeline["hbm_residency_capacity_bytes"] = (
     pipeline.get("hbm_residency_capacity_bytes", 0) or default_residency_cap
 )
 pipeline["breakdown_csv"] = breakdown_csv
+pipeline["hardware_summary_csv"] = hardware_summary_csv
 runtime_config.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
 PY
 
@@ -283,5 +294,6 @@ echo "Result dir: ${RESULT_DIR}"
 echo "Config: ${RUNTIME_CONFIG}"
 echo "Models: ${MODELS_JSON}"
 echo "Breakdown: ${BREAKDOWN_CSV}"
+echo "Hardware summary: ${HARDWARE_SUMMARY_CSV}"
 echo "Timeline: ${TIMELINE_PNG}"
 echo "Log: ${LOG_PATH}"

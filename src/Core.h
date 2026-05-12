@@ -30,7 +30,14 @@ class Core {
   virtual void print_stats();
   virtual void print_current_stats();
 
-  virtual cycle_type get_compute_cycles() { return _stat_tot_compute_cycle; }
+  virtual cycle_type get_compute_cycles() const { return _stat_tot_compute_cycle; }
+  virtual cycle_type get_total_cycles() const { return _core_cycle; }
+  virtual double get_core_utilization_percent() const {
+    return _core_cycle == 0
+               ? 0.0
+               : static_cast<double>(_stat_tot_compute_cycle) * 100.0 /
+                     static_cast<double>(_core_cycle);
+  }
   virtual bool can_fast_forward_stalled();
   virtual void advance_stalled_cycles(cycle_type cycles);
 
