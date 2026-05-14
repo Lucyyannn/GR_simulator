@@ -139,8 +139,12 @@ def build_action_reuse_mapping(
             row_to_physical[row_key] = len(row_to_physical)
         logical_to_physical.append(row_to_physical[row_key])
 
+    logical_to_physical = compact_source_reuse_mapping(
+        logical_to_physical, len(row_to_physical)
+    )
     return {
         "reuse_mode": "row_reuse",
+        "reuse_source_layout": "compact",
         "reuse_axis": 0,
         "reuse_physical_rows": len(row_to_physical),
         "reuse_logical_to_physical": logical_to_physical,
@@ -266,8 +270,12 @@ def build_window_topk_reuse_mapping(
                 row_to_physical[row_key] = len(row_to_physical)
             logical_to_physical.append(row_to_physical[row_key])
 
+    logical_to_physical = compact_source_reuse_mapping(
+        logical_to_physical, len(row_to_physical)
+    )
     return {
         "reuse_mode": "row_reuse",
+        "reuse_source_layout": "compact",
         "reuse_variant": "window_topk",
         "reuse_axis": 0,
         "reuse_physical_rows": len(row_to_physical),
@@ -317,6 +325,19 @@ def build_kv_reuse_mapping(
     raise ValueError(f"Unsupported KV reuse variant: {variant}")
 
 
+def compact_source_reuse_mapping(logical_to_physical, physical_rows):
+    if physical_rows <= 0:
+        return logical_to_physical
+    if len(logical_to_physical) <= physical_rows:
+        return list(range(len(logical_to_physical)))
+    compact = list(logical_to_physical)
+    for row in range(physical_rows):
+        compact[row] = row
+    for row in range(physical_rows, len(compact)):
+        compact[row] %= physical_rows
+    return compact
+
+
 def clamp_ratio(value):
     return max(0.0, min(1.0, float(value)))
 
@@ -335,16 +356,84 @@ def build_ratio_reuse_mapping(length, reuse_ratio, reuse_axis=0):
     if physical_rows >= length:
         return {}
     logical_to_physical = [
-        min(physical_rows - 1, (logical_row * physical_rows) // max(length, 1))
+        logical_row % physical_rows
         for logical_row in range(length)
     ]
     return {
         "reuse_mode": "row_reuse",
+        "reuse_source_layout": "compact",
         "reuse_variant": "ratio",
         "reuse_axis": reuse_axis,
         "reuse_physical_rows": physical_rows,
         "reuse_logical_to_physical": logical_to_physical,
         "reuse_ratio": clamp_ratio(reuse_ratio),
+    }
+
+
+def item_action_cached_rows_after_recompute(kv_len, history_recompute_len):
+    if history_recompute_len >= kv_len:
+        return 0, 0
+    item_count = (kv_len + 1) // 2
+    action_count = kv_len // 2
+    recomputed_items = min(history_recompute_len, item_count)
+    recomputed_actions = max(0, history_recompute_len - item_count)
+    remaining_items = max(0, item_count - recomputed_items)
+    remaining_actions = max(0, action_count - recomputed_actions)
+    return remaining_items, remaining_actions
+
+
+def action_reuse_ratio_from_total(kv_len, action_count, kv_reuse_ratio):
+    if action_count <= 0:
+        return 0.0
+    return clamp_ratio(clamp_ratio(kv_reuse_ratio) * kv_len / action_count)
+
+
+def effective_cached_rows_after_item_recompute_action_reuse(
+    kv_len, history_recompute_len, kv_reuse_ratio
+):
+    remaining_items, remaining_actions = item_action_cached_rows_after_recompute(
+        kv_len, history_recompute_len
+    )
+    if kv_reuse_ratio <= 0:
+        return remaining_items + remaining_actions
+    total_action_count = kv_len // 2
+    action_ratio = action_reuse_ratio_from_total(
+        kv_len, total_action_count, kv_reuse_ratio
+    )
+    action_physical_rows = compressed_rows_for_ratio(remaining_actions, action_ratio)
+    return remaining_items + action_physical_rows
+
+
+def build_item_recompute_action_reuse_mapping(
+    kv_len, history_recompute_len, kv_reuse_ratio, reuse_axis=0
+):
+    remaining_items, remaining_actions = item_action_cached_rows_after_recompute(
+        kv_len, history_recompute_len
+    )
+    logical_rows = remaining_items + remaining_actions
+    if logical_rows <= 0:
+        return {}
+    total_action_count = kv_len // 2
+    action_ratio = action_reuse_ratio_from_total(
+        kv_len, total_action_count, kv_reuse_ratio
+    )
+    action_physical_rows = compressed_rows_for_ratio(remaining_actions, action_ratio)
+    physical_rows = remaining_items + action_physical_rows
+    if physical_rows >= logical_rows:
+        return {}
+
+    logical_to_physical = list(range(remaining_items))
+    for action_idx in range(remaining_actions):
+        logical_to_physical.append(remaining_items + (action_idx % action_physical_rows))
+    return {
+        "reuse_mode": "row_reuse",
+        "reuse_source_layout": "compact",
+        "reuse_variant": "action_ratio",
+        "reuse_axis": reuse_axis,
+        "reuse_physical_rows": physical_rows,
+        "reuse_logical_to_physical": logical_to_physical,
+        "reuse_ratio": clamp_ratio(kv_reuse_ratio),
+        "action_reuse_ratio": action_ratio,
     }
 
 
@@ -355,8 +444,8 @@ def recompute_attention_score_elements(
     candidate_tokens,
     kv_reuse_ratio=0.0,
 ):
-    effective_cached_kv_len = compressed_rows_for_ratio(
-        cached_kv_len, kv_reuse_ratio
+    effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
+        cached_kv_len + history_recompute_len, history_recompute_len, kv_reuse_ratio
     )
     if history_recompute_len <= 0:
         return batch_size * candidate_tokens * (
@@ -373,11 +462,510 @@ def recompute_attention_score_elements(
     return batch_size * (history_scores + candidate_scores)
 
 
+def split_recompute_attention_score_elements(
+    batch_size,
+    cached_kv_len,
+    history_recompute_len,
+    candidate_tokens,
+    kv_reuse_ratio=0.0,
+):
+    effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
+        cached_kv_len + history_recompute_len, history_recompute_len, kv_reuse_ratio
+    )
+    if history_recompute_len <= 0:
+        return 0, batch_size * candidate_tokens * (
+            effective_cached_kv_len + candidate_tokens
+        )
+
+    early_scores = (
+        history_recompute_len * (history_recompute_len + 1) // 2
+        + candidate_tokens * (history_recompute_len + candidate_tokens)
+    )
+    cached_scores = (history_recompute_len + candidate_tokens) * effective_cached_kv_len
+    return batch_size * early_scores, batch_size * cached_scores
+
+
+def recompute_attention_score_parts(
+    batch_size,
+    cached_kv_len,
+    history_recompute_len,
+    candidate_tokens,
+    kv_reuse_ratio=0.0,
+):
+    effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
+        cached_kv_len + history_recompute_len, history_recompute_len, kv_reuse_ratio
+    )
+    return {
+        "candidate_self": batch_size * candidate_tokens * candidate_tokens,
+        "candidate_cached": batch_size * candidate_tokens * effective_cached_kv_len,
+        "candidate_recompute_history": (
+            batch_size * candidate_tokens * history_recompute_len
+        ),
+        "history_prefix": (
+            batch_size * history_recompute_len * (history_recompute_len + 1) // 2
+        ),
+        "history_cached": batch_size * history_recompute_len * effective_cached_kv_len,
+    }
+
+
 def attention_mask_mode(history_recompute_len):
     return (
         "suffix_history_causal_candidate_full"
         if history_recompute_len
         else "baseline_full_current"
+    )
+
+
+def token_shape(rows, hidden, batched=False, batch_size=1):
+    if batched:
+        return [batch_size, rows, hidden]
+    return [rows, hidden]
+
+
+def add_projection_path(
+    ops,
+    path_prefix,
+    input_tensor,
+    rows,
+    hidden,
+    shared_layer,
+    source_medium,
+    layer_meta,
+    op_modeling,
+    batched=False,
+    batch_size=1,
+):
+    shape = token_shape(rows, hidden, batched, batch_size)
+    z = f"{path_prefix}.z"
+    zact = f"{path_prefix}.zact"
+    u = f"{path_prefix}.u"
+    v = f"{path_prefix}.v"
+    q = f"{path_prefix}.q"
+    k = f"{path_prefix}.k"
+    add_op(
+        ops,
+        "aten::linear",
+        [
+            input_tensor,
+            source_to_hbm_tensor(
+                source_medium,
+                f"{shared_layer}.w1",
+                [hidden, hidden * 4],
+                is_weight=True,
+                logical_id=f"{shared_layer}.w1",
+                role="weight",
+                preload_group="pre_attention",
+                **layer_meta,
+            ),
+            source_to_hbm_tensor(
+                source_medium,
+                f"{shared_layer}.b1",
+                [hidden * 4],
+                is_weight=True,
+                logical_id=f"{shared_layer}.b1",
+                role="weight",
+                preload_group="pre_attention",
+                **layer_meta,
+            ),
+        ],
+        [hbm_tensor(z, token_shape(rows, hidden * 4, batched, batch_size), role="activation", **layer_meta)],
+    )
+    add_op(
+        ops,
+        "aten::silu",
+        [hbm_tensor(z, token_shape(rows, hidden * 4, batched, batch_size), role="activation", **layer_meta)],
+        [hbm_tensor(zact, token_shape(rows, hidden * 4, batched, batch_size), role="activation", **layer_meta)],
+    )
+    add_op(
+        ops,
+        "aten::split",
+        [hbm_tensor(zact, token_shape(rows, hidden * 4, batched, batch_size), role="activation", **layer_meta)],
+        [
+            hbm_tensor(u, shape, role="activation", **layer_meta),
+            hbm_tensor(v, shape, role="activation", **layer_meta),
+            hbm_tensor(q, shape, role="activation", **layer_meta),
+            hbm_tensor(k, shape, role="activation", **layer_meta),
+        ],
+        {"axis": 2 if batched else 1, **op_modeling_attrs(op_modeling, "split")},
+    )
+    return {"u": u, "v": v, "q": q, "k": k, "shape": shape}
+
+
+def add_attention_part(
+    ops,
+    prefix,
+    part,
+    q_name,
+    q_shape,
+    k_name,
+    k_shape,
+    v_name,
+    v_shape,
+    k_cache_tensor,
+    v_cache_tensor,
+    output_name,
+    output_shape,
+    kv_axis,
+    score_elements,
+    hidden,
+    batch_size,
+    candidate_tokens,
+    history_recompute_len,
+    cached_kv_len,
+    effective_cached_kv_len,
+    layer_meta,
+):
+    add_op(
+        ops,
+        "hstu::attention",
+        [
+            hbm_tensor(q_name, q_shape, role="activation", **layer_meta),
+            hbm_tensor(k_name, k_shape, role="activation", **layer_meta),
+            hbm_tensor(v_name, v_shape, role="activation", **layer_meta),
+            k_cache_tensor,
+            v_cache_tensor,
+        ],
+        [hbm_tensor(output_name, output_shape, role="activation", **layer_meta)],
+        {
+            "kv_axis": kv_axis,
+            "logical_kv_len": effective_cached_kv_len,
+            "current_tokens": output_shape[-2] if len(output_shape) == 3 else output_shape[0],
+            "candidate_tokens": candidate_tokens,
+            "history_recompute_len": history_recompute_len,
+            "cached_kv_len": cached_kv_len,
+            "effective_cached_kv_len": effective_cached_kv_len,
+            "mask_mode": part,
+            "attention_score_elements": score_elements,
+            "hidden": hidden,
+            "batch_size": batch_size,
+            "attention_part": part,
+            "name_hint": f"{prefix}.{part}",
+        },
+    )
+
+
+def join_part_outputs(ops, parts, final_name, shape, layer_meta):
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    current = parts[0]
+    for idx, next_part in enumerate(parts[1:], start=1):
+        out = final_name if idx == len(parts) - 1 else f"{final_name}.join{idx}"
+        add_op(
+            ops,
+            "aten::mul",
+            [
+                hbm_tensor(current, shape, role="activation", **layer_meta),
+                hbm_tensor(next_part, shape, role="activation", **layer_meta),
+            ],
+            [hbm_tensor(out, shape, role="activation", **layer_meta)],
+        )
+        current = out
+    return current
+
+
+def add_recompute_split_layer_ops(
+    ops,
+    prefix,
+    shared_layer,
+    candidate_input,
+    history_input,
+    k_cache_tensor,
+    v_cache_tensor,
+    out,
+    candidate_tokens,
+    history_recompute_len,
+    cached_kv_len,
+    effective_cached_kv_len,
+    kv_reuse_ratio,
+    hidden,
+    source_medium,
+    layer_meta,
+    op_modeling,
+    batched=False,
+    batch_size=1,
+):
+    active_tokens = candidate_tokens + history_recompute_len
+    kv_axis = 1 if batched else 0
+    candidate_shape = token_shape(candidate_tokens, hidden, batched, batch_size)
+    history_shape = token_shape(history_recompute_len, hidden, batched, batch_size)
+    active_shape = token_shape(active_tokens, hidden, batched, batch_size)
+    empty_shape = token_shape(0, hidden, batched, batch_size)
+    empty_k = f"{prefix}.empty_k"
+    empty_v = f"{prefix}.empty_v"
+    av = f"{prefix}.av"
+    av_norm = f"{prefix}.av_norm"
+    u = f"{prefix}.u"
+    gated = f"{prefix}.gated"
+
+    candidate = add_projection_path(
+        ops,
+        f"{prefix}.candidate",
+        candidate_input,
+        candidate_tokens,
+        hidden,
+        shared_layer,
+        source_medium,
+        layer_meta,
+        op_modeling,
+        batched=batched,
+        batch_size=batch_size,
+    )
+    history = add_projection_path(
+        ops,
+        f"{prefix}.history_recompute",
+        history_input,
+        history_recompute_len,
+        hidden,
+        shared_layer,
+        source_medium,
+        layer_meta,
+        op_modeling,
+        batched=batched,
+        batch_size=batch_size,
+    )
+
+    score_parts = recompute_attention_score_parts(
+        batch_size,
+        cached_kv_len,
+        history_recompute_len,
+        candidate_tokens,
+        kv_reuse_ratio,
+    )
+    empty_k_tensor = hbm_tensor(empty_k, empty_shape, role="activation", **layer_meta)
+    empty_v_tensor = hbm_tensor(empty_v, empty_shape, role="activation", **layer_meta)
+
+    candidate_parts = []
+    candidate_self = f"{prefix}.av_candidate_self"
+    add_attention_part(
+        ops,
+        prefix,
+        "candidate_self",
+        candidate["q"],
+        candidate_shape,
+        candidate["k"],
+        candidate_shape,
+        candidate["v"],
+        candidate_shape,
+        empty_k_tensor,
+        empty_v_tensor,
+        candidate_self,
+        candidate_shape,
+        kv_axis,
+        score_parts["candidate_self"],
+        hidden,
+        batch_size,
+        candidate_tokens,
+        history_recompute_len,
+        0,
+        0,
+        layer_meta,
+    )
+    candidate_parts.append(candidate_self)
+
+    if cached_kv_len > 0:
+        candidate_cached = f"{prefix}.av_candidate_cached"
+        add_attention_part(
+            ops,
+            prefix,
+            "candidate_cached",
+            candidate["q"],
+            candidate_shape,
+            empty_k,
+            empty_shape,
+            empty_v,
+            empty_shape,
+            k_cache_tensor,
+            v_cache_tensor,
+            candidate_cached,
+            candidate_shape,
+            kv_axis,
+            score_parts["candidate_cached"],
+            hidden,
+            batch_size,
+            candidate_tokens,
+            history_recompute_len,
+            cached_kv_len,
+            effective_cached_kv_len,
+            layer_meta,
+        )
+        candidate_parts.append(candidate_cached)
+
+    candidate_history = f"{prefix}.av_candidate_recompute_history"
+    add_attention_part(
+        ops,
+        prefix,
+        "candidate_recompute_history",
+        candidate["q"],
+        candidate_shape,
+        history["k"],
+        history_shape,
+        history["v"],
+        history_shape,
+        empty_k_tensor,
+        empty_v_tensor,
+        candidate_history,
+        candidate_shape,
+        kv_axis,
+        score_parts["candidate_recompute_history"],
+        hidden,
+        batch_size,
+        candidate_tokens,
+        history_recompute_len,
+        0,
+        0,
+        layer_meta,
+    )
+    candidate_parts.append(candidate_history)
+
+    history_parts = []
+    history_prefix = f"{prefix}.av_history_prefix"
+    add_attention_part(
+        ops,
+        prefix,
+        "history_prefix",
+        history["q"],
+        history_shape,
+        history["k"],
+        history_shape,
+        history["v"],
+        history_shape,
+        empty_k_tensor,
+        empty_v_tensor,
+        history_prefix,
+        history_shape,
+        kv_axis,
+        score_parts["history_prefix"],
+        hidden,
+        batch_size,
+        candidate_tokens,
+        history_recompute_len,
+        0,
+        0,
+        layer_meta,
+    )
+    history_parts.append(history_prefix)
+
+    if cached_kv_len > 0:
+        history_cached = f"{prefix}.av_history_cached"
+        add_attention_part(
+            ops,
+            prefix,
+            "history_cached",
+            history["q"],
+            history_shape,
+            empty_k,
+            empty_shape,
+            empty_v,
+            empty_shape,
+            k_cache_tensor,
+            v_cache_tensor,
+            history_cached,
+            history_shape,
+            kv_axis,
+            score_parts["history_cached"],
+            hidden,
+            batch_size,
+            candidate_tokens,
+            history_recompute_len,
+            cached_kv_len,
+            effective_cached_kv_len,
+            layer_meta,
+        )
+        history_parts.append(history_cached)
+
+    candidate_av = join_part_outputs(
+        ops, candidate_parts, f"{prefix}.av_candidate", candidate_shape, layer_meta
+    )
+    history_av = join_part_outputs(
+        ops, history_parts, f"{prefix}.av_history", history_shape, layer_meta
+    )
+    add_op(
+        ops,
+        "aten::cat",
+        [
+            hbm_tensor(candidate_av, candidate_shape, role="activation", **layer_meta),
+            hbm_tensor(history_av, history_shape, role="activation", **layer_meta),
+        ],
+        [hbm_tensor(av, active_shape, role="activation", **layer_meta)],
+        {"axis": 1 if batched else 0, **op_modeling_attrs(op_modeling, "concat")},
+    )
+    add_op(
+        ops,
+        "aten::cat",
+        [
+            hbm_tensor(candidate["u"], candidate_shape, role="activation", **layer_meta),
+            hbm_tensor(history["u"], history_shape, role="activation", **layer_meta),
+        ],
+        [hbm_tensor(u, active_shape, role="activation", **layer_meta)],
+        {"axis": 1 if batched else 0, **op_modeling_attrs(op_modeling, "concat")},
+    )
+    add_op(
+        ops,
+        "aten::layer_norm",
+        [
+            hbm_tensor(av, active_shape, role="activation", **layer_meta),
+            source_to_hbm_tensor(
+                source_medium,
+                f"{shared_layer}.ln_w",
+                [hidden],
+                is_weight=True,
+                logical_id=f"{shared_layer}.ln_w",
+                role="weight",
+                preload_group="post_attention_weights",
+                **layer_meta,
+            ),
+            source_to_hbm_tensor(
+                source_medium,
+                f"{shared_layer}.ln_b",
+                [hidden],
+                is_weight=True,
+                logical_id=f"{shared_layer}.ln_b",
+                role="weight",
+                preload_group="post_attention_weights",
+                **layer_meta,
+            ),
+        ],
+        [hbm_tensor(av_norm, active_shape, role="activation", **layer_meta)],
+        {**op_modeling_attrs(op_modeling, "layer_norm")},
+    )
+    add_op(
+        ops,
+        "aten::mul",
+        [
+            hbm_tensor(av_norm, active_shape, role="activation", **layer_meta),
+            hbm_tensor(u, active_shape, role="activation", **layer_meta),
+        ],
+        [hbm_tensor(gated, active_shape, role="activation", **layer_meta)],
+    )
+    add_op(
+        ops,
+        "aten::linear",
+        [
+            hbm_tensor(gated, active_shape, role="activation", **layer_meta),
+            source_to_hbm_tensor(
+                source_medium,
+                f"{shared_layer}.w2",
+                [hidden, hidden],
+                is_weight=True,
+                logical_id=f"{shared_layer}.w2",
+                role="weight",
+                preload_group="post_attention_weights",
+                **layer_meta,
+            ),
+            source_to_hbm_tensor(
+                source_medium,
+                f"{shared_layer}.b2",
+                [hidden],
+                is_weight=True,
+                logical_id=f"{shared_layer}.b2",
+                role="weight",
+                preload_group="post_attention_weights",
+                **layer_meta,
+            ),
+        ],
+        [hbm_tensor(out, active_shape, role="activation", **layer_meta)],
     )
 
 
@@ -405,20 +993,26 @@ def build_trace(
     kv_reuse_action_stride=2,
     kv_reuse_ratio=0.0,
     source_medium="ddr",
+    embedding_source_medium=None,
     seed=0,
     history_recompute_len=0,
 ):
     op_modeling = op_modeling or {}
     if source_medium not in {"ddr", "ssd"}:
         raise ValueError(f"Unsupported source medium: {source_medium}")
+    embedding_source_medium = embedding_source_medium or source_medium
+    if embedding_source_medium not in {"ddr", "ssd"}:
+        raise ValueError(
+            f"Unsupported embedding source medium: {embedding_source_medium}"
+        )
     if history_recompute_len < 0 or history_recompute_len > kv_len:
         raise ValueError("history_recompute_len must be in [0, kv_len]")
     candidate_tokens = tokens
     cached_kv_len = kv_len - history_recompute_len
     active_tokens = history_recompute_len + candidate_tokens
     kv_reuse_ratio = clamp_ratio(kv_reuse_ratio if kv_reuse_enabled else 0.0)
-    effective_cached_kv_len = compressed_rows_for_ratio(
-        cached_kv_len, kv_reuse_ratio
+    effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
+        kv_len, history_recompute_len, kv_reuse_ratio
     )
     score_elements = recompute_attention_score_elements(
         1,
@@ -434,8 +1028,8 @@ def build_trace(
         raise ValueError("indices_values length must match active token count")
     kv_reuse_meta = None
     if kv_reuse_enabled and kv_reuse_ratio > 0:
-        kv_reuse_meta = build_ratio_reuse_mapping(
-            cached_kv_len, kv_reuse_ratio, reuse_axis=0
+        kv_reuse_meta = build_item_recompute_action_reuse_mapping(
+            kv_len, history_recompute_len, kv_reuse_ratio, reuse_axis=0
         )
     elif kv_reuse_enabled:
         kv_reuse_meta = build_kv_reuse_mapping(
@@ -450,50 +1044,6 @@ def build_trace(
             action_stride=kv_reuse_action_stride,
         )
 
-    base = common_meta(user_id, batch_id, macro_batch_id)
-    add_op(
-        ops,
-        "aten::embedding",
-        [
-            source_tensor(
-                source_medium,
-                "embedding_table",
-                [vocab, hidden],
-                is_weight=True,
-                logical_id="embedding.table",
-                role="embedding_table",
-                **base,
-            ),
-            hbm_tensor(
-                f"u{user_id}.b{batch_id}.m{macro_batch_id}.candidate_ids",
-                [active_tokens],
-                dtype="int64",
-                role="indices",
-                **base,
-            ),
-        ],
-        [
-            source_to_hbm_tensor(
-                source_medium,
-                f"u{user_id}.b{batch_id}.m{macro_batch_id}.x0",
-                [active_tokens, hidden],
-                logical_id=f"u{user_id}.b{batch_id}.m{macro_batch_id}.embedding_rows",
-                role="embedding_rows",
-                preload_group="pre_attention",
-                source_logical_id="embedding.table",
-                source_shape=[vocab, hidden],
-                indices_values=indices_values,
-                **base,
-            )
-        ],
-        {
-            "indices_values": ",".join(str(v) for v in indices_values),
-            "modeling_mode": "preloaded_rows",
-            "history_recompute_len": history_recompute_len,
-            "candidate_tokens": candidate_tokens,
-        },
-    )
-
     current = f"u{user_id}.b{batch_id}.m{macro_batch_id}.x0"
     for layer in range(layers):
         prefix = f"u{user_id}.b{batch_id}.m{macro_batch_id}.layer{layer}"
@@ -506,6 +1056,10 @@ def build_trace(
         k = f"{prefix}.k"
         k_cache = f"user{user_id}.{shared_layer}.kc"
         v_cache = f"user{user_id}.{shared_layer}.vc"
+        empty_k_cache = f"{prefix}.empty_k_cache"
+        empty_v_cache = f"{prefix}.empty_v_cache"
+        empty_k = f"{prefix}.empty_k"
+        empty_v = f"{prefix}.empty_v"
         k_all = f"{prefix}.k_all"
         k_all_t = f"{prefix}.k_all_t"
         score = f"{prefix}.score"
@@ -516,12 +1070,101 @@ def build_trace(
         gated = f"{prefix}.gated"
         out = f"u{user_id}.b{batch_id}.m{macro_batch_id}.x{layer + 1}"
         layer_meta = common_meta(user_id, batch_id, macro_batch_id, layer_id=layer)
+        if (
+            layer == 0
+            and attention_modeling == "fused"
+            and history_recompute_len > 0
+        ):
+            candidate_input = source_to_hbm_tensor(
+                embedding_source_medium,
+                f"{current}.candidate",
+                [candidate_tokens, hidden],
+                logical_id=f"u{user_id}.b{batch_id}.m{macro_batch_id}.candidate_embedding_rows",
+                role="embedding_rows",
+                preload_group="candidate_embedding",
+                source_logical_id="embedding.table",
+                source_shape=[vocab, hidden],
+                indices_values=indices_values[:candidate_tokens],
+                **layer_meta,
+            )
+            history_input = source_to_hbm_tensor(
+                embedding_source_medium,
+                f"{current}.history_recompute",
+                [history_recompute_len, hidden],
+                logical_id=f"u{user_id}.b{batch_id}.m{macro_batch_id}.history_recompute_embedding_rows",
+                role="embedding_rows",
+                preload_group="history_recompute_embedding",
+                source_logical_id="embedding.table",
+                source_shape=[vocab, hidden],
+                indices_values=indices_values[candidate_tokens:],
+                **layer_meta,
+            )
+            k_cache_tensor = source_to_hbm_tensor(
+                source_medium,
+                k_cache,
+                [cached_kv_len, hidden],
+                logical_id=f"user{user_id}.{shared_layer}.kc",
+                role="kv_cache_k",
+                preload_group="kvcache",
+                **(kv_reuse_meta or {}),
+                **layer_meta,
+            )
+            v_cache_tensor = source_to_hbm_tensor(
+                source_medium,
+                v_cache,
+                [cached_kv_len, hidden],
+                logical_id=f"user{user_id}.{shared_layer}.vc",
+                role="kv_cache_v",
+                preload_group="kvcache",
+                **(kv_reuse_meta or {}),
+                **layer_meta,
+            )
+            add_recompute_split_layer_ops(
+                ops,
+                prefix,
+                shared_layer,
+                candidate_input,
+                history_input,
+                k_cache_tensor,
+                v_cache_tensor,
+                out,
+                candidate_tokens,
+                history_recompute_len,
+                cached_kv_len,
+                effective_cached_kv_len,
+                kv_reuse_ratio,
+                hidden,
+                source_medium,
+                layer_meta,
+                op_modeling,
+                batched=False,
+                batch_size=1,
+            )
+            current = out
+            continue
+
+        current_input = hbm_tensor(
+            current, [active_tokens, hidden], role="activation", **layer_meta
+        )
+        if layer == 0:
+            current_input = source_to_hbm_tensor(
+                embedding_source_medium,
+                current,
+                [active_tokens, hidden],
+                logical_id=f"u{user_id}.b{batch_id}.m{macro_batch_id}.embedding_rows",
+                role="embedding_rows",
+                preload_group="pre_attention",
+                source_logical_id="embedding.table",
+                source_shape=[vocab, hidden],
+                indices_values=indices_values,
+                **layer_meta,
+            )
 
         add_op(
             ops,
             "aten::linear",
             [
-                hbm_tensor(current, [active_tokens, hidden], role="activation", **layer_meta),
+                current_input,
                 source_to_hbm_tensor(
                     source_medium,
                     f"{shared_layer}.w1",
@@ -564,49 +1207,143 @@ def build_trace(
             {"axis": 1, **op_modeling_attrs(op_modeling, "split")},
         )
         if attention_modeling == "fused":
-            add_op(
-                ops,
-                "hstu::attention",
-                [
-                    hbm_tensor(q, [active_tokens, hidden], role="activation", **layer_meta),
-                    hbm_tensor(k, [active_tokens, hidden], role="activation", **layer_meta),
-                    hbm_tensor(v, [active_tokens, hidden], role="activation", **layer_meta),
-                    source_to_hbm_tensor(
-                        source_medium,
-                        k_cache,
-                        [cached_kv_len, hidden],
-                        logical_id=f"user{user_id}.{shared_layer}.kc",
-                        role="kv_cache_k",
-                        preload_group="kvcache",
-                        **(kv_reuse_meta or {}),
-                        **layer_meta,
-                    ),
-                    source_to_hbm_tensor(
-                        source_medium,
-                        v_cache,
-                        [cached_kv_len, hidden],
-                        logical_id=f"user{user_id}.{shared_layer}.vc",
-                        role="kv_cache_v",
-                        preload_group="kvcache",
-                        **(kv_reuse_meta or {}),
-                        **layer_meta,
-                    ),
-                ],
-                [hbm_tensor(av, [active_tokens, hidden], role="activation", **layer_meta)],
-                {
-                    "kv_axis": 0,
-                    "logical_kv_len": cached_kv_len + active_tokens,
-                    "current_tokens": active_tokens,
-                    "candidate_tokens": candidate_tokens,
-                    "history_recompute_len": history_recompute_len,
-                    "cached_kv_len": cached_kv_len,
-                    "effective_cached_kv_len": effective_cached_kv_len,
-                    "mask_mode": attention_mask_mode(history_recompute_len),
-                    "attention_score_elements": score_elements,
-                    "hidden": hidden,
-                    "batch_size": 1,
-                },
+            early_score_elements, cached_score_elements = (
+                split_recompute_attention_score_elements(
+                    1,
+                    cached_kv_len,
+                    history_recompute_len,
+                    candidate_tokens,
+                    kv_reuse_ratio,
+                )
             )
+            split_attention = history_recompute_len > 0 and cached_score_elements > 0
+            if split_attention or (history_recompute_len > 0 and cached_kv_len == 0):
+                early_av = av if not split_attention else f"{prefix}.av_recompute"
+                add_op(
+                    ops,
+                    "hstu::attention",
+                    [
+                        hbm_tensor(q, [active_tokens, hidden], role="activation", **layer_meta),
+                        hbm_tensor(k, [active_tokens, hidden], role="activation", **layer_meta),
+                        hbm_tensor(v, [active_tokens, hidden], role="activation", **layer_meta),
+                        hbm_tensor(empty_k_cache, [0, hidden], role="activation", **layer_meta),
+                        hbm_tensor(empty_v_cache, [0, hidden], role="activation", **layer_meta),
+                    ],
+                    [hbm_tensor(early_av, [active_tokens, hidden], role="activation", **layer_meta)],
+                    {
+                        "kv_axis": 0,
+                        "logical_kv_len": active_tokens,
+                        "current_tokens": active_tokens,
+                        "candidate_tokens": candidate_tokens,
+                        "history_recompute_len": history_recompute_len,
+                        "cached_kv_len": 0,
+                        "effective_cached_kv_len": 0,
+                        "mask_mode": "recompute_prefix_early",
+                        "attention_score_elements": early_score_elements,
+                        "hidden": hidden,
+                        "batch_size": 1,
+                        "attention_part": "recompute_early",
+                    },
+                )
+                if split_attention:
+                    cached_av = f"{prefix}.av_cached"
+                    add_op(
+                        ops,
+                        "hstu::attention",
+                        [
+                            hbm_tensor(q, [active_tokens, hidden], role="activation", **layer_meta),
+                            hbm_tensor(empty_k, [0, hidden], role="activation", **layer_meta),
+                            hbm_tensor(empty_v, [0, hidden], role="activation", **layer_meta),
+                            source_to_hbm_tensor(
+                                source_medium,
+                                k_cache,
+                                [cached_kv_len, hidden],
+                                logical_id=f"user{user_id}.{shared_layer}.kc",
+                                role="kv_cache_k",
+                                preload_group="kvcache",
+                                **(kv_reuse_meta or {}),
+                                **layer_meta,
+                            ),
+                            source_to_hbm_tensor(
+                                source_medium,
+                                v_cache,
+                                [cached_kv_len, hidden],
+                                logical_id=f"user{user_id}.{shared_layer}.vc",
+                                role="kv_cache_v",
+                                preload_group="kvcache",
+                                **(kv_reuse_meta or {}),
+                                **layer_meta,
+                            ),
+                        ],
+                        [hbm_tensor(cached_av, [active_tokens, hidden], role="activation", **layer_meta)],
+                        {
+                            "kv_axis": 0,
+                            "logical_kv_len": effective_cached_kv_len,
+                            "current_tokens": active_tokens,
+                            "candidate_tokens": candidate_tokens,
+                            "history_recompute_len": history_recompute_len,
+                            "cached_kv_len": cached_kv_len,
+                            "effective_cached_kv_len": effective_cached_kv_len,
+                            "mask_mode": "cached_kv_late",
+                            "attention_score_elements": cached_score_elements,
+                            "hidden": hidden,
+                            "batch_size": 1,
+                            "attention_part": "cached_late",
+                        },
+                    )
+                    add_op(
+                        ops,
+                        "aten::mul",
+                        [
+                            hbm_tensor(early_av, [active_tokens, hidden], role="activation", **layer_meta),
+                            hbm_tensor(cached_av, [active_tokens, hidden], role="activation", **layer_meta),
+                        ],
+                        [hbm_tensor(av, [active_tokens, hidden], role="activation", **layer_meta)],
+                    )
+            else:
+                add_op(
+                    ops,
+                    "hstu::attention",
+                    [
+                        hbm_tensor(q, [active_tokens, hidden], role="activation", **layer_meta),
+                        hbm_tensor(k, [active_tokens, hidden], role="activation", **layer_meta),
+                        hbm_tensor(v, [active_tokens, hidden], role="activation", **layer_meta),
+                        source_to_hbm_tensor(
+                            source_medium,
+                            k_cache,
+                            [cached_kv_len, hidden],
+                            logical_id=f"user{user_id}.{shared_layer}.kc",
+                            role="kv_cache_k",
+                            preload_group="kvcache",
+                            **(kv_reuse_meta or {}),
+                            **layer_meta,
+                        ),
+                        source_to_hbm_tensor(
+                            source_medium,
+                            v_cache,
+                            [cached_kv_len, hidden],
+                            logical_id=f"user{user_id}.{shared_layer}.vc",
+                            role="kv_cache_v",
+                            preload_group="kvcache",
+                            **(kv_reuse_meta or {}),
+                            **layer_meta,
+                        ),
+                    ],
+                    [hbm_tensor(av, [active_tokens, hidden], role="activation", **layer_meta)],
+                    {
+                        "kv_axis": 0,
+                        "logical_kv_len": cached_kv_len + active_tokens,
+                        "current_tokens": active_tokens,
+                        "candidate_tokens": candidate_tokens,
+                        "history_recompute_len": history_recompute_len,
+                        "cached_kv_len": cached_kv_len,
+                        "effective_cached_kv_len": effective_cached_kv_len,
+                        "mask_mode": attention_mask_mode(history_recompute_len),
+                        "attention_score_elements": score_elements,
+                        "hidden": hidden,
+                        "batch_size": 1,
+                    },
+                )
         else:
             add_op(
                 ops,
@@ -764,6 +1501,7 @@ def build_trace(
             "op_modeling": op_modeling,
             "attention_modeling": attention_modeling,
             "source_medium": source_medium,
+            "embedding_source_medium": embedding_source_medium,
             "kv_reuse_variant": kv_reuse_variant,
             "kv_reuse_action_count": kv_reuse_action_count,
             "kv_reuse_window_size": kv_reuse_window_size,
@@ -807,20 +1545,26 @@ def build_batched_trace(
     kv_reuse_action_stride=2,
     kv_reuse_ratio=0.0,
     source_medium="ddr",
+    embedding_source_medium=None,
     seed=0,
     history_recompute_len=0,
 ):
     op_modeling = op_modeling or {}
     if source_medium not in {"ddr", "ssd"}:
         raise ValueError(f"Unsupported source medium: {source_medium}")
+    embedding_source_medium = embedding_source_medium or source_medium
+    if embedding_source_medium not in {"ddr", "ssd"}:
+        raise ValueError(
+            f"Unsupported embedding source medium: {embedding_source_medium}"
+        )
     if history_recompute_len < 0 or history_recompute_len > kv_len:
         raise ValueError("history_recompute_len must be in [0, kv_len]")
     candidate_tokens = tokens
     cached_kv_len = kv_len - history_recompute_len
     active_tokens = history_recompute_len + candidate_tokens
     kv_reuse_ratio = clamp_ratio(kv_reuse_ratio if kv_reuse_enabled else 0.0)
-    effective_cached_kv_len = compressed_rows_for_ratio(
-        cached_kv_len, kv_reuse_ratio
+    effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
+        kv_len, history_recompute_len, kv_reuse_ratio
     )
 
     batch_size = len(user_ids)
@@ -847,23 +1591,30 @@ def build_batched_trace(
         if not kv_reuse_enabled:
             return {}
         if kv_reuse_ratio > 0:
+            mapping = build_item_recompute_action_reuse_mapping(
+                kv_len, history_recompute_len, kv_reuse_ratio, reuse_axis=1
+            )
+            physical_row_count = mapping.get("reuse_physical_rows", cached_kv_len)
+            logical_to_physical = mapping.get(
+                "reuse_logical_to_physical", list(range(cached_kv_len))
+            )
             physical_rows = [
-                compressed_rows_for_ratio(cached_kv_len, kv_reuse_ratio)
+                physical_row_count
                 for _ in user_ids
             ]
             mappings = [
-                build_ratio_reuse_mapping(
-                    cached_kv_len, kv_reuse_ratio, reuse_axis=1
-                )["reuse_logical_to_physical"]
+                logical_to_physical
                 for _ in user_ids
             ]
             return {
                 "reuse_mode": "row_reuse",
-                "reuse_variant": "ratio",
+                "reuse_source_layout": "compact",
+                "reuse_variant": "action_ratio",
                 "reuse_axis": 1,
                 "reuse_physical_rows_per_user": physical_rows,
                 "reuse_logical_to_physical_per_user": mappings,
                 "reuse_ratio": kv_reuse_ratio,
+                "action_reuse_ratio": mapping.get("action_reuse_ratio", 0.0),
                 "reuse_window_size": kv_reuse_window_size,
                 "reuse_topk": kv_reuse_topk,
             }
@@ -895,6 +1646,7 @@ def build_batched_trace(
             physical_rows.append(rows)
         meta = {
             "reuse_mode": "row_reuse",
+            "reuse_source_layout": "compact",
             "reuse_variant": kv_reuse_variant,
             "reuse_axis": 1,
             "reuse_physical_rows_per_user": physical_rows,
@@ -911,56 +1663,6 @@ def build_batched_trace(
         return meta
 
     ops = []
-    base = {
-        "batch_id": batch_id,
-        "macro_batch_id": macro_batch_id,
-        "user_id": user_ids[0],
-    }
-    add_op(
-        ops,
-        "aten::embedding",
-        [
-            source_tensor(
-                source_medium,
-                "embedding_table",
-                [vocab, hidden],
-                is_weight=True,
-                logical_id="embedding.table",
-                role="embedding_table",
-                **base,
-            ),
-            hbm_tensor(
-                f"b{batch_id}.m{macro_batch_id}.candidate_ids",
-                [batch_size, active_tokens],
-                dtype="int64",
-                role="indices",
-                **base,
-            ),
-        ],
-        [
-            source_to_hbm_tensor(
-                source_medium,
-                f"b{batch_id}.m{macro_batch_id}.x0",
-                [batch_size, active_tokens, hidden],
-                logical_id=f"batch{batch_id}.macro{macro_batch_id}.embedding_rows",
-                role="embedding_rows",
-                preload_group="pre_attention",
-                source_logical_id="embedding.table",
-                source_shape=[vocab, hidden],
-                indices_values=flat_indices_values,
-                user_ids=user_ids,
-                indices_values_per_user=indices_values_per_user,
-                **base,
-            )
-        ],
-        {
-            "indices_values": ",".join(str(v) for v in flat_indices_values),
-            "modeling_mode": "preloaded_rows",
-            "history_recompute_len": history_recompute_len,
-            "candidate_tokens": candidate_tokens,
-        },
-    )
-
     current = f"b{batch_id}.m{macro_batch_id}.x0"
     for layer in range(layers):
         prefix = f"b{batch_id}.m{macro_batch_id}.layer{layer}"
@@ -974,6 +1676,10 @@ def build_batched_trace(
         k = f"{prefix}.k"
         k_cache = f"batch{batch_id}.{shared_layer}.kc"
         v_cache = f"batch{batch_id}.{shared_layer}.vc"
+        empty_k_cache = f"{prefix}.empty_k_cache"
+        empty_v_cache = f"{prefix}.empty_v_cache"
+        empty_k = f"{prefix}.empty_k"
+        empty_v = f"{prefix}.empty_v"
         k_all = f"{prefix}.k_all"
         k_all_t = f"{prefix}.k_all_t"
         score = f"{prefix}.score"
@@ -989,14 +1695,124 @@ def build_batched_trace(
             "user_id": user_ids[0],
             "layer_id": layer,
         }
+        if (
+            layer == 0
+            and attention_modeling == "fused"
+            and history_recompute_len > 0
+        ):
+            candidate_indices_per_user = [
+                row[:candidate_tokens] for row in indices_values_per_user
+            ]
+            history_indices_per_user = [
+                row[candidate_tokens:] for row in indices_values_per_user
+            ]
+            flat_candidate_indices = [
+                idx for row in candidate_indices_per_user for idx in row
+            ]
+            flat_history_indices = [
+                idx for row in history_indices_per_user for idx in row
+            ]
+            candidate_input = source_to_hbm_tensor(
+                embedding_source_medium,
+                f"{current}.candidate",
+                [batch_size, candidate_tokens, hidden],
+                logical_id=f"batch{batch_id}.macro{macro_batch_id}.candidate_embedding_rows",
+                role="embedding_rows",
+                preload_group="candidate_embedding",
+                source_logical_id="embedding.table",
+                source_shape=[vocab, hidden],
+                indices_values=flat_candidate_indices,
+                user_ids=user_ids,
+                indices_values_per_user=candidate_indices_per_user,
+                **layer_meta,
+            )
+            history_input = source_to_hbm_tensor(
+                embedding_source_medium,
+                f"{current}.history_recompute",
+                [batch_size, history_recompute_len, hidden],
+                logical_id=f"batch{batch_id}.macro{macro_batch_id}.history_recompute_embedding_rows",
+                role="embedding_rows",
+                preload_group="history_recompute_embedding",
+                source_logical_id="embedding.table",
+                source_shape=[vocab, hidden],
+                indices_values=flat_history_indices,
+                user_ids=user_ids,
+                indices_values_per_user=history_indices_per_user,
+                **layer_meta,
+            )
+            k_cache_tensor = source_to_hbm_tensor(
+                source_medium,
+                k_cache,
+                [batch_size, cached_kv_len, hidden],
+                logical_id=f"batch{batch_id}.{shared_layer}.kc",
+                role="kv_cache_k_batch",
+                preload_group="kvcache",
+                user_ids=user_ids,
+                **kv_reuse_meta,
+                **layer_meta,
+            )
+            v_cache_tensor = source_to_hbm_tensor(
+                source_medium,
+                v_cache,
+                [batch_size, cached_kv_len, hidden],
+                logical_id=f"batch{batch_id}.{shared_layer}.vc",
+                role="kv_cache_v_batch",
+                preload_group="kvcache",
+                user_ids=user_ids,
+                **kv_reuse_meta,
+                **layer_meta,
+            )
+            add_recompute_split_layer_ops(
+                ops,
+                prefix,
+                shared_layer,
+                candidate_input,
+                history_input,
+                k_cache_tensor,
+                v_cache_tensor,
+                out,
+                candidate_tokens,
+                history_recompute_len,
+                cached_kv_len,
+                effective_cached_kv_len,
+                kv_reuse_ratio,
+                hidden,
+                source_medium,
+                layer_meta,
+                op_modeling,
+                batched=True,
+                batch_size=batch_size,
+            )
+            current = out
+            continue
+
+        current_input = hbm_tensor(
+            current,
+            [batch_size, active_tokens, hidden],
+            role="activation",
+            **layer_meta,
+        )
+        if layer == 0:
+            current_input = source_to_hbm_tensor(
+                embedding_source_medium,
+                current,
+                [batch_size, active_tokens, hidden],
+                logical_id=f"batch{batch_id}.macro{macro_batch_id}.embedding_rows",
+                role="embedding_rows",
+                preload_group="pre_attention",
+                source_logical_id="embedding.table",
+                source_shape=[vocab, hidden],
+                indices_values=flat_indices_values,
+                user_ids=user_ids,
+                indices_values_per_user=indices_values_per_user,
+                **layer_meta,
+            )
 
         add_op(
             ops,
             "aten::linear",
             [
-                hbm_tensor(
-                    current, [batch_size, active_tokens, hidden], role="activation", **layer_meta
-                ),
+                current_input,
                 source_to_hbm_tensor(
                     source_medium,
                     f"{shared_layer}.w1",
@@ -1051,57 +1867,153 @@ def build_batched_trace(
             {"axis": 2, **op_modeling_attrs(op_modeling, "split")},
         )
         if attention_modeling == "fused":
-            add_op(
-                ops,
-                "hstu::attention",
-                [
-                    hbm_tensor(q, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
-                    hbm_tensor(k, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
-                    hbm_tensor(v, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
-                    source_to_hbm_tensor(
-                        source_medium,
-                        k_cache,
-                        [batch_size, cached_kv_len, hidden],
-                        logical_id=f"batch{batch_id}.{shared_layer}.kc",
-                        role="kv_cache_k_batch",
-                        preload_group="kvcache",
-                        user_ids=user_ids,
-                        **kv_reuse_meta,
-                        **layer_meta,
-                    ),
-                    source_to_hbm_tensor(
-                        source_medium,
-                        v_cache,
-                        [batch_size, cached_kv_len, hidden],
-                        logical_id=f"batch{batch_id}.{shared_layer}.vc",
-                        role="kv_cache_v_batch",
-                        preload_group="kvcache",
-                        user_ids=user_ids,
-                        **kv_reuse_meta,
-                        **layer_meta,
-                    ),
-                ],
-                [hbm_tensor(av, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
-                {
-                    "kv_axis": 1,
-                    "logical_kv_len": cached_kv_len + active_tokens,
-                    "current_tokens": active_tokens,
-                    "candidate_tokens": candidate_tokens,
-                    "history_recompute_len": history_recompute_len,
-                    "cached_kv_len": cached_kv_len,
-                    "effective_cached_kv_len": effective_cached_kv_len,
-                    "mask_mode": attention_mask_mode(history_recompute_len),
-                    "attention_score_elements": recompute_attention_score_elements(
-                        batch_size,
-                        cached_kv_len,
-                        history_recompute_len,
-                        candidate_tokens,
-                        kv_reuse_ratio,
-                    ),
-                    "hidden": hidden,
-                    "batch_size": batch_size,
-                },
+            early_score_elements, cached_score_elements = (
+                split_recompute_attention_score_elements(
+                    batch_size,
+                    cached_kv_len,
+                    history_recompute_len,
+                    candidate_tokens,
+                    kv_reuse_ratio,
+                )
             )
+            split_attention = history_recompute_len > 0 and cached_score_elements > 0
+            if split_attention or (history_recompute_len > 0 and cached_kv_len == 0):
+                early_av = av if not split_attention else f"{prefix}.av_recompute"
+                add_op(
+                    ops,
+                    "hstu::attention",
+                    [
+                        hbm_tensor(q, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                        hbm_tensor(k, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                        hbm_tensor(v, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                        hbm_tensor(empty_k_cache, [batch_size, 0, hidden], role="activation", **layer_meta),
+                        hbm_tensor(empty_v_cache, [batch_size, 0, hidden], role="activation", **layer_meta),
+                    ],
+                    [hbm_tensor(early_av, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
+                    {
+                        "kv_axis": 1,
+                        "logical_kv_len": active_tokens,
+                        "current_tokens": active_tokens,
+                        "candidate_tokens": candidate_tokens,
+                        "history_recompute_len": history_recompute_len,
+                        "cached_kv_len": 0,
+                        "effective_cached_kv_len": 0,
+                        "mask_mode": "recompute_prefix_early",
+                        "attention_score_elements": early_score_elements,
+                        "hidden": hidden,
+                        "batch_size": batch_size,
+                        "attention_part": "recompute_early",
+                    },
+                )
+                if split_attention:
+                    cached_av = f"{prefix}.av_cached"
+                    add_op(
+                        ops,
+                        "hstu::attention",
+                        [
+                            hbm_tensor(q, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                            hbm_tensor(empty_k, [batch_size, 0, hidden], role="activation", **layer_meta),
+                            hbm_tensor(empty_v, [batch_size, 0, hidden], role="activation", **layer_meta),
+                            source_to_hbm_tensor(
+                                source_medium,
+                                k_cache,
+                                [batch_size, cached_kv_len, hidden],
+                                logical_id=f"batch{batch_id}.{shared_layer}.kc",
+                                role="kv_cache_k_batch",
+                                preload_group="kvcache",
+                                user_ids=user_ids,
+                                **kv_reuse_meta,
+                                **layer_meta,
+                            ),
+                            source_to_hbm_tensor(
+                                source_medium,
+                                v_cache,
+                                [batch_size, cached_kv_len, hidden],
+                                logical_id=f"batch{batch_id}.{shared_layer}.vc",
+                                role="kv_cache_v_batch",
+                                preload_group="kvcache",
+                                user_ids=user_ids,
+                                **kv_reuse_meta,
+                                **layer_meta,
+                            ),
+                        ],
+                        [hbm_tensor(cached_av, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
+                        {
+                            "kv_axis": 1,
+                            "logical_kv_len": effective_cached_kv_len,
+                            "current_tokens": active_tokens,
+                            "candidate_tokens": candidate_tokens,
+                            "history_recompute_len": history_recompute_len,
+                            "cached_kv_len": cached_kv_len,
+                            "effective_cached_kv_len": effective_cached_kv_len,
+                            "mask_mode": "cached_kv_late",
+                            "attention_score_elements": cached_score_elements,
+                            "hidden": hidden,
+                            "batch_size": batch_size,
+                            "attention_part": "cached_late",
+                        },
+                    )
+                    add_op(
+                        ops,
+                        "aten::mul",
+                        [
+                            hbm_tensor(early_av, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                            hbm_tensor(cached_av, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                        ],
+                        [hbm_tensor(av, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
+                    )
+            else:
+                add_op(
+                    ops,
+                    "hstu::attention",
+                    [
+                        hbm_tensor(q, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                        hbm_tensor(k, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                        hbm_tensor(v, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
+                        source_to_hbm_tensor(
+                            source_medium,
+                            k_cache,
+                            [batch_size, cached_kv_len, hidden],
+                            logical_id=f"batch{batch_id}.{shared_layer}.kc",
+                            role="kv_cache_k_batch",
+                            preload_group="kvcache",
+                            user_ids=user_ids,
+                            **kv_reuse_meta,
+                            **layer_meta,
+                        ),
+                        source_to_hbm_tensor(
+                            source_medium,
+                            v_cache,
+                            [batch_size, cached_kv_len, hidden],
+                            logical_id=f"batch{batch_id}.{shared_layer}.vc",
+                            role="kv_cache_v_batch",
+                            preload_group="kvcache",
+                            user_ids=user_ids,
+                            **kv_reuse_meta,
+                            **layer_meta,
+                        ),
+                    ],
+                    [hbm_tensor(av, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
+                    {
+                        "kv_axis": 1,
+                        "logical_kv_len": cached_kv_len + active_tokens,
+                        "current_tokens": active_tokens,
+                        "candidate_tokens": candidate_tokens,
+                        "history_recompute_len": history_recompute_len,
+                        "cached_kv_len": cached_kv_len,
+                        "effective_cached_kv_len": effective_cached_kv_len,
+                        "mask_mode": attention_mask_mode(history_recompute_len),
+                        "attention_score_elements": recompute_attention_score_elements(
+                            batch_size,
+                            cached_kv_len,
+                            history_recompute_len,
+                            candidate_tokens,
+                            kv_reuse_ratio,
+                        ),
+                        "hidden": hidden,
+                        "batch_size": batch_size,
+                    },
+                )
         else:
             add_op(
                 ops,
@@ -1318,6 +2230,7 @@ def build_batched_trace(
             "op_modeling": op_modeling,
             "attention_modeling": attention_modeling,
             "source_medium": source_medium,
+            "embedding_source_medium": embedding_source_medium,
             "kv_reuse_variant": kv_reuse_variant,
             "kv_reuse_action_count": kv_reuse_action_count,
             "kv_reuse_window_size": kv_reuse_window_size,
@@ -1371,10 +2284,22 @@ def write_json(path, data, compact=False):
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def history_recompute_indices(length, vocab, mode, rng):
+    if mode == "stream":
+        return list(range(length))
+    if mode == "random":
+        return [rng.randrange(vocab) for _ in range(length)]
+    raise ValueError(f"Unsupported history recompute index mode: {mode}")
+
+
 def write_single_trace(args, op_modeling):
     rng = random.Random(args.seed)
     active_tokens = args.tokens + args.history_recompute_len
-    indices = [rng.randrange(args.vocab) for _ in range(active_tokens)]
+    history_indices = history_recompute_indices(
+        args.history_recompute_len, args.vocab, args.history_recompute_index_mode, rng
+    )
+    candidate_indices = [rng.randrange(args.vocab) for _ in range(args.tokens)]
+    indices = candidate_indices + history_indices
     trace = build_trace(
         args.layers,
         args.tokens,
@@ -1396,6 +2321,7 @@ def write_single_trace(args, op_modeling):
         kv_reuse_action_stride=args.kv_reuse_action_stride,
         kv_reuse_ratio=args.kv_reuse_ratio,
         source_medium=args.source_medium,
+        embedding_source_medium=args.embedding_source_medium,
         seed=args.seed,
         history_recompute_len=args.history_recompute_len,
     )
@@ -1430,14 +2356,14 @@ def write_pipeline_traces(args, op_modeling):
             model_name = f"hstu_b{batch_id}_m{macro_id}"
             indices_values_per_user = []
             for user in users:
-                # history_rng = random.Random(args.seed + user * 1000003)
-                # history_indices = [
-                #     history_rng.randrange(args.vocab)
-                #     for _ in range(args.history_recompute_len)
-                # ]
-                history_indices = list(range(args.history_recompute_len))
+                history_indices = history_recompute_indices(
+                    args.history_recompute_len,
+                    args.vocab,
+                    args.history_recompute_index_mode,
+                    rng,
+                )
                 candidate_indices = [rng.randrange(args.vocab) for _ in range(tokens)]
-                indices_values_per_user.append(history_indices + candidate_indices)
+                indices_values_per_user.append(candidate_indices + history_indices)
             trace = build_batched_trace(
                 args.layers,
                 tokens,
@@ -1462,6 +2388,7 @@ def write_pipeline_traces(args, op_modeling):
                 kv_reuse_action_stride=args.kv_reuse_action_stride,
                 kv_reuse_ratio=args.kv_reuse_ratio,
                 source_medium=args.source_medium,
+                embedding_source_medium=args.embedding_source_medium,
                 seed=args.seed,
                 history_recompute_len=args.history_recompute_len,
             )
@@ -1510,7 +2437,9 @@ def write_pipeline_traces(args, op_modeling):
                 "kv_reuse_action_stride": args.kv_reuse_action_stride,
                 "kv_reuse_ratio": args.kv_reuse_ratio,
                 "source_medium": args.source_medium,
+                "embedding_source_medium": args.embedding_source_medium,
                 "history_recompute_len": args.history_recompute_len,
+                "history_recompute_index_mode": args.history_recompute_index_mode,
                 "attention_mask_mode": attention_mask_mode(args.history_recompute_len),
             },
             "models": models,
@@ -1536,6 +2465,16 @@ def main():
             "loaded from KV cache. 0 preserves baseline."
         ),
     )
+    parser.add_argument(
+        "--history-recompute-index-mode",
+        choices=["stream", "random"],
+        default="stream",
+        help=(
+            "Embedding index mode for recomputed history rows. stream uses "
+            "contiguous indices; random samples rows from the embedding table. "
+            "Candidate rows are always random."
+        ),
+    )
     parser.add_argument("--vocab", type=int, default=128)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--num-users", type=int, default=1)
@@ -1548,6 +2487,14 @@ def main():
         choices=["ddr", "ssd"],
         default="ddr",
         help="Initial storage medium for non-weight preload source tensors.",
+    )
+    parser.add_argument(
+        "--embedding-source-medium",
+        choices=["ddr", "ssd"],
+        help=(
+            "Initial storage medium for embedding table/rows. Defaults to "
+            "--source-medium for backward compatibility."
+        ),
     )
     parser.add_argument("--pipeline", action="store_true")
     parser.add_argument("--enable-kv-reuse", action="store_true")
@@ -1641,6 +2588,8 @@ def main():
         help="Use decomposed HSTU attention subgraph or one reuse-aware fused attention op.",
     )
     args = parser.parse_args()
+    if args.embedding_source_medium is None:
+        args.embedding_source_medium = args.source_medium
 
     if args.num_users < 1 or args.users_per_batch < 1:
         raise ValueError("--num-users and --users-per-batch must be positive")

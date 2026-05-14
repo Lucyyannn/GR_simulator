@@ -15,8 +15,10 @@ list(APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/extern)
 set(CMAKE_CXX_STANDARD 20)
 set(ONNX_ML 1)
 set(JSON_BuildTests OFF CACHE INTERNAL "")
-set(EXECUTABLE_OUTPUT_PATH "${CMAKE_SOURCE_DIR}/build/bin")
-set(LIBRARY_OUTPUT_PATH "${CMAKE_SOURCE_DIR}/build/lib")
+set(SIM_OUTPUT_ROOT "${CMAKE_SOURCE_DIR}/build" CACHE PATH
+    "Output root for simulator binaries, libraries, and fetched external sources")
+set(EXECUTABLE_OUTPUT_PATH "${SIM_OUTPUT_ROOT}/bin")
+set(LIBRARY_OUTPUT_PATH "${SIM_OUTPUT_ROOT}/lib")
 add_definitions(-D_GLIBCXX_USE_CXX11_ABI=0)
 message("BINARY DIR ${CMAKE_BINARY_DIR}")
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -60,4 +62,3 @@ target_link_libraries(Simulator_lib ${PROTOBUF_LIB} onnx_proto ${CONAN_LIBS} std
 
 # enable_testing()
 # add_subdirectory("${PROJECT_SOURCE_DIR}/tests")
-

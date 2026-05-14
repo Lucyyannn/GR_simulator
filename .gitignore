@@ -1,5 +1,4 @@
 models/*
-build/
 logs/
 results/
 cache/
@@ -12,3 +11,11 @@ task.md
 .codex
 detail.csv
 *.log
+build/
+build2/
+build_dev/
+build_dev2/
+build_dev3/
+build_dev4/
+build_dev5
+

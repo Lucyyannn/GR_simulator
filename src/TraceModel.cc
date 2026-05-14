@@ -876,10 +876,17 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
             op->add_input(existing_bias->get_id());
           }
         }
-	      }
+      }
       uint32_t op_id = op->get_id();
       _operation_layer_ids[op_id] = op_layer_id;
-      _operation_names[op_id] = op->get_name();
+      std::string op_name = op->get_name();
+      auto attention_part_it = op_entry.attrs.find("attention_part");
+      if (op_name == "hstu::attention" &&
+          attention_part_it != op_entry.attrs.end() &&
+          !attention_part_it->second.empty()) {
+        op_name += "." + attention_part_it->second;
+      }
+      _operation_names[op_id] = op_name;
 	      _operation_map[op_id] = std::move(op);
       for (auto& out : op_entry.outputs) {
         Tensor* t = find_tensor(out.name);
@@ -1103,8 +1110,9 @@ void TraceModel::build_preload_stages() {
   if (!layer_preload_enabled() || _data_movements.empty()) return;
 
   const std::vector<std::string> preload_type_order = {
-      "pre_attention", "candidate_embedding", "kvcache",
-      "post_attention_weights", "weights", "other"};
+      "pre_attention", "candidate_embedding", "history_recompute_embedding",
+      "history_embedding", "kvcache", "post_attention_weights", "weights",
+      "other"};
   std::map<int32_t, std::vector<size_t>> movement_indices_by_layer;
   for (size_t movement_idx = 0; movement_idx < _data_movements.size();
        ++movement_idx) {
@@ -1158,20 +1166,60 @@ bool TraceModel::has_data_movement_stage_to_submit() const {
   if (_next_stage_to_submit >= _preload_stages.size()) return false;
   const auto& stage = _preload_stages[_next_stage_to_submit];
   if (stage.completed) return false;
-  if (!stage_compute_frontier_ready(stage)) {
-    for (const auto& subtask : stage.subtasks) {
-      if (subtask.submitted && !subtask.completed) return false;
-    }
-  }
-  return stage.next_subtask_to_submit < stage.subtasks.size();
+  return next_ready_preload_subtask(stage) < stage.subtasks.size();
 }
 
-std::vector<uint64_t> TraceModel::submit_next_data_movement_stage(
-    StorageController* controller, uint64_t now_ps) {
-  if (controller == nullptr || !has_data_movement_stage_to_submit()) return {};
+std::set<MemoryMedium> TraceModel::preload_subtask_sources(
+    const PreloadSubtask& subtask) const {
+  std::set<MemoryMedium> sources;
+  for (size_t movement_idx : subtask.movement_indices) {
+    if (movement_idx >= _data_movements.size()) continue;
+    const auto& movement = _data_movements[movement_idx];
+    if (movement.source != MemoryMedium::UNKNOWN) sources.insert(movement.source);
+  }
+  return sources;
+}
 
-  PreloadStage& stage = _preload_stages[_next_stage_to_submit];
-  PreloadSubtask& subtask = stage.subtasks[stage.next_subtask_to_submit];
+bool TraceModel::preload_subtask_can_submit(const PreloadStage& stage,
+                                            size_t subtask_idx) const {
+  if (subtask_idx >= stage.subtasks.size()) return false;
+  const auto& candidate = stage.subtasks[subtask_idx];
+  if (candidate.submitted || candidate.completed) return false;
+  const auto candidate_sources = preload_subtask_sources(candidate);
+
+  auto overlaps = [](const std::set<MemoryMedium>& a,
+                     const std::set<MemoryMedium>& b) {
+    for (MemoryMedium medium : a) {
+      if (b.count(medium)) return true;
+    }
+    return false;
+  };
+
+  for (size_t i = 0; i < stage.subtasks.size(); ++i) {
+    if (i == subtask_idx) continue;
+    const auto& other = stage.subtasks[i];
+    if (other.completed) continue;
+    if (i > subtask_idx && !other.submitted) continue;
+    const auto other_sources = preload_subtask_sources(other);
+    if (overlaps(candidate_sources, other_sources)) return false;
+  }
+  return true;
+}
+
+size_t TraceModel::next_ready_preload_subtask(
+    const PreloadStage& stage) const {
+  for (size_t i = 0; i < stage.subtasks.size(); ++i) {
+    if (preload_subtask_can_submit(stage, i)) return i;
+  }
+  return stage.subtasks.size();
+}
+
+std::vector<uint64_t> TraceModel::submit_preload_subtask(
+    PreloadStage& stage, size_t subtask_idx, StorageController* controller,
+    uint64_t now_ps) {
+  if (controller == nullptr || subtask_idx >= stage.subtasks.size()) return {};
+
+  PreloadSubtask& subtask = stage.subtasks[subtask_idx];
   std::vector<ResidencyManager::StageLoad> stage_loads;
   std::set<std::string> protected_ids;
   for (size_t movement_idx : subtask.movement_indices) {
@@ -1251,7 +1299,10 @@ std::vector<uint64_t> TraceModel::submit_next_data_movement_stage(
   stage.physical_bytes_by_type[subtask.preload_type] += submitted_physical_bytes;
   stage.movement_count_by_type[subtask.preload_type] +=
       static_cast<uint32_t>(requests.size());
-  stage.next_subtask_to_submit++;
+  while (stage.next_subtask_to_submit < stage.subtasks.size() &&
+         stage.subtasks[stage.next_subtask_to_submit].submitted) {
+    stage.next_subtask_to_submit++;
+  }
 
   std::vector<uint64_t> movement_ids =
       controller->submit_migration_requests(requests, now_ps);
@@ -1283,6 +1334,24 @@ std::vector<uint64_t> TraceModel::submit_next_data_movement_stage(
                movement_ids.size(), subtask.physical_bytes,
                static_cast<double>(now_ps) / 1e6);
   return movement_ids;
+}
+
+std::vector<uint64_t> TraceModel::submit_next_data_movement_stage(
+    StorageController* controller, uint64_t now_ps) {
+  if (controller == nullptr || !has_data_movement_stage_to_submit()) return {};
+
+  PreloadStage& stage = _preload_stages[_next_stage_to_submit];
+  std::vector<uint64_t> all_movement_ids;
+  while (true) {
+    const size_t subtask_idx = next_ready_preload_subtask(stage);
+    if (subtask_idx >= stage.subtasks.size()) break;
+    std::vector<uint64_t> movement_ids =
+        submit_preload_subtask(stage, subtask_idx, controller, now_ps);
+    if (movement_ids.empty() && !stage.subtasks[subtask_idx].submitted) break;
+    all_movement_ids.insert(all_movement_ids.end(), movement_ids.begin(),
+                            movement_ids.end());
+  }
+  return all_movement_ids;
 }
 
 bool TraceModel::initial_data_movement_stage_ready(

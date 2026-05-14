@@ -181,10 +181,10 @@
   "ddr" : {
     "enabled" : true,
     "freq" : 1600,
-    "channels" : 12,
+    "channels" : 4,
     "req_size" : 32,
     "nbl" : 1,
-    "size_gb" : 768,
+    "size_gb" : 256,
     "address_base" : "0x2000000000",
     "config_path" : "../configs/ramulator2_configs/DDR5.yaml"
   },
@@ -203,8 +203,8 @@
     "enabled": true,
     "address_base": "0x800000000",
     "capacity_bytes": "0x1000000000",
-    "nchs": 4,
-    "luns_per_ch": 4,
+    "nchs": 8,
+    "luns_per_ch": 8,
     "secsz": 512,
     "secs_per_pg": 8,
     "pgs_per_blk": 256,

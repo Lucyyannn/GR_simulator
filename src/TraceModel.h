@@ -162,6 +162,15 @@ class TraceModel : public Model {
 	  void pin_resident_use(int32_t layer_id, const std::string& logical_id);
 	  void release_layer_residency_pins(int32_t layer_id);
 	  void build_preload_stages();
+  std::set<MemoryMedium> preload_subtask_sources(
+      const PreloadSubtask& subtask) const;
+  bool preload_subtask_can_submit(const PreloadStage& stage,
+                                  size_t subtask_idx) const;
+  size_t next_ready_preload_subtask(const PreloadStage& stage) const;
+  std::vector<uint64_t> submit_preload_subtask(PreloadStage& stage,
+                                               size_t subtask_idx,
+                                               StorageController* controller,
+                                               uint64_t now_ps);
 	  void append_preload_type_event(const PreloadStage& stage,
 	                                 const PreloadSubtask& subtask) const;
   void mark_stage_tensors_ready(const PreloadStage& stage);
