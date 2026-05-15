@@ -1,0 +1,117 @@
+{
+  "source": "Fitted from completed results/main_task/W_IR and W_both HSTU-small/middle breakdown.csv files.",
+  "models": [
+    "small",
+    "middle"
+  ],
+  "effective_bandwidth_bps": {
+    "ddr": 22564582874.163826,
+    "ssd": 6452781293.75663
+  },
+  "preload_bandwidth_model": {
+    "ddr": {
+      "peak_utilization": 0.11017862731525307,
+      "median_effective_bps_at_reference": 22564582874.163826,
+      "reference_peak_bps": 204800000000.0
+    },
+    "ssd": {
+      "peak_utilization": 0.9846162862787828,
+      "median_effective_bps_at_reference": 6452781293.75663,
+      "reference_peak_bps": 6553599999.999999
+    }
+  },
+  "compute_scale_model": {
+    "target": "log_scale",
+    "intercept": 3.20322134987754,
+    "coefficients": {
+      "log_hidden": -0.12649821455569638,
+      "log_seq": -0.33388100984018,
+      "log_batch": -0.12353842391732556,
+      "recompute_ratio": -0.4086581019330319,
+      "kv_reuse": 0.06877742454611266,
+      "hot": -0.1969239939615465,
+      "kv_reuse_hot": 0.13116124446611446,
+      "log_seq_kv_reuse": 0.03019289130052346,
+      "log_hidden_kv_reuse": -0.09979276228754225,
+      "log_batch_kv_reuse": 0.05828316930205172,
+      "log_hidden_log_seq": -0.08910856764695052
+    },
+    "feature_reference": {
+      "hidden": "log2(hidden/256)",
+      "kv_len": "log2(kv_len/4096)",
+      "batch": "log2(batch_size)"
+    },
+    "median_relative_error": 0.08270336306544834,
+    "mean_relative_error": 0.16397711871603393,
+    "sample_count": 70
+  },
+  "npu_balance_model": {
+    "definition": "sum(core active_cycles) / (num_cores * max(core active_cycles)) from hardware_summary.csv",
+    "median_efficiency": 0.6232878638808426,
+    "mean_efficiency": 0.6174556654072244,
+    "sample_count": 70,
+    "usage_note": "Diagnostic only when compute_scale_model is available; the fitted compute scale already absorbs baseline core imbalance and scheduling overhead. For a new NPU topology, set HW_NPU_PARALLEL_EFFICIENCY or recalibrate with representative runs."
+  },
+  "compute_scale_by_hidden": {
+    "512": 10.246753039117184,
+    "256": 12.0634563725792
+  },
+  "compute_scale_by_context": {
+    "W_IR": {
+      "cold": {
+        "512": {
+          "16384": 6.028844148208163,
+          "4096": 12.276535582338129,
+          "8192": 8.882259712899241
+        },
+        "256": {
+          "16384": 6.287782696210928,
+          "4096": 14.179905522832723,
+          "8192": 10.614137989080096
+        }
+      },
+      "hot": {
+        "512": {
+          "16384": 4.3972309368419085,
+          "4096": 12.488898049217173,
+          "8192": 5.4846651950839975
+        },
+        "256": {
+          "16384": 9.512331326001076,
+          "4096": 12.860648939005529,
+          "8192": 10.155645988721963
+        }
+      }
+    },
+    "W_both": {
+      "cold": {
+        "512": {
+          "16384": 6.853436452248259,
+          "4096": 15.609091779357671,
+          "8192": 11.999829157133982
+        },
+        "256": {
+          "16384": 10.545988244030156,
+          "4096": 18.84827251545752,
+          "8192": 13.844691316398952
+        }
+      },
+      "hot": {
+        "512": {
+          "16384": 8.993186407623273,
+          "4096": 15.689476377831253,
+          "8192": 10.721609876219604
+        },
+        "256": {
+          "16384": 11.64217155720385,
+          "4096": 18.26666359182725,
+          "8192": 13.913300127385444
+        }
+      }
+    }
+  },
+  "compute_scale": 10.96117489710137,
+  "batch_gamma": 1.0,
+  "batch_scale": 1.0,
+  "sample_count": 70
+}

@@ -34,12 +34,12 @@ HSTU-small， cold， w_both
 
 ## 加速比对比实验
 
-单位：仿真时间为 ms。`—` 表示 `introductions/main_task.md` 中尚无对应完成数据。
+单位：仿真时间为 ms。`—` 表示 `results/main_task/reports.md` 中尚无对应完成数据。
 
-| model | seq_len | batch_size | user | full-cache | recompute | w_ar | w_ir | w_both | To Retest | 
-|---|---:|---:|---|---:|---:|---:|---:|---:|---:|
-| HSTU-small | 4096 | 1 | hot | 0.774155 | 1.907200 | 0.408592 | 0.729683 | 0.422692 |  yes |
-| HSTU-small | 4096 | 1 | cold | 2.829870 | 1.907200 | 1.539130 | 1.849450 | 0.879708 |
+| model | seq_len | batch_size | user | full-cache | recompute | w_ar | w_ir | w_both |
+|---|---:|---:|---|---:|---:|---:|---:|---:|
+| HSTU-small | 4096 | 1 | hot | 0.774155 | 1.907200 | 0.408592 | 0.729683 | 0.422692 |
+| HSTU-small | 4096 | 1 | cold | 2.829870 | 1.907200 | 1.539130 | 1.849450 | 0.921650 |
 | HSTU-small | 4096 | 4 | hot | 3.088090 | 7.180770 | 1.617670 | 2.895140 | 1.581180 |
 | HSTU-small | 4096 | 4 | cold | 10.828300 | 7.180770 | 5.825410 | 6.920920 | 3.578670 |
 | HSTU-small | 4096 | 8 | hot | 6.161770 | 12.480700 | 3.229640 | 5.772330 | 3.118540 |
@@ -56,27 +56,27 @@ HSTU-small， cold， w_both
 | HSTU-small | 16384 | 4 | cold | 41.637900 | 24.432800 | 21.957900 | 26.845500 | 14.116500 |
 | HSTU-small | 16384 | 8 | hot | 24.195400 | 35.638400 | 12.707000 | 24.485700 | 12.331300 |
 | HSTU-small | 16384 | 8 | cold | 83.118300 | 35.638400 | 43.672500 | 51.119200 | 26.831000 |
-| HSTU-middle | 4096 | 1 | hot | 3.032270 | 6.096380 | 1.586440 | 2.918990 | 1.586440 | yes |
-| HSTU-middle | 4096 | 1 | cold | 10.696800 | 6.096380 | 5.555290 | 6.446430 | 3.885970 |
-| HSTU-middle | 4096 | 4 | hot | 12.103300 | 17.406200 | 6.323280 | 11.612700 | 6.323280 |
-| HSTU-middle | 4096 | 4 | cold | 41.808600 | 17.406200 | 21.882800 | 24.493900 | 14.697100 |
-| HSTU-middle | 4096 | 8 | hot | 24.024700 | 23.709600 | 12.634400 | 23.132500 | 12.634400 | yes|
+| HSTU-middle | 4096 | 1 | hot | 3.032270 | 6.096380 | 1.586440 | 3.467190 | 1.822460 |
+| HSTU-middle | 4096 | 1 | cold | 10.696800 | 6.096380 | 5.555290 | 6.151600 | 2.999160 |
+| HSTU-middle | 4096 | 4 | hot | 12.103300 | 19.406200 | 6.323280 | 12.608600 | 6.496760 |
+| HSTU-middle | 4096 | 4 | cold | 41.808600 | 19.406200 | 21.882800 | 23.604300 | 11.583000 |
+| HSTU-middle | 4096 | 8 | hot | 24.024700 | 23.709600 | 12.634400 | 21.638400 | 12.657700 |
 | HSTU-middle | 4096 | 8 | cold | 83.112000 | 23.709600 | 43.751900 | 47.706600 | 28.815500 |
 | HSTU-middle | 8192 | 1 | hot | 6.051030 | 14.983700 | 3.160640 | 5.498130 | 3.016560 |
 | HSTU-middle | 8192 | 1 | cold | 20.981600 | 14.983700 | 11.018600 | 12.108600 | 6.804190 |
-| HSTU-middle | 8192 | 4 | hot | 23.988200 | 28.455000 | 12.602800 | 27.752600 | 13.360300 |yes|
-| HSTU-middle | 8192 | 4 | cold | 82.768700 | 28.455000 | 43.408600 | 46.347100 | — |
-| HSTU-middle | 8192 | 8 | hot | 48.016400 | 40.171300 | 25.146000 | 35.433800 | — |
-| HSTU-middle | 8192 | 8 | cold | 165.223000 | 40.171300 | 86.421000 | — | — |
-| HSTU-middle | 16384 | 1 | hot | 12.079700 | 31.551600 | 6.298330 | 21.859900 | — |
-| HSTU-middle | 16384 | 1 | cold | 41.551100 | 31.551600 | 21.625300 | 30.030100 | — |
-| HSTU-middle | 16384 | 4 | hot | 47.952200 | — | 25.082700 | — | — |
-| HSTU-middle | 16384 | 4 | cold | 164.871000 | — | 86.066700 | — | — |
-| HSTU-middle | 16384 | 8 | hot | 95.917300 | — | 50.184700 | — | — |
-| HSTU-middle | 16384 | 8 | cold | — | — | 172.125000 | — | — |
+| HSTU-middle | 8192 | 4 | hot | 23.988200 | 28.455000 | 12.602800 | 27.752600 | 13.360300 |
+| HSTU-middle | 8192 | 4 | cold | 82.768700 | 28.455000 | 43.408600 | 46.347100 | 23.532200 |
+| HSTU-middle | 8192 | 8 | hot | 48.016400 | 40.171300 | 25.146000 | 35.433800 | 23.710700 |
+| HSTU-middle | 8192 | 8 | cold | 165.223000 | 40.171300 | 86.421000 | — | 46.160100 |
+| HSTU-middle | 16384 | 1 | hot | 12.079700 | 31.551600 | 6.298330 | 21.859900 | 8.641160 |
+| HSTU-middle | 16384 | 1 | cold | 41.551100 | 31.551600 | 21.625300 | 30.030100 | 12.202000 |
+| HSTU-middle | 16384 | 4 | hot | 47.952200 | 56.872800 | 25.082700 | 46.587700 | 29.525800 |
+| HSTU-middle | 16384 | 4 | cold | 164.871000 | 56.872800 | 86.066700 | 91.403600 | 47.230200 |
+| HSTU-middle | 16384 | 8 | hot | 95.917300 | 96.332200 | 50.184700 | 65.208900 | 37.255400 |
+| HSTU-middle | 16384 | 8 | cold | 329.414000 | 96.332200 | 172.125000 | — | 92.729200 |
 | HSTU-large | 4096 | 1 | hot | 9.032410 | 17.347800 | 4.723550 | 8.649960 | 4.723550 |
 | HSTU-large | 4096 | 1 | cold | 31.393300 | 17.347800 | 16.470500 | — | — |
-| HSTU-large | 4096 | 4 | hot | 35.915800 | 34.162400 | 18.832200 | — | — |
+| HSTU-large | 4096 | 4 | hot | 35.915800 | 34.162400 | 18.832200 | 28.805800 | — |
 | HSTU-large | 4096 | 4 | cold | 123.921000 | 34.162400 | 64.881200 | — | — |
 | HSTU-large | 4096 | 8 | hot | 71.881600 | — | 37.619600 | — | — |
 | HSTU-large | 4096 | 8 | cold | — | — | — | — | — |
@@ -87,8 +87,10 @@ HSTU-small， cold， w_both
 | HSTU-large | 8192 | 8 | hot | — | — | — | — | — |
 | HSTU-large | 8192 | 8 | cold | — | — | — | — | — |
 | HSTU-large | 16384 | 1 | hot | 35.866000 | — | — | — | — |
-| HSTU-large | 16384 | 1 | cold | — | — | — | — | — |
+| HSTU-large | 16384 | 1 | cold | 123.644000 | — | — | — | — |
 | HSTU-large | 16384 | 4 | hot | — | — | — | — | — |
 | HSTU-large | 16384 | 4 | cold | — | — | — | — | — |
 | HSTU-large | 16384 | 8 | hot | — | — | — | — | — |
 | HSTU-large | 16384 | 8 | cold | — | — | — | — | — |
+
+未完成组：Recompute/HSTU-large_seq4096_bs8_hot, Recompute/HSTU-large_seq4096_bs8_cold, Recompute/HSTU-large_seq8192_bs4_hot, Recompute/HSTU-large_seq8192_bs4_cold, Recompute/HSTU-large_seq8192_bs8_hot, Recompute/HSTU-large_seq8192_bs8_cold, Recompute/HSTU-large_seq16384_bs1_hot, Recompute/HSTU-large_seq16384_bs1_cold, Recompute/HSTU-large_seq16384_bs4_hot, Recompute/HSTU-large_seq16384_bs4_cold, Recompute/HSTU-large_seq16384_bs8_hot, Recompute/HSTU-large_seq16384_bs8_cold, FullCache/HSTU-large_seq4096_bs8_cold, FullCache/HSTU-large_seq8192_bs4_cold, FullCache/HSTU-large_seq8192_bs8_hot, FullCache/HSTU-large_seq8192_bs8_cold, FullCache/HSTU-large_seq16384_bs4_hot, FullCache/HSTU-large_seq16384_bs4_cold, FullCache/HSTU-large_seq16384_bs8_hot, FullCache/HSTU-large_seq16384_bs8_cold, W_AR/HSTU-large_seq4096_bs8_cold, W_AR/HSTU-large_seq8192_bs4_hot, W_AR/HSTU-large_seq8192_bs4_cold, W_AR/HSTU-large_seq8192_bs8_hot, W_AR/HSTU-large_seq8192_bs8_cold, W_AR/HSTU-large_seq16384_bs1_hot, W_AR/HSTU-large_seq16384_bs1_cold, W_AR/HSTU-large_seq16384_bs4_hot, W_AR/HSTU-large_seq16384_bs4_cold, W_AR/HSTU-large_seq16384_bs8_hot, W_AR/HSTU-large_seq16384_bs8_cold, W_IR/HSTU-middle_seq8192_bs8_cold, W_IR/HSTU-middle_seq16384_bs8_cold, W_IR/HSTU-large_seq4096_bs1_cold, W_IR/HSTU-large_seq4096_bs4_cold, W_IR/HSTU-large_seq4096_bs8_hot, W_IR/HSTU-large_seq4096_bs8_cold, W_IR/HSTU-large_seq8192_bs1_hot, W_IR/HSTU-large_seq8192_bs1_cold, W_IR/HSTU-large_seq8192_bs4_hot, W_IR/HSTU-large_seq8192_bs4_cold, W_IR/HSTU-large_seq8192_bs8_hot, W_IR/HSTU-large_seq8192_bs8_cold, W_IR/HSTU-large_seq16384_bs1_hot, W_IR/HSTU-large_seq16384_bs1_cold, W_IR/HSTU-large_seq16384_bs4_hot, W_IR/HSTU-large_seq16384_bs4_cold, W_IR/HSTU-large_seq16384_bs8_hot, W_IR/HSTU-large_seq16384_bs8_cold, W_both/HSTU-large_seq4096_bs1_cold, W_both/HSTU-large_seq4096_bs4_hot, W_both/HSTU-large_seq4096_bs4_cold, W_both/HSTU-large_seq4096_bs8_hot, W_both/HSTU-large_seq4096_bs8_cold, W_both/HSTU-large_seq8192_bs1_hot, W_both/HSTU-large_seq8192_bs1_cold, W_both/HSTU-large_seq8192_bs4_hot, W_both/HSTU-large_seq8192_bs4_cold, W_both/HSTU-large_seq8192_bs8_hot, W_both/HSTU-large_seq8192_bs8_cold, W_both/HSTU-large_seq16384_bs1_hot, W_both/HSTU-large_seq16384_bs1_cold, W_both/HSTU-large_seq16384_bs4_hot, W_both/HSTU-large_seq16384_bs4_cold, W_both/HSTU-large_seq16384_bs8_hot, W_both/HSTU-large_seq16384_bs8_cold
