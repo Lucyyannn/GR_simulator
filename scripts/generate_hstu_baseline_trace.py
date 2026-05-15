@@ -2284,9 +2284,11 @@ def write_json(path, data, compact=False):
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def history_recompute_indices(length, vocab, mode, rng):
+def history_recompute_indices(length, vocab, mode, rng, stream_base=0):
     if mode == "stream":
-        return list(range(length))
+        if vocab <= 0:
+            return list(range(length))
+        return [(stream_base + i) % vocab for i in range(length)]
     if mode == "random":
         return [rng.randrange(vocab) for _ in range(length)]
     raise ValueError(f"Unsupported history recompute index mode: {mode}")
@@ -2356,11 +2358,13 @@ def write_pipeline_traces(args, op_modeling):
             model_name = f"hstu_b{batch_id}_m{macro_id}"
             indices_values_per_user = []
             for user in users:
+                stream_base = user * max(args.history_recompute_len, 1)
                 history_indices = history_recompute_indices(
                     args.history_recompute_len,
                     args.vocab,
                     args.history_recompute_index_mode,
                     rng,
+                    stream_base=stream_base,
                 )
                 candidate_indices = [rng.randrange(args.vocab) for _ in range(tokens)]
                 indices_values_per_user.append(candidate_indices + history_indices)

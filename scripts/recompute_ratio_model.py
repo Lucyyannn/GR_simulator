@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Example usage:
 #
-#   python3 -B docs/scripts/recompute_ratio_model.py \
+#   python3 docs/scripts/recompute_ratio_model.py \
 #     --user cold \
 #     --layers 4 \
 #     --hidden 256 \
