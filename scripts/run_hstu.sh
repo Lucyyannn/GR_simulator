@@ -25,6 +25,7 @@ Options:
   --users-per-batch N          Users per batch
   --candidates-per-user N      Candidates per user
   --macro-batch-size N         Candidate macro batch size
+  --npu-count N                Same-config NPU count for trace-mode batch sharding. Default: 1
   --vocab N                    Embedding vocabulary size
   --seed N                     Random seed
   --op-modeling SPEC           Operator modeling modes, e.g. split=materialize,view=materialize,concat=materialize
@@ -47,10 +48,11 @@ HIDDEN="${HIDDEN:-256}"
 KV_LEN="${KV_LEN:-1024}"
 HISTORY_RECOMPUTE_LEN="${HISTORY_RECOMPUTE_LEN:-0}"
 HISTORY_RECOMPUTE_INDEX_MODE="${HISTORY_RECOMPUTE_INDEX_MODE:-stream}"
-NUM_USERS="${NUM_USERS:-8}"
+NUM_USERS="${NUM_USERS:-4}"
 USERS_PER_BATCH="${USERS_PER_BATCH:-4}"
-CANDIDATES_PER_USER="${CANDIDATES_PER_USER:-2048}"
-MACRO_BATCH_SIZE="${MACRO_BATCH_SIZE:-1024}"
+CANDIDATES_PER_USER="${CANDIDATES_PER_USER:-128}"
+MACRO_BATCH_SIZE="${MACRO_BATCH_SIZE:-128}"
+NPU_COUNT="${NPU_COUNT:-1}"
 VOCAB="${VOCAB:-65536}"
 SEED="${SEED:-1234}"
 OP_MODELING="${OP_MODELING:-split=materialize,view=materialize,concat=materialize}"
@@ -119,6 +121,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --macro-batch-size)
       MACRO_BATCH_SIZE="$2"
+      shift 2
+      ;;
+    --npu-count)
+      NPU_COUNT="$2"
       shift 2
       ;;
     --vocab)
@@ -205,6 +211,15 @@ case "${ATTENTION_MODELING}" in
     ;;
 esac
 
+if ! [[ "${NPU_COUNT}" =~ ^[0-9]+$ ]] || [[ "${NPU_COUNT}" -lt 1 ]]; then
+  echo "Invalid --npu-count: ${NPU_COUNT}" >&2
+  exit 1
+fi
+if (( USERS_PER_BATCH % NPU_COUNT != 0 )); then
+  echo "--users-per-batch (${USERS_PER_BATCH}) must be divisible by --npu-count (${NPU_COUNT})" >&2
+  exit 1
+fi
+
 if [[ -z "${BASE_CONFIG}" ]]; then
   BASE_CONFIG="configs/910c_mini_${SOURCE_MEDIUM}.json"
 fi
@@ -227,6 +242,9 @@ BREAKDOWN_CSV="${RESULT_DIR}/layer_breakdown.csv"
 HARDWARE_SUMMARY_CSV="${RESULT_DIR}/hardware_summary.csv"
 TIMELINE_PNG="${RESULT_DIR}/layer_timeline.png"
 LOG_PATH="${RESULT_DIR}/layer.log"
+if [[ -d "${REPO_ROOT}/build/lib" ]]; then
+  export LD_LIBRARY_PATH="${REPO_ROOT}/build/lib:${LD_LIBRARY_PATH-}"
+fi
 
 if [[ -d "${RESULT_DIR}" ]]; then
   rm -rf "${RESULT_DIR}"
@@ -302,6 +320,7 @@ SIMULATOR_ARGS=(
   --models_list "${MODELS_JSON}"
   --mode trace
   --log_level "${LOG_LEVEL}"
+  --npu_count "${NPU_COUNT}"
 )
 
 "${SIMULATOR_BIN}" "${SIMULATOR_ARGS[@]}" > "${LOG_PATH}" 2>&1

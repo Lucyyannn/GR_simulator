@@ -1,9 +1,23 @@
 #include "Dram.h"
 
 #include <algorithm>
+#include <string>
 
 #include "helper/HelperFunctions.h"
 #include "Hashing.h"
+
+namespace {
+int inferred_ramulator2_burst_cycles(const TieredMemoryConfig& tier_config,
+                                     const std::string& device_name) {
+  if (tier_config.nbl > 1) return static_cast<int>(tier_config.nbl);
+  const std::string& path = tier_config.config_path;
+  if (device_name == "DDR" || path.find("DDR5") != std::string::npos)
+    return 8;
+  if (device_name == "HBM" || path.find("HBM2") != std::string::npos)
+    return 2;
+  return std::max<int>(tier_config.nbl, 1);
+}
+}  // namespace
 
 uint32_t Dram::get_channel_id(MemoryAccess* access) {
   const new_addr_type addr_unit =
@@ -231,10 +245,12 @@ Ramulator2Memory::Ramulator2Memory(const SimulationConfig& config,
   _capacity_bytes = tier_config.capacity_bytes;
   _address_req_size = tier_config.req_size;
   _mem.resize(_n_ch);
+  const int burst_cycles =
+      inferred_ramulator2_burst_cycles(tier_config, _device_name);
   for (int ch = 0; ch < _n_ch; ch++) {
     _mem[ch] = std::make_unique<NDPSim::Ramulator2>(
       ch, _n_ch, tier_config.config_path, _device_name, tier_config.print_interval,
-      std::max<int>(tier_config.nbl, 1));
+      burst_cycles);
   }
   _tx_log2 = log2(_req_size);
   _tx_ch_log2 = log2(_n_ch) + _tx_log2;

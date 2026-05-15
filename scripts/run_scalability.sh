@@ -8,25 +8,25 @@ cd "${REPO_ROOT}"
 
 usage() {
   cat <<'EOF'
-Usage: bash scripts/run_hstu_910abc.sh [options]
+Usage: bash scripts/run_scalability.sh [options]
 
-Batch-run HSTU-middle on 910A/B/C configs.
-The script launches all 15 cases in parallel and calls scripts/run_hstu.sh
-for each individual case. When run on the host with Docker available, each
-case is launched by an independent docker exec -d task and writes its own
-status file.
+Batch-run HSTU-middle scalability experiments on 910A/B/C configs.
+The script launches all DRAM/SSD source-medium comparison cases in parallel
+and calls scripts/run_hstu.sh for each individual case. When run on the host
+with Docker available, each case is launched by an independent docker exec -d
+task and writes its own status file.
 
 Options:
-  --result-root PATH   Output root. Default: results/hstu_910abc_sweep
+  --result-root PATH       Output root. Default: results/hstu_scalability
   --docker-container NAME  Launch cases with docker exec -d in this container
   --container-workdir PATH Container repo path. Default: /workspace/GR_simulator
-  --local             Force local detached launch instead of docker exec -d
-  --dry-run            Print run_hstu.sh commands and backup action without running
-  -h, --help           Show this message
+  --local                  Force local detached launch instead of docker exec -d
+  --dry-run                Print run_hstu.sh commands and backup action without running
+  -h, --help               Show this message
 EOF
 }
 
-RESULT_ROOT="${RESULT_ROOT:-results/hstu_910abc_sweep}"
+RESULT_ROOT="${RESULT_ROOT:-results/hstu_scalability}"
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-}"
 CONTAINER_WORKDIR="${CONTAINER_WORKDIR:-/workspace/GR_simulator}"
 LOCAL_LAUNCH=0
@@ -86,17 +86,22 @@ if [[ "${LOCAL_LAUNCH}" != "1" ]]; then
   fi
 fi
 
-LAYERS=8
-HIDDEN=512
+LAYERS="${LAYERS:-8}"
+HIDDEN="${HIDDEN:-512}"
 KV_LEN="${KV_LEN:-4096}"
+NUM_USERS="${NUM_USERS:-4}"
 USERS_PER_BATCH="${USERS_PER_BATCH:-4}"
+CANDIDATES_PER_USER="${CANDIDATES_PER_USER:-128}"
+MACRO_BATCH_SIZE="${MACRO_BATCH_SIZE:-128}"
 KV_REUSE_RATIO="${KV_REUSE_RATIO:-0.4791}"
-FULL_RECOMPUTE_LEN="${FULL_RECOMPUTE_LEN:-$(((KV_LEN + 1) / 2))}"
-IR_RECOMPUTE_LEN=""
-BOTH_RECOMPUTE_LEN=""
+FULL_RECOMPUTE_LEN="${FULL_RECOMPUTE_LEN:-${KV_LEN}}"
+RECOMPUTE_MODEL="${RECOMPUTE_MODEL:-scripts/recompute_ratio_cost_model_new.py}"
+RECOMPUTE_CALIBRATION="${RECOMPUTE_CALIBRATION:-scripts/recompute_ratio_calibration.json}"
 
 CHIPS=(910A 910B 910C)
-SCHEMES=(Full_Cache Full_Recompute W_AR W_IR W_both)
+SOURCE_LABELS=(DRAM SSD)
+SOURCE_MEDIA=(ddr ssd)
+SCHEMES=(Full_Cache Full_Recompute w_AR w_IR w_both)
 
 RUN_ARGS=()
 
@@ -106,21 +111,75 @@ config_for() {
   printf 'configs/%s.json\n' "${chip}"
 }
 
-build_run_args() {
+user_mode_for_source() {
+  local source_medium="$1"
+
+  case "${source_medium}" in
+    ddr)
+      printf 'hot\n'
+      ;;
+    ssd)
+      printf 'cold\n'
+      ;;
+    *)
+      echo "Unknown source medium: ${source_medium}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+compute_recompute_len() {
   local chip="$1"
-  local scheme="$2"
+  local source_medium="$2"
+  local enable_kv_reuse="$3"
   local cfg
-  local case_dir
+  local user_mode
+  local -a model_args
 
   cfg=$(config_for "${chip}")
-  case_dir="${CASES_ROOT}/${chip}/${scheme}"
-  RUN_ARGS=(
-    --base-config "${cfg}"
-    --result-dir "${case_dir}"
+  user_mode=$(user_mode_for_source "${source_medium}")
+  model_args=(
+    --config "${cfg}"
+    --calibration "${RECOMPUTE_CALIBRATION}"
+    --user "${user_mode}"
     --layers "${LAYERS}"
     --hidden "${HIDDEN}"
     --kv-len "${KV_LEN}"
+    --batch-size "${USERS_PER_BATCH}"
+    --candidates "${CANDIDATES_PER_USER}"
+    --embedding-source "${source_medium}"
+    --field len
+  )
+  if [[ "${enable_kv_reuse}" == "1" ]]; then
+    model_args+=(--enable-kv-reuse --kv-reuse-ratio "${KV_REUSE_RATIO}")
+  fi
+
+  python3 "${RECOMPUTE_MODEL}" "${model_args[@]}"
+}
+
+build_run_args() {
+  local source_label="$1"
+  local source_medium="$2"
+  local chip="$3"
+  local scheme="$4"
+  local cfg
+  local case_dir
+  local recompute_len
+
+  cfg=$(config_for "${chip}")
+  case_dir="${CASES_ROOT}/${source_label}/${chip}/${scheme}"
+  RUN_ARGS=(
+    --base-config "${cfg}"
+    --result-dir "${case_dir}"
+    --source-medium "${source_medium}"
+    --embedding-source-medium "${source_medium}"
+    --layers "${LAYERS}"
+    --hidden "${HIDDEN}"
+    --kv-len "${KV_LEN}"
+    --num-users "${NUM_USERS}"
     --users-per-batch "${USERS_PER_BATCH}"
+    --candidates-per-user "${CANDIDATES_PER_USER}"
+    --macro-batch-size "${MACRO_BATCH_SIZE}"
   )
 
   case "${scheme}" in
@@ -130,15 +189,17 @@ build_run_args() {
     Full_Recompute)
       RUN_ARGS+=(--history-recompute-len "${FULL_RECOMPUTE_LEN}")
       ;;
-    W_AR)
+    w_AR)
       RUN_ARGS+=(--history-recompute-len 0 --enable-kv-reuse --kv-reuse-ratio "${KV_REUSE_RATIO}")
       ;;
-    W_IR)
-      RUN_ARGS+=(--history-recompute-len "${IR_RECOMPUTE_LEN}")
+    w_IR)
+      recompute_len=$(compute_recompute_len "${chip}" "${source_medium}" 0)
+      RUN_ARGS+=(--history-recompute-len "${recompute_len}")
       ;;
-    W_both)
+    w_both)
+      recompute_len=$(compute_recompute_len "${chip}" "${source_medium}" 1)
       RUN_ARGS+=(
-        --history-recompute-len "${BOTH_RECOMPUTE_LEN}"
+        --history-recompute-len "${recompute_len}"
         --enable-kv-reuse
         --kv-reuse-ratio "${KV_REUSE_RATIO}"
       )
@@ -152,46 +213,39 @@ build_run_args() {
 
 print_command() {
   local -a args=("$@")
+  local cmd
+  local arg
+
+  printf -v cmd 'MPLBACKEND=%q bash scripts/run_hstu.sh' "${MPLBACKEND:-Agg}"
+  for arg in "${args[@]}"; do
+    printf -v cmd '%s %q' "${cmd}" "${arg}"
+  done
 
   if [[ "${RUN_IN_DOCKER}" == "1" ]]; then
-    printf 'docker exec -d -w %q %q bash -lc ' "${CONTAINER_WORKDIR}" "${DOCKER_CONTAINER}"
+    printf 'docker exec -d -w %q %q bash -lc %q\n' \
+      "${CONTAINER_WORKDIR}" "${DOCKER_CONTAINER}" "${cmd}"
+    return
   fi
-  printf 'MPLBACKEND=%q bash scripts/run_hstu.sh' "${MPLBACKEND:-Agg}"
-  printf ' %q' "${args[@]}"
-  printf '\n'
+
+  printf '%s\n' "${cmd}"
 }
 
-compute_auto_recompute_lens() {
-  local user_mode="hot"
-  if [[ "${SOURCE_MEDIUM:-ddr}" == "ssd" ]]; then
-    user_mode="cold"
-  fi
-
-  IR_RECOMPUTE_LEN=$(python3 scripts/recompute_ratio_model.py \
-    --user "${user_mode}" \
-    --layers "${LAYERS}" \
-    --hidden "${HIDDEN}" \
-    --kv-len "${KV_LEN}" \
-    --batch-size "${USERS_PER_BATCH}" \
-    --field len)
-  BOTH_RECOMPUTE_LEN=$(python3 scripts/recompute_ratio_model.py \
-    --user "${user_mode}" \
-    --layers "${LAYERS}" \
-    --hidden "${HIDDEN}" \
-    --kv-len "${KV_LEN}" \
-    --batch-size "${USERS_PER_BATCH}" \
-    --enable-kv-reuse \
-    --kv-reuse-ratio "${KV_REUSE_RATIO}" \
-    --field len)
-  if (( BOTH_RECOMPUTE_LEN <= 0 && IR_RECOMPUTE_LEN > 0 )); then
-    BOTH_RECOMPUTE_LEN="${IR_RECOMPUTE_LEN}"
-  fi
-}
-
-validate_configs() {
+validate_inputs() {
   local chip
   local cfg
 
+  if [[ ! -f scripts/run_hstu.sh ]]; then
+    echo "Runner not found: scripts/run_hstu.sh" >&2
+    exit 1
+  fi
+  if [[ ! -f "${RECOMPUTE_MODEL}" ]]; then
+    echo "Recompute model not found: ${RECOMPUTE_MODEL}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${RECOMPUTE_CALIBRATION}" ]]; then
+    echo "Recompute calibration not found: ${RECOMPUTE_CALIBRATION}" >&2
+    exit 1
+  fi
   for chip in "${CHIPS[@]}"; do
     cfg=$(config_for "${chip}")
     if [[ ! -f "${cfg}" ]]; then
@@ -251,10 +305,9 @@ launch_case() {
 
   if [[ "${RUN_IN_DOCKER}" == "1" ]]; then
     local docker_cmd
+    local arg
     printf -v docker_cmd 'set +e; cd %q; export ONNXIM_HOME=%q; export MPLBACKEND=%q; echo "running $(date -Is)" > %q; bash scripts/run_hstu.sh' \
       "${CONTAINER_WORKDIR}" "${CONTAINER_WORKDIR}" "${MPLBACKEND:-Agg}" "${state_path}"
-    printf -v docker_cmd '%s' "${docker_cmd}"
-    printf -v docker_cmd '%s' "${docker_cmd}"
     for arg in "${RUN_ARGS[@]}"; do
       printf -v docker_cmd '%s %q' "${docker_cmd}" "${arg}"
     done
@@ -306,8 +359,7 @@ launch_case() {
 
 trap 'echo "Launch driver interrupted; already launched HSTU cases remain detached" >&2; exit 130' INT TERM
 
-validate_configs
-compute_auto_recompute_lens
+validate_inputs
 
 if [[ "${DRY_RUN}" == "1" ]]; then
   if [[ -d "${RESULT_ROOT}" ]]; then
@@ -319,11 +371,15 @@ if [[ "${DRY_RUN}" == "1" ]]; then
   fi
 
   total=0
-  for chip in "${CHIPS[@]}"; do
-    for scheme in "${SCHEMES[@]}"; do
-      build_run_args "${chip}" "${scheme}"
-      print_command "${RUN_ARGS[@]}"
-      total=$((total + 1))
+  for source_idx in "${!SOURCE_LABELS[@]}"; do
+    source_label="${SOURCE_LABELS[${source_idx}]}"
+    source_medium="${SOURCE_MEDIA[${source_idx}]}"
+    for chip in "${CHIPS[@]}"; do
+      for scheme in "${SCHEMES[@]}"; do
+        build_run_args "${source_label}" "${source_medium}" "${chip}" "${scheme}"
+        print_command "${RUN_ARGS[@]}"
+        total=$((total + 1))
+      done
     done
   done
   echo "Dry run: ${total} cases"
@@ -338,15 +394,19 @@ else
   mkdir -p "${CASES_ROOT}" "${LOG_DIR}"
 fi
 
-for chip in "${CHIPS[@]}"; do
-  for scheme in "${SCHEMES[@]}"; do
-    label="${chip}__${scheme}"
-    build_run_args "${chip}" "${scheme}"
-    launch_case "${label}"
+for source_idx in "${!SOURCE_LABELS[@]}"; do
+  source_label="${SOURCE_LABELS[${source_idx}]}"
+  source_medium="${SOURCE_MEDIA[${source_idx}]}"
+  for chip in "${CHIPS[@]}"; do
+    for scheme in "${SCHEMES[@]}"; do
+      label="${source_label}__${chip}__${scheme}"
+      build_run_args "${source_label}" "${source_medium}" "${chip}" "${scheme}"
+      launch_case "${label}"
+    done
   done
 done
 
-echo "All HSTU cases launched as detached jobs."
+echo "All HSTU scalability cases launched as detached jobs."
 echo "Result root: ${RESULT_ROOT}"
 echo "Logs: ${LOG_DIR}"
 echo "Completion status files will appear as: ${LOG_DIR}/*.status"

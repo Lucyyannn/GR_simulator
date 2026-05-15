@@ -735,8 +735,12 @@ void Simulator::append_memory_hardware_summary_rows(std::ostream& out,
         seconds <= 0.0 ? 0.0 : static_cast<double>(bytes) / seconds / 1e9;
     const double bandwidth_util =
         channel_peak_GBps <= 0.0 ? 0.0 : bandwidth_GBps * 100.0 / channel_peak_GBps;
+    const double command_util =
+        ch < stats.channel_utilization_percent.size()
+            ? stats.channel_utilization_percent[ch]
+            : bandwidth_util;
     write_csv_row(out, {
-        name, "channel", std::to_string(ch), csv_value(bandwidth_util),
+        name, "channel", std::to_string(ch), csv_value(command_util),
         csv_value(bandwidth_GBps), csv_value(bandwidth_util),
         csv_value(channel_peak_GBps), csv_value(ps_to_us(sim_time_ps)), "", "",
         csv_value(reads), csv_value(writes), csv_value(read_bytes),
@@ -756,8 +760,12 @@ void Simulator::append_memory_hardware_summary_rows(std::ostream& out,
       peak_bandwidth_GBps <= 0.0
           ? 0.0
           : total_bandwidth_GBps * 100.0 / peak_bandwidth_GBps;
+  const double command_util =
+      stats.channel_utilization_percent.empty()
+          ? bandwidth_util
+          : stats.average_utilization_percent;
   write_csv_row(out, {
-      name, "overall", "all", csv_value(bandwidth_util),
+      name, "overall", "all", csv_value(command_util),
       csv_value(total_bandwidth_GBps), csv_value(bandwidth_util),
       csv_value(peak_bandwidth_GBps), csv_value(ps_to_us(sim_time_ps)), "", "",
       csv_value(total_reads), csv_value(total_writes), csv_value(total_read_bytes),
