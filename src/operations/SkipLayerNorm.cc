@@ -159,8 +159,10 @@ void SkipLayerNorm::calculate_loops() {
     assert (_tokens_per_tile >= 1);
     if (_tokens_per_tile > _seq * _batch_size) _tokens_per_tile = _seq * _batch_size;
     int num_tiles = ceil_div(_seq, _tokens_per_tile);
-    if(num_tiles < _config.num_cores * 2) {
-        _tokens_per_tile = ceil_div(_seq, _config.num_cores * 2);
+    const uint32_t npu_cores =
+        _config.cores_per_npu == 0 ? _config.num_cores : _config.cores_per_npu;
+    if(num_tiles < npu_cores * 2) {
+        _tokens_per_tile = ceil_div(_seq, npu_cores * 2);
         num_tiles = ceil_div(_seq, _tokens_per_tile);
     }
     spdlog::info("[SkipLayerNorm] tokens_per_tile: {}", _tokens_per_tile);

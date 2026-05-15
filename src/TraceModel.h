@@ -139,11 +139,13 @@ class TraceModel : public Model {
 	      _core_phase_events;
 	  std::map<int32_t, std::set<std::string>> _resident_uses_by_layer;
 	  std::map<int32_t, uint32_t> _remaining_ops_by_layer;
-	  bool _data_movements_submitted = false;
+  bool _data_movements_submitted = false;
+  bool _graph_sharded = false;
   uint64_t _reuse_logical_bytes = 0;
   uint64_t _reuse_physical_bytes = 0;
 
   uint32_t register_tensor(const trace_frontend::TensorEntry& entry, bool produced);
+  void apply_npu_trace_shard();
   void remember_tensor_entry(const trace_frontend::TensorEntry& entry);
   void apply_trace_storage(Tensor* tensor, const trace_frontend::TensorEntry& entry);
   bool apply_reuse_layout(Tensor* tensor,

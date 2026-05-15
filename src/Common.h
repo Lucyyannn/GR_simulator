@@ -54,6 +54,7 @@ typedef struct {
   bool write;
   bool request;
   uint32_t core_id;
+  uint32_t npu_id = 0;
   cycle_type start_cycle;
   cycle_type dram_enter_cycle;
   cycle_type dram_finish_cycle;
@@ -161,6 +162,7 @@ struct Tile {
   int spad_id;
   int accum_spad_id;
   int core_id = -1;
+  uint32_t npu_id = 0;
   bool inst_finished = false;
 } ;
 
@@ -169,6 +171,9 @@ uint32_t generate_mem_access_id();
 addr_type allocate_address(uint32_t size);
 
 addr_type allocate_address_in_medium(uint32_t size, MemoryMedium medium);
+addr_type allocate_address_in_medium_for_npu(uint32_t size,
+                                             MemoryMedium medium,
+                                             uint32_t npu_id);
 void configure_tensor_placement_policy(const SimulationConfig& config);
 MemoryMedium default_tensor_medium(uint32_t size);
 uint64_t get_medium_base(MemoryMedium medium);

@@ -1,6 +1,7 @@
 #include <fstream>
 #include <chrono>
 #include <filesystem>
+#include <cstdlib>
 
 #include "Simulator.h"
 #include "TraceModel.h"
@@ -10,6 +11,47 @@
 
 namespace fs = std::filesystem;
 namespace po = boost::program_options;
+
+namespace {
+
+void configure_multi_npu_runtime(SimulationConfig& config,
+                                 uint32_t npu_count) {
+  if (npu_count == 0) {
+    spdlog::error("npu_count must be >= 1");
+    std::exit(EXIT_FAILURE);
+  }
+
+  config.npu_count = npu_count;
+  if (config.cores_per_npu == 0) config.cores_per_npu = config.num_cores;
+  if (config.hbm_channels_per_npu == 0)
+    config.hbm_channels_per_npu = config.hbm.channels;
+  if (npu_count == 1) return;
+
+  const uint32_t cores_per_npu = config.cores_per_npu;
+  const uint32_t total_cores = cores_per_npu * npu_count;
+  CoreConfig* expanded = new CoreConfig[total_cores];
+  for (uint32_t npu_id = 0; npu_id < npu_count; ++npu_id) {
+    for (uint32_t local_core = 0; local_core < cores_per_npu; ++local_core) {
+      expanded[npu_id * cores_per_npu + local_core] =
+          config.core_config[local_core];
+    }
+  }
+  config.core_config = expanded;
+  config.num_cores = total_cores;
+  config.partiton_map.clear();
+  for (uint32_t npu_id = 0; npu_id < npu_count; ++npu_id) {
+    auto& partition = config.partiton_map[npu_id];
+    for (uint32_t local_core = 0; local_core < cores_per_npu; ++local_core) {
+      partition.push_back(npu_id * cores_per_npu + local_core);
+    }
+  }
+  spdlog::info("[CONFIG] Multi-NPU runtime: npu_count={}, cores_per_npu={}, "
+               "total_cores={}, hbm_channels_per_npu={}",
+               config.npu_count, config.cores_per_npu, config.num_cores,
+               config.hbm.channels);
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
   auto start = std::chrono::high_resolution_clock::now();
@@ -31,6 +73,8 @@ int main(int argc, char** argv) {
       "bench_config", "Path for mem_benchmark configuration JSON");
   cmd_parser.add_command_line_option<std::string>(
       "bench_output_dir", "Output directory for mem_benchmark CSV/chart inputs");
+  cmd_parser.add_command_line_option<uint32_t>(
+      "npu_count", "Number of same-config NPUs for trace-mode sharding");
 
   try {
     cmd_parser.parse(argc, argv);
@@ -71,6 +115,9 @@ int main(int argc, char** argv) {
   config_file >> config_json;
   config_file.close();
   SimulationConfig config = initialize_config(config_json);
+  uint32_t npu_count = 1;
+  cmd_parser.set_if_defined("npu_count", &npu_count);
+  configure_multi_npu_runtime(config, npu_count);
   OperationFactory::initialize(config);
 
   configure_tensor_placement_policy(config);
@@ -171,10 +218,59 @@ int main(int argc, char** argv) {
         mapping_table = MappingTable::parse_mapping_file(mapping_path, config);
       }
 
-      auto model = std::make_unique<TraceModel>(
-          trace_path, model_config, config, model_name, mapping_table);
-      spdlog::info("Register Trace Model: {}", model_name);
-      simulator->register_model(std::move(model));
+      if (config.npu_count > 1) {
+        std::vector<uint32_t> users;
+        if (model_config.contains("user_ids") && model_config["user_ids"].is_array()) {
+          for (const auto& user : model_config["user_ids"])
+            users.push_back(user.get<uint32_t>());
+        }
+        const uint32_t logical_batch_size =
+            model_config.value("batch_size",
+                               users.empty() ? config.npu_count
+                                             : static_cast<uint32_t>(users.size()));
+        if (logical_batch_size % config.npu_count != 0) {
+          spdlog::error("Trace model {} batch_size {} is not divisible by "
+                        "npu_count {}",
+                        model_name, logical_batch_size, config.npu_count);
+          return 1;
+        }
+        const uint32_t shard_batch_size = logical_batch_size / config.npu_count;
+        if (!users.empty() && users.size() != logical_batch_size) {
+          spdlog::error("Trace model {} user_ids size {} does not match "
+                        "batch_size {}",
+                        model_name, users.size(), logical_batch_size);
+          return 1;
+        }
+        for (uint32_t npu_id = 0; npu_id < config.npu_count; ++npu_id) {
+          json shard_config = model_config;
+          shard_config["npu_id"] = npu_id;
+          shard_config["partition_id"] = npu_id;
+          shard_config["logical_batch_size"] = logical_batch_size;
+          shard_config["batch_size"] = shard_batch_size;
+          if (!users.empty()) {
+            std::vector<uint32_t> shard_users;
+            auto begin = users.begin() + npu_id * shard_batch_size;
+            auto end = begin + shard_batch_size;
+            shard_users.assign(begin, end);
+            shard_config["user_ids"] = shard_users;
+            shard_config["user_id"] = shard_users.front();
+          }
+          if (!shard_config.contains("weight_key"))
+            shard_config["weight_key"] = model_name;
+          std::string shard_name =
+              model_name + ".npu" + std::to_string(npu_id);
+          auto model = std::make_unique<TraceModel>(
+              trace_path, shard_config, config, shard_name, mapping_table);
+          spdlog::info("Register Trace Model: {} npu_id={}", shard_name,
+                       npu_id);
+          simulator->register_model(std::move(model));
+        }
+      } else {
+        auto model = std::make_unique<TraceModel>(
+            trace_path, model_config, config, model_name, mapping_table);
+        spdlog::info("Register Trace Model: {}", model_name);
+        simulator->register_model(std::move(model));
+      }
     }
     else {
       std::string model_name = model_config["name"];

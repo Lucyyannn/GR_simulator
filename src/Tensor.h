@@ -59,6 +59,7 @@ class Tensor {
 
 	  void allocate_tensor(int precision);
 	  void relocate(MemoryMedium medium);
+	  void relocate(MemoryMedium medium, uint32_t npu_id);
 	  void set_address(addr_type address) { _address = address; }
 	  addr_type get_address() { return _address; }
   uint64_t get_size() { return _size; }

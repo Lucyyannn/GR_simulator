@@ -22,6 +22,7 @@ struct MigrationSegment {
 
 struct MigrationRequest {
   uint64_t id = 0;
+  uint32_t npu_id = 0;
   MemoryMedium src_medium = MemoryMedium::UNKNOWN;
   MemoryMedium dst_medium = MemoryMedium::UNKNOWN;
   addr_type src_addr = 0;
@@ -34,6 +35,8 @@ struct MigrationRequest {
 class StorageController {
  public:
   StorageController(SimulationConfig config, Dram* hbm, Dram* ddr, Ssd* ssd);
+  StorageController(SimulationConfig config, std::vector<Dram*> hbms,
+                    Dram* ddr, Ssd* ssd);
 
   void advance_to(uint64_t now_ps);
   bool dispatch_request(uint32_t preferred_port, MemoryAccess* request,
@@ -57,13 +60,14 @@ class StorageController {
   struct SsdWriteStreamKey {
     bool controller_generated = false;
     uint32_t core_id = 0;
+    uint32_t npu_id = 0;
     uint64_t macro_request_id = 0;
     addr_type page_addr = 0;
 
     bool operator<(const SsdWriteStreamKey& other) const {
-      return std::tie(controller_generated, core_id,
+      return std::tie(controller_generated, core_id, npu_id,
                       macro_request_id, page_addr) <
-             std::tie(other.controller_generated, other.core_id,
+             std::tie(other.controller_generated, other.core_id, other.npu_id,
                       other.macro_request_id, other.page_addr);
     }
   };
@@ -89,7 +93,7 @@ class StorageController {
     uint64_t inflight_writes = 0;
   };
 
-  Dram* device_for_medium(MemoryMedium medium) const;
+  Dram* device_for_medium(MemoryMedium medium, uint32_t npu_id = 0) const;
   bool route_to_device(uint32_t preferred_port, MemoryAccess* request,
                        MemoryMedium medium, uint64_t now_ps);
   bool route_to_ssd(MemoryAccess* request, uint64_t now_ps);
@@ -113,6 +117,7 @@ class StorageController {
 
   SimulationConfig _config;
   Dram* _hbm = nullptr;
+  std::vector<Dram*> _hbms;
   Dram* _ddr = nullptr;
   Ssd* _ssd = nullptr;
   uint64_t _last_advanced_ps = 0;

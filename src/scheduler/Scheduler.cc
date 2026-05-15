@@ -14,6 +14,10 @@ std::string core_phase_name(CorePhase phase) {
 
 std::unique_ptr<Scheduler> Scheduler::create(SimulationConfig config,
                                              const cycle_type* core_cycle, const uint64_t* core_time, void* simulator) {
+  if (config.npu_count > 1) {
+    return std::make_unique<DedicatedCPUScheduler>(config, core_cycle,
+                                                   core_time, simulator);
+  }
   if (config.scheduler_type == "simple") {
     return std::make_unique<Scheduler>(config, core_cycle, core_time, simulator);
   } else if (config.scheduler_type == "partition_cpu") {
@@ -300,6 +304,9 @@ void Scheduler::refresh_status() {
     _request_queue.front().model->record_compute_start(new_layer->get_id(),
                                                        *_core_time);
     /* Get tiles from new layer */
+    for (auto& tile : new_layer->get_tiles()) {
+      if (tile) tile->npu_id = _request_queue.front().model->get_npu_id();
+    }
     _executable_tile_queue[0].insert(
         _executable_tile_queue[0].end(),
         std::make_move_iterator(new_layer->get_tiles().begin()),
@@ -400,6 +407,11 @@ void DedicatedCPUScheduler::refresh_status() {
                       new_layer->get_id());
 
         _request_queue[req_index].model->update_start_time(*_core_time);
+        _request_queue[req_index].model->record_compute_start(
+            new_layer->get_id(), *_core_time);
+        for (auto& tile : new_layer->get_tiles()) {
+          if (tile) tile->npu_id = _request_queue[req_index].model->get_npu_id();
+        }
         _executable_tile_queue[partition_id].insert(
           _executable_tile_queue[partition_id].end(),
           std::make_move_iterator(new_layer->get_tiles().begin()),
@@ -447,6 +459,8 @@ void TimeMultiplexScheduler::finish_tile(uint32_t core_id, int layer_id) {
       if (_request_queue[req_index].request_id ==
           _active_layers_map[layer_id].request_id) {
         model_finish = true;
+        _request_queue[req_index].model->record_compute_finish(
+            layer_id, *_core_time);
         _request_queue[req_index].model->set_layer_finish(layer_id);
         model_name = _request_queue[req_index].model->get_name();
       }
@@ -502,6 +516,11 @@ void TimeMultiplexScheduler::refresh_status() {
                      new_layer->get_id());
 
       _request_queue[_request_rr].model->update_start_time(*_core_time);
+      _request_queue[_request_rr].model->record_compute_start(
+          new_layer->get_id(), *_core_time);
+      for (auto& tile : new_layer->get_tiles()) {
+        if (tile) tile->npu_id = _request_queue[_request_rr].model->get_npu_id();
+      }
       _executable_tile_queue[0].insert(
         _executable_tile_queue[0].end(),
         std::make_move_iterator(new_layer->get_tiles().begin()),
@@ -574,6 +593,8 @@ void HalfSplitScheduler::finish_tile(uint32_t core_id, int layer_id) {
       if (_request_queue[req_index].request_id ==
           _active_layers_map[layer_id].request_id) {
         model_finish = true;
+        _request_queue[req_index].model->record_compute_finish(
+            layer_id, *_core_time);
         _request_queue[req_index].model->set_layer_finish(layer_id);
         model_name = _request_queue[req_index].model->get_name();
         _executable_tile_queue_table.erase(
@@ -627,7 +648,11 @@ void HalfSplitScheduler::refresh_status() {
             spdlog::info("Layer {} {}: Enqueue", new_layer->get_name(),
                          new_layer->get_id());
 
+          req->model->record_compute_start(new_layer->get_id(), *_core_time);
           auto& tiles = new_layer->get_tiles();
+          for (auto& tile : tiles) {
+            if (tile) tile->npu_id = req->model->get_npu_id();
+          }
           _executable_tile_queue_table[req->request_id].insert(_executable_tile_queue_table[req->request_id].begin(),
             std::make_move_iterator(tiles.begin()), std::make_move_iterator(tiles.end()));
 

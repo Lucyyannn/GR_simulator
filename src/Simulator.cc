@@ -1,6 +1,7 @@
 #include "Simulator.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -58,8 +59,24 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
   char* onnxim_path_env = std::getenv("ONNXIM_HOME");
   std::string onnxim_path = onnxim_path_env != NULL?
   std::string(onnxim_path_env) : std::string("./");
+  const uint32_t npu_count = std::max<uint32_t>(config.npu_count, 1);
+  auto make_hbm = [&](const SimulationConfig& hbm_config) {
+    if (hbm_config.dram_type == DramType::SIMPLE) {
+      return std::unique_ptr<Dram>(std::make_unique<SimpleDram>(hbm_config));
+    }
+    if (hbm_config.dram_type == DramType::RAMULATOR1) {
+      return std::unique_ptr<Dram>(std::make_unique<DramRamulator>(hbm_config));
+    }
+    if (hbm_config.dram_type == DramType::RAMULATOR2) {
+      return std::unique_ptr<Dram>(std::make_unique<Hbm>(hbm_config));
+    }
+    spdlog::error("[Configuration] Invalid DRAM type...!");
+    exit(EXIT_FAILURE);
+  };
+
   if (config.dram_type == DramType::SIMPLE) {
-    _hbm = std::make_unique<SimpleDram>(config);
+    for (uint32_t npu_id = 0; npu_id < npu_count; ++npu_id)
+      _hbms.push_back(make_hbm(config));
   } else if (config.dram_type == DramType::RAMULATOR1) {
     std::string ramulator_config = fs::path(onnxim_path)
                                        .append("configs")
@@ -67,7 +84,8 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
                                        .string();
     spdlog::info("Ramulator config: {}", ramulator_config);
     config.dram_config_path = ramulator_config;
-    _hbm = std::make_unique<DramRamulator>(config);
+    for (uint32_t npu_id = 0; npu_id < npu_count; ++npu_id)
+      _hbms.push_back(make_hbm(config));
   } 
   else if (config.dram_type == DramType::RAMULATOR2) 
   {
@@ -78,7 +96,8 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
     spdlog::info("HBM Ramulator2 config: {}", hbm_config_path);
     config.hbm.config_path = hbm_config_path;
     config.dram_config_path = hbm_config_path;
-    _hbm = std::make_unique<Hbm>(config);
+    for (uint32_t npu_id = 0; npu_id < npu_count; ++npu_id)
+      _hbms.push_back(make_hbm(config));
     if (config.ddr.enabled) {
       std::string ddr_config_path = fs::path(onnxim_path)
                                         .append("configs")
@@ -112,13 +131,20 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
     scfg.ch_xfer_lat    = config.ssd.ch_xfer_lat;
     _ssd = std::make_unique<Ssd>(scfg, config.hbm.freq);
   }
+  std::vector<Dram*> hbm_ptrs;
+  hbm_ptrs.reserve(_hbms.size());
+  for (auto& hbm : _hbms) hbm_ptrs.push_back(hbm.get());
   _storage_controller =
-      std::make_unique<StorageController>(config, _hbm.get(), _ddr.get(), _ssd.get());
-  _residency_manager = std::make_unique<ResidencyManager>();
-  _residency_manager->configure_capacity(
-      _config.hbm_residency_capacity_bytes == 0
-          ? _config.hbm.capacity_bytes
-          : _config.hbm_residency_capacity_bytes);
+      std::make_unique<StorageController>(config, hbm_ptrs, _ddr.get(), _ssd.get());
+  _residency_managers.resize(npu_count);
+  for (uint32_t npu_id = 0; npu_id < npu_count; ++npu_id) {
+    _residency_managers[npu_id] = std::make_unique<ResidencyManager>();
+    _residency_managers[npu_id]->configure_npu(npu_id);
+    _residency_managers[npu_id]->configure_capacity(
+        _config.hbm_residency_capacity_bytes == 0
+            ? _config.hbm.capacity_bytes
+            : _config.hbm_residency_capacity_bytes);
+  }
 
   // Create interconnect object
   if (config.icnt_type == IcntType::SIMPLE) {
@@ -134,7 +160,7 @@ Simulator::Simulator(SimulationConfig config, bool language_mode)
   // Create core objects
   _cores.resize(config.num_cores);
   _n_cores = config.num_cores;
-  _n_memories = config.hbm.channels;
+  _n_memories = config.total_hbm_channels();
   _noc_node_per_core = config.icnt_injection_ports_per_core;
   _memory_req_size = config.hbm.req_size;
   for (int core_index = 0; core_index < _n_cores; core_index++) {
@@ -262,7 +288,14 @@ void Simulator::admit_preload_models() {
                  launch_model->get_name(), ps_to_us(_core_time),
                  _preloading_models.size(), max_preloading,
                  _waiting_to_preload_models.size());
-    launch_model->set_residency_manager(_residency_manager.get());
+    const uint32_t npu_id = launch_model->get_npu_id();
+    if (npu_id >= _residency_managers.size()) {
+      spdlog::error("Model {} targets invalid npu_id {} (npu_count={})",
+                    launch_model->get_name(), npu_id,
+                    _residency_managers.size());
+      std::exit(EXIT_FAILURE);
+    }
+    launch_model->set_residency_manager(_residency_managers[npu_id].get());
     launch_model->initialize_model(_weight_table[weight_key]);
     launch_model->prefill_ssd_tensors(_ssd.get());
     std::vector<uint64_t> movement_ids;
@@ -410,9 +443,10 @@ void Simulator::cycle() {
         int core_offset = _n_cores * _noc_node_per_core;
         MemoryAccess* response = _storage_controller->top_ready_response();
         response->return_time_ps = sim_time_ps;
-        uint32_t source_port = 0;
-        if (response->target_medium == MemoryMedium::HBM && _hbm) {
-          source_port = _hbm->get_channel_id(response);
+        uint32_t source_port = response->npu_id * _config.hbm.channels;
+        Dram* response_hbm = hbm_for_npu(response->npu_id);
+        if (response->target_medium == MemoryMedium::HBM && response_hbm) {
+          source_port += response_hbm->get_channel_id(response);
         }
         uint32_t dest_node = get_dest_node(response);
         if (!_icnt->is_full(core_offset + source_port, response)) {
@@ -442,7 +476,9 @@ void Simulator::cycle() {
     _cores[core_id]->print_stats();
   }
   _icnt->print_stats();
-  if (_hbm) _hbm->print_stat();
+  for (uint32_t npu_id = 0; npu_id < _hbms.size(); ++npu_id) {
+    if (_hbms[npu_id]) _hbms[npu_id]->print_stat();
+  }
   if (_ddr) _ddr->print_stat();
   if (_ssd) _ssd->print_stat();
 }
@@ -499,7 +535,8 @@ bool Simulator::running() {
   if (_storage_controller)
     running = running || _storage_controller->has_pending();
   else {
-    if (_hbm) running = running || _hbm->running();
+    for (auto& hbm : _hbms)
+      if (hbm) running = running || hbm->running();
     if (_ddr) running = running || _ddr->running();
     if (_ssd) running = running || _ssd->running();
   }
@@ -603,16 +640,23 @@ void Simulator::try_fast_forward() {
   _last_sim_time_ps = std::max(_last_sim_time_ps, target_ps);
 }
 
+Dram* Simulator::hbm_for_npu(uint32_t npu_id) const {
+  if (npu_id >= _hbms.size()) return nullptr;
+  return _hbms[npu_id].get();
+}
+
 uint32_t Simulator::get_dest_node(MemoryAccess *access) {
   if (access->request) {
-    uint32_t port = 0;
-    if (_hbm && _hbm->owns_address(access->dram_address))
-      port = _hbm->get_channel_id(access);
+    uint32_t port = access->npu_id * _config.hbm.channels;
+    Dram* hbm = hbm_for_npu(access->npu_id);
+    if (hbm)
+      port += hbm->get_channel_id(access);
     return _config.num_cores * _config.icnt_injection_ports_per_core + port;
   } else {
-    uint32_t source_port = 0;
-    if (access->target_medium == MemoryMedium::HBM && _hbm)
-      source_port = _hbm->get_channel_id(access);
+    uint32_t source_port = access->npu_id * _config.hbm.channels;
+    Dram* hbm = hbm_for_npu(access->npu_id);
+    if (access->target_medium == MemoryMedium::HBM && hbm)
+      source_port += hbm->get_channel_id(access);
     return access->core_id * _config.icnt_injection_ports_per_core +
            (source_port % _config.icnt_injection_ports_per_core);
   }
@@ -770,8 +814,17 @@ void Simulator::write_final_hardware_summary_csv(uint64_t sim_time_ps) const {
       "", "", "", "", "", "",
   });
 
-  append_memory_hardware_summary_rows(out, "HBM", _hbm.get(), _config.hbm,
-                                      sim_time_ps);
+  if (_hbms.size() <= 1) {
+    append_memory_hardware_summary_rows(
+        out, "HBM", _hbms.empty() ? nullptr : _hbms.front().get(),
+        _config.hbm, sim_time_ps);
+  } else {
+    for (uint32_t npu_id = 0; npu_id < _hbms.size(); ++npu_id) {
+      append_memory_hardware_summary_rows(
+          out, "HBM.npu" + std::to_string(npu_id), _hbms[npu_id].get(),
+          _config.hbm, sim_time_ps);
+    }
+  }
   append_memory_hardware_summary_rows(out, "DDR", _ddr.get(), _config.ddr,
                                       sim_time_ps);
 

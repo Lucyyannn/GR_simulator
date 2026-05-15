@@ -203,6 +203,17 @@ void Tensor::relocate(MemoryMedium medium) {
                 _name, medium_name, _address);
 }
 
+void Tensor::relocate(MemoryMedium medium, uint32_t npu_id) {
+  _address =
+      allocate_address_in_medium_for_npu(static_cast<uint32_t>(_size), medium,
+                                         npu_id);
+  const char* medium_name = "HBM";
+  if (medium == MemoryMedium::DDR) medium_name = "DDR";
+  if (medium == MemoryMedium::SSD) medium_name = "SSD";
+  spdlog::debug("[TENSOR] {} relocated to {} npu={} at 0x{:x}",
+                _name, medium_name, npu_id, _address);
+}
+
 void Tensor::print_tensor() {
   spdlog::info("Tensor: {} {} {} {}", _name, _src_node, _dims, _size);
 }

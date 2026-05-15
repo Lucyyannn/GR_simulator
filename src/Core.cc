@@ -457,6 +457,11 @@ void Core::handle_ld_inst_queue() {
                               .write = false,
                               .request = true,
                               .core_id = _id,
+                              .npu_id = front->my_tile == nullptr
+                                            ? (_config.cores_per_npu == 0
+                                                   ? 0
+                                                   : _id / _config.cores_per_npu)
+                                            : front->my_tile->npu_id,
                               .start_cycle = _core_cycle,
                               .buffer_id = buffer_id,
                               .core_phase = CorePhase::MOVIN,
@@ -497,6 +502,11 @@ void Core::handle_st_inst_queue() {
                               .write = true,
                               .request = true,
                               .core_id = _id,
+                              .npu_id = front->my_tile == nullptr
+                                            ? (_config.cores_per_npu == 0
+                                                   ? 0
+                                                   : _id / _config.cores_per_npu)
+                                            : front->my_tile->npu_id,
                               .start_cycle = _core_cycle,
                               .buffer_id = buffer_id};
           _waiting_write_reqs++;

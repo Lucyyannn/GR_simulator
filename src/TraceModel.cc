@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -110,7 +111,134 @@ std::string csv_escape(const std::string& value) {
   return escaped;
 }
 
+std::vector<uint32_t> shard_vector(const std::vector<uint32_t>& values,
+                                   uint32_t start, uint32_t count) {
+  if (start >= values.size()) return {};
+  const uint32_t end =
+      std::min<uint32_t>(static_cast<uint32_t>(values.size()), start + count);
+  return std::vector<uint32_t>(values.begin() + start, values.begin() + end);
+}
+
+std::vector<std::vector<uint32_t>> shard_vector_rows(
+    const std::vector<std::vector<uint32_t>>& rows,
+    uint32_t start,
+    uint32_t count) {
+  if (start >= rows.size()) return {};
+  const uint32_t end =
+      std::min<uint32_t>(static_cast<uint32_t>(rows.size()), start + count);
+  return std::vector<std::vector<uint32_t>>(rows.begin() + start,
+                                            rows.begin() + end);
+}
+
+void shard_flat_per_user_values(std::vector<uint32_t>& values,
+                                uint32_t logical_batch_size,
+                                uint32_t start,
+                                uint32_t shard_batch_size) {
+  if (logical_batch_size == 0 || values.empty()) return;
+  if (values.size() % logical_batch_size != 0) return;
+  const uint32_t values_per_user =
+      static_cast<uint32_t>(values.size() / logical_batch_size);
+  std::vector<uint32_t> sharded;
+  sharded.reserve(static_cast<size_t>(values_per_user) * shard_batch_size);
+  for (uint32_t b = 0; b < shard_batch_size; ++b) {
+    const uint32_t user_pos = start + b;
+    const auto begin = values.begin() + user_pos * values_per_user;
+    const auto end = begin + values_per_user;
+    sharded.insert(sharded.end(), begin, end);
+  }
+  values = std::move(sharded);
+}
+
+void scale_batch_attr(std::map<std::string, std::string>& attrs,
+                      const std::string& key,
+                      uint32_t logical_batch_size,
+                      uint32_t shard_batch_size) {
+  auto it = attrs.find(key);
+  if (it == attrs.end() || logical_batch_size == 0) return;
+  uint64_t value = 0;
+  try {
+    value = std::stoull(it->second);
+  } catch (...) {
+    return;
+  }
+  value = value * shard_batch_size / logical_batch_size;
+  it->second = std::to_string(value);
+}
+
 }  // namespace
+
+void TraceModel::apply_npu_trace_shard() {
+  if (_graph_sharded || _config.npu_count <= 1) return;
+  if (!_model_config.contains("npu_id")) return;
+
+  const uint32_t npu_id = _model_config["npu_id"].get<uint32_t>();
+  uint32_t logical_batch_size =
+      _model_config.value("logical_batch_size", 0u);
+  if (logical_batch_size == 0)
+    logical_batch_size = _model_config.value("batch_size", 0u);
+  if (logical_batch_size == 0) return;
+  if (logical_batch_size % _config.npu_count != 0 ||
+      npu_id >= _config.npu_count) {
+    spdlog::error("[TraceModel] invalid NPU shard request: model={}, "
+                  "logical_batch_size={}, npu_count={}, npu_id={}",
+                  _name, logical_batch_size, _config.npu_count, npu_id);
+    std::exit(EXIT_FAILURE);
+  }
+
+  const uint32_t shard_batch_size = logical_batch_size / _config.npu_count;
+  const uint32_t start = npu_id * shard_batch_size;
+
+  auto shard_tensor = [&](trace_frontend::TensorEntry& entry) {
+    const bool has_full_user_ids =
+        entry.user_ids.size() == logical_batch_size;
+    const bool batch_shaped =
+        !entry.shape.empty() && entry.shape[0] == logical_batch_size &&
+        !is_weight_entry(entry);
+    if (!has_full_user_ids && !batch_shaped) return;
+
+    if (batch_shaped) entry.shape[0] = shard_batch_size;
+    if (has_full_user_ids) {
+      entry.user_ids = shard_vector(entry.user_ids, start, shard_batch_size);
+      if (!entry.user_ids.empty()) entry.user_id = entry.user_ids.front();
+    } else {
+      entry.user_id += start;
+    }
+    if (!entry.indices_values_per_user.empty()) {
+      entry.indices_values_per_user =
+          shard_vector_rows(entry.indices_values_per_user, start,
+                            shard_batch_size);
+    }
+    if (!entry.indices_values.empty()) {
+      shard_flat_per_user_values(entry.indices_values, logical_batch_size,
+                                 start, shard_batch_size);
+    }
+    if (!entry.reuse_physical_rows_per_user.empty()) {
+      entry.reuse_physical_rows_per_user =
+          shard_vector(entry.reuse_physical_rows_per_user, start,
+                       shard_batch_size);
+    }
+    if (!entry.reuse_logical_to_physical_per_user.empty()) {
+      entry.reuse_logical_to_physical_per_user =
+          shard_vector_rows(entry.reuse_logical_to_physical_per_user, start,
+                            shard_batch_size);
+    }
+  };
+
+  for (auto& op : _graph.operators) {
+    for (auto& input : op.inputs) shard_tensor(input);
+    for (auto& output : op.outputs) shard_tensor(output);
+    auto batch_it = op.attrs.find("batch_size");
+    if (batch_it != op.attrs.end()) batch_it->second = std::to_string(shard_batch_size);
+    scale_batch_attr(op.attrs, "attention_score_elements",
+                     logical_batch_size, shard_batch_size);
+  }
+
+  _graph_sharded = true;
+  spdlog::info("[TraceModel] {} uses NPU shard {}/{} (users {}..{}, "
+               "batch={})",
+               _name, npu_id, _config.npu_count, start,
+               start + shard_batch_size - 1, shard_batch_size);
+}
 
 void TraceModel::remember_tensor_entry(const trace_frontend::TensorEntry& entry) {
   if (!entry.name.empty()) _tensor_entries[entry.name] = entry;
@@ -216,7 +344,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
       hbm_addr = _residency_manager->reserve_destination(
           logical_id, tensor->get_size(), MemoryMedium::HBM);
     } else {
-      tensor->relocate(MemoryMedium::HBM);
+      tensor->relocate(MemoryMedium::HBM, _npu_id);
       hbm_addr = tensor->get_address();
     }
     tensor->set_address(hbm_addr);
@@ -228,7 +356,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
 
   if (needs_preload && entry.role == "embedding_rows" &&
       entry.shape.size() >= 3 && !entry.indices_values_per_user.empty()) {
-    tensor->relocate(runtime_medium);
+    tensor->relocate(runtime_medium, _npu_id);
     const std::vector<uint32_t> users = users_for_entry(entry);
     const uint32_t batch_size = entry.shape[0];
     const uint32_t rows_per_user = entry.shape[1];
@@ -245,8 +373,9 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
         _residency_manager
             ? _residency_manager->source_addr(source_id, source_bytes,
                                              initial_medium)
-            : allocate_address_in_medium(static_cast<uint32_t>(source_bytes),
-                                         initial_medium);
+            : allocate_address_in_medium_for_npu(
+                  static_cast<uint32_t>(source_bytes), initial_medium,
+                  _npu_id);
 
     if (layer_preload_enabled()) tensor->clear_produced();
     for (uint32_t b = 0; b < batch_size; ++b) {
@@ -312,7 +441,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
   }
 
   if (needs_preload && entry.role == "embedding_rows") {
-    tensor->relocate(runtime_medium);
+    tensor->relocate(runtime_medium, _npu_id);
     const uint64_t row_bytes =
         entry.shape.empty() ? tensor->get_size()
                             : static_cast<uint64_t>(entry.shape.back()) *
@@ -335,8 +464,9 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
         _residency_manager
             ? _residency_manager->source_addr(source_id, source_bytes,
                                              initial_medium)
-            : allocate_address_in_medium(static_cast<uint32_t>(source_bytes),
-                                         initial_medium);
+            : allocate_address_in_medium_for_npu(
+                  static_cast<uint32_t>(source_bytes), initial_medium,
+                  _npu_id);
 
     if (layer_preload_enabled()) tensor->clear_produced();
     for (uint32_t i = 0; i < rows; ++i) {
@@ -676,7 +806,7 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
   }
 
   if (runtime_medium != MemoryMedium::UNKNOWN) {
-    tensor->relocate(runtime_medium);
+    tensor->relocate(runtime_medium, _npu_id);
   }
 
   if (!_graph.metadata.baseline_preload ||
@@ -687,8 +817,8 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
   }
 
   addr_type source_addr =
-      allocate_address_in_medium(static_cast<uint32_t>(tensor->get_size()),
-                                 initial_medium);
+      allocate_address_in_medium_for_npu(
+          static_cast<uint32_t>(tensor->get_size()), initial_medium, _npu_id);
   if (layer_preload_enabled()) tensor->clear_produced();
   _data_movements.push_back(PlannedDataMovement{
       .tensor_name = tensor->get_name(),
@@ -711,6 +841,8 @@ void TraceModel::apply_trace_storage(Tensor* tensor,
 void TraceModel::initialize_weight(std::vector<std::unique_ptr<Tensor>>& weight_table) {
   weight_table.clear();
   _graph = trace_frontend::TraceParser::parse(_trace_path);
+  _graph_sharded = false;
+  apply_npu_trace_shard();
 
   std::set<std::string> seen;
 	  for (auto& op : _graph.operators) {
@@ -734,6 +866,7 @@ void TraceModel::initialize_model(std::vector<std::unique_ptr<Tensor>>& weight_t
 
 	  if (_graph.operators.empty())
 	    _graph = trace_frontend::TraceParser::parse(_trace_path);
+  apply_npu_trace_shard();
   _data_movements.clear();
   _submitted_movement_ids.clear();
   _resident_loads.clear();
@@ -965,6 +1098,7 @@ std::vector<uint64_t> TraceModel::submit_data_movements(
        ++movement_idx) {
     const auto& movement = _data_movements[movement_idx];
     MigrationRequest request;
+    request.npu_id = _npu_id;
     request.src_medium = movement.source;
     request.dst_medium = movement.destination;
     request.src_addr = movement.src_addr;
@@ -1262,6 +1396,7 @@ std::vector<uint64_t> TraceModel::submit_preload_subtask(
       continue;
     }
     MigrationRequest request;
+    request.npu_id = _npu_id;
     request.src_medium = movement.source;
     request.dst_medium = movement.destination;
     request.src_addr = movement.src_addr;

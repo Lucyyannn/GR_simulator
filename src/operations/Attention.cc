@@ -100,6 +100,8 @@ void Attention::initialize_tiles(MappingTable& mapping_table) {
     /* Fused Attention body */
 
     spdlog::info("Mapping info {}", mapping.to_string());
+    const uint32_t npu_cores =
+        _config.cores_per_npu == 0 ? _config.num_cores : _config.cores_per_npu;
     int core_id = -1;
     for (uint32_t N = 0; N < mapping.tile_out_loop.N; N++) {
         int heads_per_kv = _nh / _nkvh;
@@ -107,7 +109,7 @@ void Attention::initialize_tiles(MappingTable& mapping_table) {
         int head_off = N / qlen_offset * heads_per_kv;
         for(int M = 0; M < mapping.tile_out_loop.M; M++) {
             if (M == 0) {
-                core_id = (core_id + 1) % _config.num_cores;
+                core_id = (core_id + 1) % npu_cores;
             }
             std::unique_ptr<Tile> tile = std::make_unique<Tile>(Tile{
                 .status = Tile::Status::INITIALIZED,

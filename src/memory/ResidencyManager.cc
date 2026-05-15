@@ -28,8 +28,8 @@ addr_type ResidencyManager::reserve_destination(const std::string& logical_id,
   entry.bytes = std::max(entry.bytes, bytes);
   entry.last_touch = ++_clock;
   if (entry.resident_addr == 0) {
-    entry.resident_addr =
-        allocate_address_in_medium(static_cast<uint32_t>(bytes), medium);
+    entry.resident_addr = allocate_address_in_medium_for_npu(
+        static_cast<uint32_t>(bytes), medium, _npu_id);
   }
   return entry.resident_addr;
 }
@@ -42,8 +42,8 @@ std::vector<addr_type> ResidencyManager::reserve_packed_destinations(
   uint64_t total_bytes = 0;
   for (const auto& allocation : allocations)
     total_bytes += allocation.second;
-  addr_type base_addr =
-      allocate_address_in_medium(static_cast<uint32_t>(total_bytes), medium);
+  addr_type base_addr = allocate_address_in_medium_for_npu(
+      static_cast<uint32_t>(total_bytes), medium, _npu_id);
   addr_type offset = 0;
   for (const auto& allocation : allocations) {
     auto& entry = _entries[allocation.first];
@@ -204,7 +204,8 @@ addr_type ResidencyManager::source_addr(const std::string& logical_id,
   std::string key = logical_id + "@" + std::to_string(static_cast<int>(medium));
   auto it = _source_addrs.find(key);
   if (it != _source_addrs.end()) return it->second;
-  addr_type addr = allocate_address_in_medium(static_cast<uint32_t>(bytes), medium);
+  addr_type addr = allocate_address_in_medium_for_npu(
+      static_cast<uint32_t>(bytes), medium, _npu_id);
   _source_addrs[key] = addr;
   return addr;
 }

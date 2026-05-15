@@ -46,6 +46,7 @@ class Simulator {
   void advance_active_layer_preloads();
   void schedule_ready_models();
   uint32_t get_dest_node(MemoryAccess* access);
+  Dram* hbm_for_npu(uint32_t npu_id) const;
   void print_simulation_time_summary(double wall_clock_seconds) const;
   uint64_t final_sim_time_ps() const;
   std::string hardware_summary_csv_path() const;
@@ -64,11 +65,11 @@ class Simulator {
   // Components
   std::vector<std::unique_ptr<Core>> _cores;
   std::unique_ptr<Interconnect> _icnt;
-  std::unique_ptr<Dram> _hbm;
+  std::vector<std::unique_ptr<Dram>> _hbms;
   std::unique_ptr<Ddr> _ddr;
   std::unique_ptr<Ssd>  _ssd;    // FEMU-inspired storage (optional)
   std::unique_ptr<StorageController> _storage_controller;
-  std::unique_ptr<ResidencyManager> _residency_manager;
+  std::vector<std::unique_ptr<ResidencyManager>> _residency_managers;
   std::unique_ptr<Scheduler> _scheduler;
   
   // period information (ps)

@@ -34,6 +34,7 @@ class ResidencyManager {
   };
 
   void configure_capacity(uint64_t capacity_bytes);
+  void configure_npu(uint32_t npu_id) { _npu_id = npu_id; }
   bool is_resident(const std::string& logical_id) const;
   addr_type resident_addr(const std::string& logical_id) const;
   addr_type reserve_destination(const std::string& logical_id,
@@ -71,6 +72,7 @@ class ResidencyManager {
   uint64_t _used_bytes = 0;
   uint64_t _clock = 0;
   std::unordered_set<std::string> _blocked_reasons;
+  uint32_t _npu_id = 0;
 
   bool capacity_enabled() const { return _capacity_bytes > 0; }
   bool evict_one(const std::set<std::string>& protected_ids);

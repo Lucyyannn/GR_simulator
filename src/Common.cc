@@ -33,6 +33,7 @@ static uint64_t g_ddr_capacity_bytes = 0;
 static uint64_t g_ssd_base_addr = 0x800000000ULL;
 static uint64_t g_ssd_capacity_bytes = (1ULL << 40);
 static addr_type g_hbm_cursor = 0;
+static std::vector<addr_type> g_hbm_cursors_by_npu;
 static addr_type g_ddr_cursor = 0;
 static addr_type g_ssd_cursor = 0;
 
@@ -114,6 +115,7 @@ void configure_tensor_placement_policy(const SimulationConfig& config) {
   g_ssd_base_addr = config.ssd.address_base;
   g_ssd_capacity_bytes = config.ssd.capacity_bytes;
   g_hbm_cursor = 0;
+  g_hbm_cursors_by_npu.assign(std::max<uint32_t>(config.npu_count, 1), 0);
   g_ddr_cursor = 0;
   g_ssd_cursor = 0;
 }
@@ -176,6 +178,19 @@ addr_type allocate_address_in_medium(uint32_t size, MemoryMedium medium) {
   }
 }
 
+addr_type allocate_address_in_medium_for_npu(uint32_t size,
+                                             MemoryMedium medium,
+                                             uint32_t npu_id) {
+  if (medium != MemoryMedium::HBM)
+    return allocate_address_in_medium(size, medium);
+
+  if (g_hbm_cursors_by_npu.empty()) g_hbm_cursors_by_npu.assign(1, 0);
+  if (npu_id >= g_hbm_cursors_by_npu.size())
+    g_hbm_cursors_by_npu.resize(npu_id + 1, 0);
+  return allocate_from_region(size, g_hbm_base_addr,
+                              g_hbm_cursors_by_npu[npu_id]);
+}
+
 void set_ssd_placement_policy(uint64_t threshold_bytes, uint64_t ssd_base, uint64_t capacity_bytes) {
   g_tensor_placement_policy = TensorPlacementPolicy::SIZE_THRESHOLD;
   g_ssd_threshold_bytes = threshold_bytes;
@@ -231,6 +246,7 @@ SimulationConfig initialize_config(json config) {
 
   /* Core configs */
   parsed_config.num_cores = get_config_value<uint32_t>(config, "num_cores");
+  parsed_config.cores_per_npu = parsed_config.num_cores;
   parsed_config.core_config = new struct CoreConfig[parsed_config.num_cores];
   parsed_config.core_freq = get_config_value<uint32_t>(config, "core_freq");
   parsed_config.core_print_interval = get_config_value<uint32_t>(config, "core_print_interval");
@@ -295,6 +311,7 @@ SimulationConfig initialize_config(json config) {
   parsed_config.hbm.type = parsed_config.dram_type;
   parsed_config.hbm.freq = parsed_config.dram_freq;
   parsed_config.hbm.channels = parsed_config.dram_channels;
+  parsed_config.hbm_channels_per_npu = parsed_config.hbm.channels;
   parsed_config.hbm.req_size = parsed_config.dram_req_size;
   parsed_config.hbm.latency = parsed_config.dram_latency;
   parsed_config.hbm.size_gb = parsed_config.dram_size;
@@ -324,6 +341,7 @@ SimulationConfig initialize_config(json config) {
     populate_tier_config(parsed_config.hbm, config["hbm"], 0,
                          parsed_config.hbm.capacity_bytes, &parsed_config.hbm);
   }
+  parsed_config.hbm_channels_per_npu = parsed_config.hbm.channels;
   if (config.contains("ddr")) {
     populate_tier_config(parsed_config.ddr, config["ddr"],
                          parsed_config.hbm.address_base + parsed_config.hbm.capacity_bytes,

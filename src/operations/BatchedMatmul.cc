@@ -60,6 +60,8 @@ void BatchedMatmul::initialize_tiles(MappingTable& mapping_table) {
     std::exit(EXIT_FAILURE);
   }
 
+  const uint32_t npu_cores =
+      _config.cores_per_npu == 0 ? _config.num_cores : _config.cores_per_npu;
   int core_id = -1;
   uint32_t n_tiles_per_batch =
       (_rows_per_batch + mapping.tile_in_loop.N - 1) / mapping.tile_in_loop.N;
@@ -68,7 +70,7 @@ void BatchedMatmul::initialize_tiles(MappingTable& mapping_table) {
       for (uint32_t M = 0; M < mapping.tile_out_loop.M; ++M) {
         for (uint32_t C = 0; C < mapping.tile_out_loop.C; ++C) {
           if (C == 0) {
-            core_id = (core_id + 1) % _config.num_cores;
+            core_id = (core_id + 1) % npu_cores;
           }
           auto tile = std::make_unique<Tile>(Tile{
               .status = Tile::Status::INITIALIZED,

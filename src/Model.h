@@ -35,6 +35,7 @@ class Model {
     void update_start_time(uint64_t start_time);
     bool check_finish();
     uint32_t get_partition_id() { return _partition_id; }
+    uint32_t get_npu_id() const { return _npu_id; }
     
     virtual bool check_language_model() { return false; }
     virtual bool check_regressive();
@@ -83,6 +84,7 @@ class Model {
     std::set<uint32_t> _dispatched_layers;
     SimulationConfig _config;
     uint32_t _partition_id = 0;
+    uint32_t _npu_id = 0;
     uint32_t _target_core = 0;
 
     /* Number of simulating attention block */

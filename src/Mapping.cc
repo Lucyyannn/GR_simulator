@@ -52,6 +52,8 @@ MappingTable MappingTable::parse_mapping_file(
 void MappingTable::gemm_mapping(Mapping::LoopCounts &key) {
   uint32_t dim_I, dim_J, dim_K;
   uint32_t dim = _config.core_config[key.target_core].core_height;
+  uint32_t npu_cores =
+      _config.cores_per_npu == 0 ? _config.num_cores : _config.cores_per_npu;
   uint32_t max_spad_rows = (_config.core_config[key.target_core].spad_size KB) / (dim * _config.precision * 2);
   uint32_t max_acc_rows = (_config.core_config[key.target_core].accum_spad_size KB) / (dim * 4 * 2);
 
@@ -80,20 +82,20 @@ void MappingTable::gemm_mapping(Mapping::LoopCounts &key) {
   tile_K = std::min(dim_K_padded/dim, ceil_div(dim_K, db_max_tile_k*dim));
   
   uint32_t num_tiles = tile_I * tile_J; //Skip C dim that needs accum
-  if(num_tiles < _config.num_cores) {
-    int increase_tile = ceil_div(_config.num_cores, num_tiles);
-    if(dim_J > dim_I && dim_J > _config.num_cores) {
+  if(num_tiles < npu_cores) {
+    int increase_tile = ceil_div(npu_cores, num_tiles);
+    if(dim_J > dim_I && dim_J > npu_cores) {
       tile_J *= increase_tile;
-    } else if(dim_I > dim_J && dim_I > _config.num_cores) {
+    } else if(dim_I > dim_J && dim_I > npu_cores) {
       tile_I *= increase_tile;
     }
     num_tiles = tile_I * tile_J;
   }
-  if(num_tiles % _config.num_cores != 0) {
-    int increase_tile = num_tiles % _config.num_cores;
-    if(dim_J > dim_I && dim_J > _config.num_cores) {
+  if(num_tiles % npu_cores != 0) {
+    int increase_tile = num_tiles % npu_cores;
+    if(dim_J > dim_I && dim_J > npu_cores) {
       tile_J += increase_tile;
-    } else if(dim_I > dim_J && dim_I > _config.num_cores) {
+    } else if(dim_I > dim_J && dim_I > npu_cores) {
       tile_I += increase_tile;
     }
   }

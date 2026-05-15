@@ -84,6 +84,8 @@ struct PlacementConfig {
 struct SimulationConfig {
   /* Core config */
   uint32_t num_cores;
+  uint32_t cores_per_npu = 0;
+  uint32_t npu_count = 1;
   uint32_t core_freq;
   uint32_t core_print_interval;
   struct CoreConfig *core_config;
@@ -93,6 +95,7 @@ struct SimulationConfig {
 
   /* HBM / DDR / SSD hierarchy */
   TieredMemoryConfig hbm;
+  uint32_t hbm_channels_per_npu = 0;
   TieredMemoryConfig ddr;
 
   /* SSD config (FEMU-inspired black-box SSD) */
@@ -156,7 +159,8 @@ struct SimulationConfig {
   }
 
   float max_systolic_flops(uint32_t id) {
-    return core_config[id].core_width * core_config[id].core_height * core_freq * 2 * num_cores / 1000; // GFLOPS
+    uint32_t npu_cores = cores_per_npu == 0 ? num_cores : cores_per_npu;
+    return core_config[id].core_width * core_config[id].core_height * core_freq * 2 * npu_cores / 1000; // GFLOPS
   }
 
   float max_vector_flops(uint32_t id) {
@@ -165,6 +169,10 @@ struct SimulationConfig {
 
   float max_hbm_bandwidth() const {
     return hbm.freq * hbm.channels * hbm.req_size / std::max(hbm.nbl, 1u) / 1000.0f;
+  }
+
+  uint32_t total_hbm_channels() const {
+    return hbm.channels * std::max<uint32_t>(npu_count, 1);
   }
 
   float max_ddr_bandwidth() const {
