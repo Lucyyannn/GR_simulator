@@ -1,0 +1,47 @@
+Frontend:
+  impl: GEM5
+
+MemorySystem:
+  impl: GenericDRAM
+  clock_ratio: 1
+
+  DRAM:
+    impl: HBM2
+    org:
+      preset: HBM2_8Gb
+      channel: 1
+    timing:
+      rate: 6252
+      nBL: 2
+      nCL: 24
+      nRCDRD: 24
+      nRCDWR: 24
+      nRP: 24
+      nRAS: 55
+      nRC: 60
+      nWR: 27
+      nRTPS: 8
+      nRTPL: 11
+      nCWL: 8
+      nCCDS: 3
+      nCCDL: 6
+      nRRDS: 8
+      nRRDL: 11
+      nWTRS: 11
+      nWTRL: 14
+      nRTW: 11
+      nFAW: 50
+      nRFCSB: 503
+      nREFI: 12192
+      nRREFD: 27
+
+  Controller:
+    impl: Generic
+    Scheduler:
+      impl: FRFCFS
+    RefreshManager:
+      impl: AllBank
+    plugins:
+
+  AddrMapper:
+    impl: RoBaRaCoCh
