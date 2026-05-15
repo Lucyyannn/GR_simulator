@@ -28,7 +28,7 @@ Options:
   --vocab N                    Embedding vocabulary size
   --seed N                     Random seed
   --op-modeling SPEC           Operator modeling modes, e.g. split=materialize,view=materialize,concat=materialize
-  --attention-modeling MODE     Attention modeling mode: decomposed or fused. Default: decomposed
+  --attention-modeling MODE     Attention modeling mode: decomposed or fused. Default: fused
   --enable-kv-reuse             Enable KV row reuse metadata in generated traces
   --kv-reuse-variant MODE       KV reuse variant: global or window_topk. Default: window_topk
   --kv-reuse-ratio R            KV reuse compression ratio for cached KV rows. Default: 0
@@ -54,7 +54,7 @@ MACRO_BATCH_SIZE="${MACRO_BATCH_SIZE:-1024}"
 VOCAB="${VOCAB:-65536}"
 SEED="${SEED:-1234}"
 OP_MODELING="${OP_MODELING:-split=materialize,view=materialize,concat=materialize}"
-ATTENTION_MODELING="${ATTENTION_MODELING:-decomposed}"
+ATTENTION_MODELING="${ATTENTION_MODELING:-fused}"
 ENABLE_KV_REUSE="${ENABLE_KV_REUSE:-0}"
 KV_REUSE_VARIANT="${KV_REUSE_VARIANT:-window_topk}"
 KV_REUSE_ACTION_COUNT="${KV_REUSE_ACTION_COUNT:-4}"

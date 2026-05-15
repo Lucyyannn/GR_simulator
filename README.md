@@ -105,15 +105,15 @@ docker build . -t gr-simulator
 启动容器并挂载项目目录：
 
 ```bash
-docker run -it \
+docker run -it --name gr-simulator-mini \
   -v $(pwd):/workspace/GR_simulator \
   -w /workspace/GR_simulator \
-  gr-simulator
+  onnxim bash
 
 # 在容器内安装相关依赖并构建目标
 (docker) mkdir -p build && cd build
 (docker) conan install .. --build=missing
-(docker) cmake 
+(docker) cmake ..
 (docker) make -j$(nproc)
 ```
 
@@ -240,6 +240,6 @@ echo '{"models":[{"name":"test_gemm","trace_path":"example/trace_tests/test_gemm
 通过以下命令运行测试，可在run_hstu.sh中修改trace参数。run_hstu.sh脚本中默认根据910c_mini_{ddr,ssd}.json生成支持pipeline的配置文件
 ```bash
 # --source-medium指定数据初始存放位置，这里支持DDR->HBM的baseline模式和SSD->HBM，不包含调度
-bash scripts/run_hstu.sh --source-medium ddr --result-dir results/ddr1
-bash scripts/run_hstu.sh --source-medium ssd --result-dir results/ssd1
+bash scripts/run_hstu.sh --source-medium ddr --result-dir "results/ddr1_$(date +%Y%m%d_%H%M%S)" &
+bash scripts/run_hstu.sh --source-medium ssd --result-dir "results/ssd1_$(date +%Y%m%d_%H%M%S)" &
 ```

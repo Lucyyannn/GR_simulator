@@ -981,7 +981,7 @@ def build_trace(
     indices_values=None,
     model_name="hstu_8layer_baseline_small",
     op_modeling=None,
-    attention_modeling="decomposed",
+    attention_modeling="fused",
     pipeline_enabled=False,
     kv_reuse_enabled=False,
     kv_reuse_variant="window_topk",
@@ -1533,7 +1533,7 @@ def build_batched_trace(
     indices_values_per_user=None,
     model_name="hstu_batched_baseline_small",
     op_modeling=None,
-    attention_modeling="decomposed",
+    attention_modeling="fused",
     pipeline_enabled=False,
     kv_reuse_enabled=False,
     kv_reuse_variant="window_topk",
@@ -2588,7 +2588,7 @@ def main():
     parser.add_argument(
         "--attention-modeling",
         choices=["decomposed", "fused"],
-        default="decomposed",
+        default="fused",
         help="Use decomposed HSTU attention subgraph or one reuse-aware fused attention op.",
     )
     args = parser.parse_args()
