@@ -6,15 +6,14 @@
     "target_ddr_bandwidth_GBps": 128.0,
     "target_ssd_read_bandwidth_GBps": 32.0,
     "target_ssd_write_bandwidth_GBps": 32.0,
-    "scaling_rule": "high-frequency 8-core single-card model; core_width/core_height adjusted to preserve target FP16 throughput; memory settings unchanged",
-    "derived_fp16_tflops": 800.1792,
+    "derived_fp16_tflops": 800.19456,
     "derived_hbm_bandwidth_GBps": 3201.024,
     "derived_ddr_bandwidth_GBps": 128.0,
     "derived_ssd_read_bandwidth_GBps": 31.999999999999996,
     "derived_ssd_write_bandwidth_GBps": 31.999999999999996
   },
-  "num_cores": 8,
-  "core_freq": 2400,
+  "num_cores": 12,
+  "core_freq": 2035,
   "core_print_interval": 8000000,
   "core_config": {
     "core_0": {
@@ -30,11 +29,11 @@
       "scalar_sqrt_latency": 1,
       "scalar_add_latency": 1,
       "scalar_mul_latency": 1,
-      "core_width": 138,
-      "core_height": 151,
+      "core_width": 128,
+      "core_height": 128,
       "spad_size": 16384,
       "accum_spad_size": 4096,
-      "vector_process_bit": 16384
+      "vector_process_bit": 2048
     },
     "core_1": {
       "core_type": "systolic_ws",
@@ -49,11 +48,11 @@
       "scalar_sqrt_latency": 1,
       "scalar_add_latency": 1,
       "scalar_mul_latency": 1,
-      "core_width": 138,
-      "core_height": 151,
+      "core_width": 128,
+      "core_height": 128,
       "spad_size": 16384,
       "accum_spad_size": 4096,
-      "vector_process_bit": 16384
+      "vector_process_bit": 2048
     },
     "core_2": {
       "core_type": "systolic_ws",
@@ -68,11 +67,11 @@
       "scalar_sqrt_latency": 1,
       "scalar_add_latency": 1,
       "scalar_mul_latency": 1,
-      "core_width": 138,
-      "core_height": 151,
+      "core_width": 128,
+      "core_height": 128,
       "spad_size": 16384,
       "accum_spad_size": 4096,
-      "vector_process_bit": 16384
+      "vector_process_bit": 2048
     },
     "core_3": {
       "core_type": "systolic_ws",
@@ -87,11 +86,11 @@
       "scalar_sqrt_latency": 1,
       "scalar_add_latency": 1,
       "scalar_mul_latency": 1,
-      "core_width": 138,
-      "core_height": 151,
+      "core_width": 128,
+      "core_height": 128,
       "spad_size": 16384,
       "accum_spad_size": 4096,
-      "vector_process_bit": 16384
+      "vector_process_bit": 2048
     },
     "core_4": {
       "core_type": "systolic_ws",
@@ -106,11 +105,11 @@
       "scalar_sqrt_latency": 1,
       "scalar_add_latency": 1,
       "scalar_mul_latency": 1,
-      "core_width": 138,
-      "core_height": 151,
+      "core_width": 128,
+      "core_height": 128,
       "spad_size": 16384,
       "accum_spad_size": 4096,
-      "vector_process_bit": 16384
+      "vector_process_bit": 2048
     },
     "core_5": {
       "core_type": "systolic_ws",
@@ -125,11 +124,11 @@
       "scalar_sqrt_latency": 1,
       "scalar_add_latency": 1,
       "scalar_mul_latency": 1,
-      "core_width": 138,
-      "core_height": 151,
+      "core_width": 128,
+      "core_height": 128,
       "spad_size": 16384,
       "accum_spad_size": 4096,
-      "vector_process_bit": 16384
+      "vector_process_bit": 2048
     },
     "core_6": {
       "core_type": "systolic_ws",
@@ -144,11 +143,11 @@
       "scalar_sqrt_latency": 1,
       "scalar_add_latency": 1,
       "scalar_mul_latency": 1,
-      "core_width": 138,
-      "core_height": 151,
+      "core_width": 128,
+      "core_height": 128,
       "spad_size": 16384,
       "accum_spad_size": 4096,
-      "vector_process_bit": 16384
+      "vector_process_bit": 2048
     },
     "core_7": {
       "core_type": "systolic_ws",
@@ -163,11 +162,87 @@
       "scalar_sqrt_latency": 1,
       "scalar_add_latency": 1,
       "scalar_mul_latency": 1,
-      "core_width": 138,
-      "core_height": 151,
+      "core_width": 128,
+      "core_height": 128,
       "spad_size": 16384,
       "accum_spad_size": 4096,
-      "vector_process_bit": 16384
+      "vector_process_bit": 2048
+    },
+    "core_8": {
+      "core_type": "systolic_ws",
+      "sram_width": 32,
+      "add_latency": 1,
+      "mul_latency": 1,
+      "mac_latency": 1,
+      "exp_latency": 1,
+      "gelu_latency": 1,
+      "div_latency": 1,
+      "add_tree_latency": 1,
+      "scalar_sqrt_latency": 1,
+      "scalar_add_latency": 1,
+      "scalar_mul_latency": 1,
+      "core_width": 128,
+      "core_height": 128,
+      "spad_size": 16384,
+      "accum_spad_size": 4096,
+      "vector_process_bit": 2048
+    },
+    "core_9": {
+      "core_type": "systolic_ws",
+      "sram_width": 32,
+      "add_latency": 1,
+      "mul_latency": 1,
+      "mac_latency": 1,
+      "exp_latency": 1,
+      "gelu_latency": 1,
+      "div_latency": 1,
+      "add_tree_latency": 1,
+      "scalar_sqrt_latency": 1,
+      "scalar_add_latency": 1,
+      "scalar_mul_latency": 1,
+      "core_width": 128,
+      "core_height": 128,
+      "spad_size": 16384,
+      "accum_spad_size": 4096,
+      "vector_process_bit": 2048
+    },
+    "core_10": {
+      "core_type": "systolic_ws",
+      "sram_width": 32,
+      "add_latency": 1,
+      "mul_latency": 1,
+      "mac_latency": 1,
+      "exp_latency": 1,
+      "gelu_latency": 1,
+      "div_latency": 1,
+      "add_tree_latency": 1,
+      "scalar_sqrt_latency": 1,
+      "scalar_add_latency": 1,
+      "scalar_mul_latency": 1,
+      "core_width": 128,
+      "core_height": 128,
+      "spad_size": 16384,
+      "accum_spad_size": 4096,
+      "vector_process_bit": 2048
+    },
+    "core_11": {
+      "core_type": "systolic_ws",
+      "sram_width": 32,
+      "add_latency": 1,
+      "mul_latency": 1,
+      "mac_latency": 1,
+      "exp_latency": 1,
+      "gelu_latency": 1,
+      "div_latency": 1,
+      "add_tree_latency": 1,
+      "scalar_sqrt_latency": 1,
+      "scalar_add_latency": 1,
+      "scalar_mul_latency": 1,
+      "core_width": 128,
+      "core_height": 128,
+      "spad_size": 16384,
+      "accum_spad_size": 4096,
+      "vector_process_bit": 2048
     }
   },
   "dram_type": "ramulator2",
