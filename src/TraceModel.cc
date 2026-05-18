@@ -1298,9 +1298,17 @@ void TraceModel::build_preload_stages() {
 bool TraceModel::has_data_movement_stage_to_submit() const {
   if (!uses_layer_preload()) return false;
   if (_next_stage_to_submit >= _preload_stages.size()) return false;
-  const auto& stage = _preload_stages[_next_stage_to_submit];
-  if (stage.completed) return false;
-  return next_ready_preload_subtask(stage) < stage.subtasks.size();
+  const size_t lookahead =
+      std::max<size_t>(2, static_cast<size_t>(_config.layer_preload_lookahead));
+  const size_t stage_end =
+      std::min(_preload_stages.size(), _next_stage_to_submit + lookahead);
+  for (size_t stage_idx = _next_stage_to_submit; stage_idx < stage_end;
+       ++stage_idx) {
+    const auto& stage = _preload_stages[stage_idx];
+    if (stage.completed) continue;
+    if (next_ready_preload_subtask(stage) < stage.subtasks.size()) return true;
+  }
+  return false;
 }
 
 std::set<MemoryMedium> TraceModel::preload_subtask_sources(
@@ -1336,6 +1344,14 @@ bool TraceModel::preload_subtask_can_submit(const PreloadStage& stage,
     if (i > subtask_idx && !other.submitted) continue;
     const auto other_sources = preload_subtask_sources(other);
     if (overlaps(candidate_sources, other_sources)) return false;
+  }
+  for (const auto& other_stage : _preload_stages) {
+    if (&other_stage == &stage) continue;
+    for (const auto& other : other_stage.subtasks) {
+      if (!other.submitted || other.completed) continue;
+      const auto other_sources = preload_subtask_sources(other);
+      if (overlaps(candidate_sources, other_sources)) return false;
+    }
   }
   return true;
 }
@@ -1475,16 +1491,30 @@ std::vector<uint64_t> TraceModel::submit_next_data_movement_stage(
     StorageController* controller, uint64_t now_ps) {
   if (controller == nullptr || !has_data_movement_stage_to_submit()) return {};
 
-  PreloadStage& stage = _preload_stages[_next_stage_to_submit];
   std::vector<uint64_t> all_movement_ids;
-  while (true) {
-    const size_t subtask_idx = next_ready_preload_subtask(stage);
-    if (subtask_idx >= stage.subtasks.size()) break;
-    std::vector<uint64_t> movement_ids =
-        submit_preload_subtask(stage, subtask_idx, controller, now_ps);
-    if (movement_ids.empty() && !stage.subtasks[subtask_idx].submitted) break;
-    all_movement_ids.insert(all_movement_ids.end(), movement_ids.begin(),
-                            movement_ids.end());
+  bool submitted_any = true;
+  while (submitted_any) {
+    submitted_any = false;
+    const size_t lookahead = std::max<size_t>(
+        2, static_cast<size_t>(_config.layer_preload_lookahead));
+    const size_t stage_end =
+        std::min(_preload_stages.size(), _next_stage_to_submit + lookahead);
+    for (size_t stage_idx = _next_stage_to_submit; stage_idx < stage_end;
+         ++stage_idx) {
+      PreloadStage& stage = _preload_stages[stage_idx];
+      if (stage.completed) continue;
+      while (true) {
+        const size_t subtask_idx = next_ready_preload_subtask(stage);
+        if (subtask_idx >= stage.subtasks.size()) break;
+        std::vector<uint64_t> movement_ids =
+            submit_preload_subtask(stage, subtask_idx, controller, now_ps);
+        if (movement_ids.empty() && !stage.subtasks[subtask_idx].submitted)
+          break;
+        submitted_any = true;
+        all_movement_ids.insert(all_movement_ids.end(), movement_ids.begin(),
+                                movement_ids.end());
+      }
+    }
   }
   return all_movement_ids;
 }
@@ -1574,7 +1604,10 @@ bool TraceModel::complete_ready_data_movement_stages(
         "preload", "stage", stage.name, stage.layer_id,
         stage.submitted_time_ps, stage.completed_time_ps, stage.physical_bytes,
         "movements=" + std::to_string(stage.movement_ids.size()));
-    _next_stage_to_submit++;
+    while (_next_stage_to_submit < _preload_stages.size() &&
+           _preload_stages[_next_stage_to_submit].completed) {
+      _next_stage_to_submit++;
+    }
     spdlog::info("[TraceModel] {} complete preload stage {} at {:.6f} us "
                  "(latency={:.6f} us)",
                  _name, stage.name, static_cast<double>(now_ps) / 1e6,

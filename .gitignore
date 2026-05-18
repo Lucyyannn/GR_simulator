@@ -23,3 +23,4 @@ build_dev7/
 __pycache__
 *.xlsx
 IR_Recompute.md
+build_codex12_retest/

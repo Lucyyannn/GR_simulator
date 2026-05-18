@@ -1035,6 +1035,7 @@ def build_trace(
     kv_reuse_ratio=0.0,
     source_medium="ddr",
     embedding_source_medium=None,
+    history_recompute_source_medium=None,
     seed=0,
     history_recompute_len=0,
 ):
@@ -1045,6 +1046,14 @@ def build_trace(
     if embedding_source_medium not in {"ddr", "ssd"}:
         raise ValueError(
             f"Unsupported embedding source medium: {embedding_source_medium}"
+        )
+    history_recompute_source_medium = (
+        history_recompute_source_medium or source_medium
+    )
+    if history_recompute_source_medium not in {"ddr", "ssd"}:
+        raise ValueError(
+            "Unsupported history recompute source medium: "
+            f"{history_recompute_source_medium}"
         )
     if history_recompute_len < 0 or history_recompute_len > kv_len:
         raise ValueError("history_recompute_len must be in [0, kv_len]")
@@ -1132,7 +1141,7 @@ def build_trace(
                 **layer_meta,
             )
             history_input = source_to_hbm_tensor(
-                embedding_source_medium,
+                history_recompute_source_medium,
                 f"{current}.history_recompute",
                 [history_recompute_len, hidden],
                 logical_id=f"u{user_id}.b{batch_id}.m{macro_batch_id}.history_recompute_embedding_rows",
@@ -1191,18 +1200,51 @@ def build_trace(
             current, [active_tokens, hidden], role="activation", **layer_meta
         )
         if layer == 0:
-            current_input = source_to_hbm_tensor(
-                embedding_source_medium,
-                current,
-                [active_tokens, hidden],
-                logical_id=f"u{user_id}.b{batch_id}.m{macro_batch_id}.embedding_rows",
-                role="embedding_rows",
-                preload_group="pre_attention",
-                source_logical_id="embedding.table",
-                source_shape=[vocab, hidden],
-                indices_values=indices_values,
-                **layer_meta,
-            )
+            if history_recompute_len > 0:
+                candidate_input = source_to_hbm_tensor(
+                    embedding_source_medium,
+                    f"{current}.candidate",
+                    [candidate_tokens, hidden],
+                    logical_id=f"u{user_id}.b{batch_id}.m{macro_batch_id}.candidate_embedding_rows",
+                    role="embedding_rows",
+                    preload_group="candidate_embedding",
+                    source_logical_id="embedding.table",
+                    source_shape=[vocab, hidden],
+                    indices_values=indices_values[:candidate_tokens],
+                    **layer_meta,
+                )
+                history_input = source_to_hbm_tensor(
+                    history_recompute_source_medium,
+                    f"{current}.history_recompute",
+                    [history_recompute_len, hidden],
+                    logical_id=f"u{user_id}.b{batch_id}.m{macro_batch_id}.history_recompute_embedding_rows",
+                    role="embedding_rows",
+                    preload_group="history_recompute_embedding",
+                    source_logical_id="embedding.table",
+                    source_shape=[vocab, hidden],
+                    indices_values=indices_values[candidate_tokens:],
+                    **layer_meta,
+                )
+                add_op(
+                    ops,
+                    "aten::cat",
+                    [candidate_input, history_input],
+                    [hbm_tensor(current, [active_tokens, hidden], role="activation", **layer_meta)],
+                    {"axis": 0, **op_modeling_attrs(op_modeling, "concat")},
+                )
+            else:
+                current_input = source_to_hbm_tensor(
+                    embedding_source_medium,
+                    current,
+                    [active_tokens, hidden],
+                    logical_id=f"u{user_id}.b{batch_id}.m{macro_batch_id}.embedding_rows",
+                    role="embedding_rows",
+                    preload_group="candidate_embedding",
+                    source_logical_id="embedding.table",
+                    source_shape=[vocab, hidden],
+                    indices_values=indices_values,
+                    **layer_meta,
+                )
 
         add_op(
             ops,
@@ -1549,6 +1591,7 @@ def build_trace(
             "attention_modeling": attention_modeling,
             "source_medium": source_medium,
             "embedding_source_medium": embedding_source_medium,
+            "history_recompute_source_medium": history_recompute_source_medium,
             "kv_reuse_variant": kv_reuse_variant,
             "kv_reuse_action_count": kv_reuse_action_count,
             "kv_reuse_window_size": kv_reuse_window_size,
@@ -1595,6 +1638,7 @@ def build_batched_trace(
     kv_reuse_ratio=0.0,
     source_medium="ddr",
     embedding_source_medium=None,
+    history_recompute_source_medium=None,
     seed=0,
     history_recompute_len=0,
 ):
@@ -1605,6 +1649,14 @@ def build_batched_trace(
     if embedding_source_medium not in {"ddr", "ssd"}:
         raise ValueError(
             f"Unsupported embedding source medium: {embedding_source_medium}"
+        )
+    history_recompute_source_medium = (
+        history_recompute_source_medium or source_medium
+    )
+    if history_recompute_source_medium not in {"ddr", "ssd"}:
+        raise ValueError(
+            "Unsupported history recompute source medium: "
+            f"{history_recompute_source_medium}"
         )
     if history_recompute_len < 0 or history_recompute_len > kv_len:
         raise ValueError("history_recompute_len must be in [0, kv_len]")
@@ -1779,7 +1831,7 @@ def build_batched_trace(
                 **layer_meta,
             )
             history_input = source_to_hbm_tensor(
-                embedding_source_medium,
+                history_recompute_source_medium,
                 f"{current}.history_recompute",
                 [batch_size, history_recompute_len, hidden],
                 logical_id=f"batch{batch_id}.macro{macro_batch_id}.history_recompute_embedding_rows",
@@ -1845,20 +1897,69 @@ def build_batched_trace(
             **layer_meta,
         )
         if layer == 0:
-            current_input = source_to_hbm_tensor(
-                embedding_source_medium,
-                current,
-                [batch_size, active_tokens, hidden],
-                logical_id=f"batch{batch_id}.macro{macro_batch_id}.embedding_rows",
-                role="embedding_rows",
-                preload_group="pre_attention",
-                source_logical_id="embedding.table",
-                source_shape=[vocab, hidden],
-                indices_values=flat_indices_values,
-                user_ids=user_ids,
-                indices_values_per_user=indices_values_per_user,
-                **layer_meta,
-            )
+            if history_recompute_len > 0:
+                candidate_indices_per_user = [
+                    row[:candidate_tokens] for row in indices_values_per_user
+                ]
+                history_indices_per_user = [
+                    row[candidate_tokens:] for row in indices_values_per_user
+                ]
+                flat_candidate_indices = [
+                    idx for row in candidate_indices_per_user for idx in row
+                ]
+                flat_history_indices = [
+                    idx for row in history_indices_per_user for idx in row
+                ]
+                candidate_input = source_to_hbm_tensor(
+                    embedding_source_medium,
+                    f"{current}.candidate",
+                    [batch_size, candidate_tokens, hidden],
+                    logical_id=f"batch{batch_id}.macro{macro_batch_id}.candidate_embedding_rows",
+                    role="embedding_rows",
+                    preload_group="candidate_embedding",
+                    source_logical_id="embedding.table",
+                    source_shape=[vocab, hidden],
+                    indices_values=flat_candidate_indices,
+                    user_ids=user_ids,
+                    indices_values_per_user=candidate_indices_per_user,
+                    **layer_meta,
+                )
+                history_input = source_to_hbm_tensor(
+                    history_recompute_source_medium,
+                    f"{current}.history_recompute",
+                    [batch_size, history_recompute_len, hidden],
+                    logical_id=f"batch{batch_id}.macro{macro_batch_id}.history_recompute_embedding_rows",
+                    role="embedding_rows",
+                    preload_group="history_recompute_embedding",
+                    source_logical_id="embedding.table",
+                    source_shape=[vocab, hidden],
+                    indices_values=flat_history_indices,
+                    user_ids=user_ids,
+                    indices_values_per_user=history_indices_per_user,
+                    **layer_meta,
+                )
+                add_op(
+                    ops,
+                    "aten::cat",
+                    [candidate_input, history_input],
+                    [hbm_tensor(current, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
+                    {"axis": 1, **op_modeling_attrs(op_modeling, "concat")},
+                )
+            else:
+                current_input = source_to_hbm_tensor(
+                    embedding_source_medium,
+                    current,
+                    [batch_size, active_tokens, hidden],
+                    logical_id=f"batch{batch_id}.macro{macro_batch_id}.embedding_rows",
+                    role="embedding_rows",
+                    preload_group="candidate_embedding",
+                    source_logical_id="embedding.table",
+                    source_shape=[vocab, hidden],
+                    indices_values=flat_indices_values,
+                    user_ids=user_ids,
+                    indices_values_per_user=indices_values_per_user,
+                    **layer_meta,
+                )
 
         add_op(
             ops,
@@ -2286,6 +2387,7 @@ def build_batched_trace(
             "attention_modeling": attention_modeling,
             "source_medium": source_medium,
             "embedding_source_medium": embedding_source_medium,
+            "history_recompute_source_medium": history_recompute_source_medium,
             "kv_reuse_variant": kv_reuse_variant,
             "kv_reuse_action_count": kv_reuse_action_count,
             "kv_reuse_window_size": kv_reuse_window_size,
@@ -2342,7 +2444,7 @@ def write_json(path, data, compact=False):
 
 
 def history_recompute_indices(length, vocab, mode, rng, stream_base=0):
-    if mode == "stream":
+    if mode in {"continuous", "stream"}:
         if vocab <= 0:
             return list(range(length))
         return [(stream_base + i) % vocab for i in range(length)]
@@ -2383,6 +2485,7 @@ def write_single_trace(args, op_modeling):
         kv_reuse_ratio=args.kv_reuse_ratio,
         source_medium=args.source_medium,
         embedding_source_medium=args.embedding_source_medium,
+        history_recompute_source_medium=args.history_recompute_source_medium,
         seed=args.seed,
         history_recompute_len=args.history_recompute_len,
     )
@@ -2452,6 +2555,7 @@ def write_pipeline_traces(args, op_modeling):
                 kv_reuse_ratio=args.kv_reuse_ratio,
                 source_medium=args.source_medium,
                 embedding_source_medium=args.embedding_source_medium,
+                history_recompute_source_medium=args.history_recompute_source_medium,
                 seed=args.seed,
                 history_recompute_len=args.history_recompute_len,
             )
@@ -2501,6 +2605,7 @@ def write_pipeline_traces(args, op_modeling):
                 "kv_reuse_ratio": args.kv_reuse_ratio,
                 "source_medium": args.source_medium,
                 "embedding_source_medium": args.embedding_source_medium,
+                "history_recompute_source_medium": args.history_recompute_source_medium,
                 "history_recompute_len": args.history_recompute_len,
                 "history_action_compute_rows": history_action_compute_rows_after_recompute(
                     args.history_recompute_len,
@@ -2534,12 +2639,13 @@ def main():
     )
     parser.add_argument(
         "--history-recompute-index-mode",
-        choices=["stream", "random"],
-        default="stream",
+        choices=["continuous", "random", "stream"],
+        default="continuous",
         help=(
-            "Embedding index mode for recomputed history rows. stream uses "
+            "Embedding index mode for recomputed history rows. continuous uses "
             "contiguous indices; random samples rows from the embedding table. "
-            "Candidate rows are always random."
+            "Candidate rows are always random. stream is kept as a backward-"
+            "compatible alias of continuous."
         ),
     )
     parser.add_argument("--vocab", type=int, default=128)
@@ -2553,14 +2659,22 @@ def main():
         "--source-medium",
         choices=["ddr", "ssd"],
         default="ddr",
-        help="Initial storage medium for non-weight preload source tensors.",
+        help="Initial storage medium for KV cache preload source tensors.",
     )
     parser.add_argument(
         "--embedding-source-medium",
         choices=["ddr", "ssd"],
         help=(
-            "Initial storage medium for embedding table/rows. Defaults to "
-            "--source-medium for backward compatibility."
+            "Initial storage medium for candidate embedding rows. Defaults to "
+            "ssd."
+        ),
+    )
+    parser.add_argument(
+        "--history-recompute-source-medium",
+        choices=["ddr", "ssd"],
+        help=(
+            "Initial storage medium for recomputed history embedding rows. "
+            "Defaults to --source-medium."
         ),
     )
     parser.add_argument("--pipeline", action="store_true")
@@ -2656,7 +2770,9 @@ def main():
     )
     args = parser.parse_args()
     if args.embedding_source_medium is None:
-        args.embedding_source_medium = args.source_medium
+        args.embedding_source_medium = "ssd"
+    if args.history_recompute_source_medium is None:
+        args.history_recompute_source_medium = args.source_medium
 
     if args.num_users < 1 or args.users_per_batch < 1:
         raise ValueError("--num-users and --users-per-batch must be positive")
