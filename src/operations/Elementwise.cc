@@ -77,7 +77,10 @@ void Elementwise::initialize_instructions(Tile* tile, uint32_t element_offset,
 
   uint32_t bytes = elements * _config.precision;
   addr_type lhs_spad = SPAD_BASE;
-  addr_type rhs_spad = SPAD_BASE + _config.align_address(bytes);
+  auto align_up = [](uint64_t x, uint64_t align) {
+    return align == 0 ? x : ((x + align - 1) / align) * align;
+  };
+  addr_type rhs_spad = SPAD_BASE + align_up(bytes, _config.dram_req_size);
 
   std::set<addr_type> lhs_addrs;
   std::set<addr_type> rhs_addrs;
