@@ -71,6 +71,7 @@ def load_plot_context(csv_path):
         "batch_size": infer_batch_from_path(path),
         "source_medium": "unknown",
         "embedding_source_medium": "unknown",
+        "history_recompute_source_medium": "unknown",
     }
     models_json = path.with_name("models.json")
     if not models_json.exists():
@@ -83,8 +84,14 @@ def load_plot_context(csv_path):
     metadata = payload.get("metadata", {})
     source_medium = metadata.get("source_medium") or "unknown"
     embedding_source_medium = metadata.get("embedding_source_medium") or source_medium
+    history_recompute_source_medium = (
+        metadata.get("history_recompute_source_medium") or source_medium
+    )
     context["source_medium"] = str(source_medium).lower()
     context["embedding_source_medium"] = str(embedding_source_medium).lower()
+    context["history_recompute_source_medium"] = str(
+        history_recompute_source_medium
+    ).lower()
     context["candidate_tokens"] = parse_int(
         metadata.get("candidates_per_user"), context["candidate_tokens"]
     )
@@ -177,7 +184,9 @@ def preload_source_medium(row, context):
         return ""
     phase = display_phase(row)
     if phase in {"candidate_embedding", "history_embedding"}:
-        return context.get("embedding_source_medium") or "unknown"
+        if phase == "candidate_embedding":
+            return context.get("embedding_source_medium") or "unknown"
+        return context.get("history_recompute_source_medium") or "unknown"
     if phase == "kvcache":
         return context.get("source_medium") or "unknown"
     if phase == "post_attention":

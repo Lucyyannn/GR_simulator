@@ -12,15 +12,16 @@ usage() {
 Usage: bash scripts/run_hstu.sh [options]
 
 Options:
-  --source-medium {ddr|ssd}   Initial source medium for KV/embedding rows. Default: ddr
-  --embedding-source-medium {ddr|ssd} Initial source medium for embedding rows. Default: --source-medium
-  --base-config PATH           Simulator base config. Default: configs/910c_mini_<source-medium>.json
+  --source-medium {ddr|ssd}   Initial source medium for KV cache rows. Default: ssd
+  --embedding-source-medium {ddr|ssd} Initial source medium for candidate embedding rows. Default: ssd
+  --history-recompute-source-medium {ddr|ssd} Initial source medium for recomputed history embedding rows. Default: --source-medium
+  --base-config PATH           Simulator base config. Default: configs/910C.json
   --result-dir PATH           Output directory. Default: results/run_hstu_<source-medium>
   --layers N                   HSTU layer count
   --hidden N                   Hidden dimension
   --kv-len N                   Historical KV length
   --history-recompute-len N     Tail history rows recomputed from embedding instead of KV cache. Default: 0
-  --history-recompute-index-mode MODE  Recomputed history index mode: stream or random. Default: stream
+  --history-recompute-index-mode MODE  Recomputed history index mode: continuous or random. Default: continuous
   --num-users N                Number of users in the generated workload
   --users-per-batch N          Users per batch
   --candidates-per-user N      Candidates per user
@@ -33,27 +34,28 @@ Options:
   --enable-kv-reuse             Enable KV row reuse metadata in generated traces
   --kv-reuse-variant MODE       KV reuse variant: global or window_topk. Default: window_topk
   --kv-reuse-ratio R            KV reuse compression ratio for cached KV rows. Default: 0
-  --log-level LEVEL            Simulator log level. Default: info
+  --log-level LEVEL            Simulator log level. Default: warn
   -h, --help                  Show this message
 EOF
 }
 
 # Edit the standard experiment settings here when you want to change workload size.
-SOURCE_MEDIUM="${SOURCE_MEDIUM:-ddr}"
-EMBEDDING_SOURCE_MEDIUM="${EMBEDDING_SOURCE_MEDIUM:-}"
+SOURCE_MEDIUM="${SOURCE_MEDIUM:-ssd}"
+EMBEDDING_SOURCE_MEDIUM="${EMBEDDING_SOURCE_MEDIUM:-ssd}"
+HISTORY_RECOMPUTE_SOURCE_MEDIUM="${HISTORY_RECOMPUTE_SOURCE_MEDIUM:-}"
 BASE_CONFIG="${BASE_CONFIG:-}"
 RESULT_DIR=""
 LAYERS="${LAYERS:-4}"
 HIDDEN="${HIDDEN:-256}"
-KV_LEN="${KV_LEN:-1024}"
+KV_LEN="${KV_LEN:-4096}"
 HISTORY_RECOMPUTE_LEN="${HISTORY_RECOMPUTE_LEN:-0}"
-HISTORY_RECOMPUTE_INDEX_MODE="${HISTORY_RECOMPUTE_INDEX_MODE:-stream}"
-NUM_USERS="${NUM_USERS:-4}"
-USERS_PER_BATCH="${USERS_PER_BATCH:-4}"
+HISTORY_RECOMPUTE_INDEX_MODE="${HISTORY_RECOMPUTE_INDEX_MODE:-continuous}"
+NUM_USERS="${NUM_USERS:-1}"
+USERS_PER_BATCH="${USERS_PER_BATCH:-1}"
 CANDIDATES_PER_USER="${CANDIDATES_PER_USER:-128}"
 MACRO_BATCH_SIZE="${MACRO_BATCH_SIZE:-128}"
 NPU_COUNT="${NPU_COUNT:-1}"
-VOCAB="${VOCAB:-65536}"
+VOCAB="${VOCAB:-262144}"
 SEED="${SEED:-1234}"
 OP_MODELING="${OP_MODELING:-split=materialize,view=materialize,concat=materialize}"
 ATTENTION_MODELING="${ATTENTION_MODELING:-fused}"
@@ -66,7 +68,7 @@ KV_REUSE_RATIO="${KV_REUSE_RATIO:-0}"
 KV_REUSE_HOT_SHARE="${KV_REUSE_HOT_SHARE:-0.75}"
 KV_REUSE_ACTION_OFFSET="${KV_REUSE_ACTION_OFFSET:-1}"
 KV_REUSE_ACTION_STRIDE="${KV_REUSE_ACTION_STRIDE:-2}"
-LOG_LEVEL="${LOG_LEVEL:-info}"
+LOG_LEVEL="${LOG_LEVEL:-warn}"
 SIMULATOR_BIN="${SIMULATOR_BIN:-./build/bin/Simulator}"
 
 while [[ $# -gt 0 ]]; do
@@ -77,6 +79,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --embedding-source-medium)
       EMBEDDING_SOURCE_MEDIUM="$2"
+      shift 2
+      ;;
+    --history-recompute-source-medium)
+      HISTORY_RECOMPUTE_SOURCE_MEDIUM="$2"
       shift 2
       ;;
     --base-config)
@@ -221,7 +227,7 @@ if (( USERS_PER_BATCH % NPU_COUNT != 0 )); then
 fi
 
 if [[ -z "${BASE_CONFIG}" ]]; then
-  BASE_CONFIG="configs/910c_mini_${SOURCE_MEDIUM}.json"
+  BASE_CONFIG="configs/910C.json"
 fi
 if [[ ! -f "${BASE_CONFIG}" ]]; then
   echo "Base config not found: ${BASE_CONFIG}" >&2
@@ -232,7 +238,10 @@ if [[ -z "${RESULT_DIR}" ]]; then
   RESULT_DIR="results/run_hstu_${SOURCE_MEDIUM}"
 fi
 if [[ -z "${EMBEDDING_SOURCE_MEDIUM}" ]]; then
-  EMBEDDING_SOURCE_MEDIUM="${SOURCE_MEDIUM}"
+  EMBEDDING_SOURCE_MEDIUM="ssd"
+fi
+if [[ -z "${HISTORY_RECOMPUTE_SOURCE_MEDIUM}" ]]; then
+  HISTORY_RECOMPUTE_SOURCE_MEDIUM="${SOURCE_MEDIUM}"
 fi
 
 TRACE_DIR="${RESULT_DIR}/traces"
@@ -256,6 +265,7 @@ TRACE_ARGS=(
   --compact-json
   --source-medium "${SOURCE_MEDIUM}"
   --embedding-source-medium "${EMBEDDING_SOURCE_MEDIUM}"
+  --history-recompute-source-medium "${HISTORY_RECOMPUTE_SOURCE_MEDIUM}"
   --layers "${LAYERS}"
   --hidden "${HIDDEN}"
   --kv-len "${KV_LEN}"
@@ -306,7 +316,7 @@ if hbm_capacity == 0:
 default_residency_cap = hbm_capacity // 4 if hbm_capacity > 0 else 0
 pipeline["max_preloading_models"] = 1
 pipeline["layer_preload_enabled"] = True
-pipeline["layer_preload_lookahead"] = pipeline.get("layer_preload_lookahead", 1)
+pipeline["layer_preload_lookahead"] = max(2, pipeline.get("layer_preload_lookahead", 1))
 pipeline["hbm_residency_capacity_bytes"] = (
     pipeline.get("hbm_residency_capacity_bytes", 0) or default_residency_cap
 )

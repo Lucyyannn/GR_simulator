@@ -20,8 +20,8 @@ work. The early/late split is reported only as a diagnostic view of the layer
 schedule. Embedding/candidate reads and weights are not part of the repeated
 per-layer KV preload duration; weights are resident in HBM by default.
 
-Default hardware parameters are derived from configs/baseline.json, then
-optionally adjusted by docs/scripts/recompute_ratio_calibration.json. CLI
+Default hardware parameters are derived from configs/910C.json, then
+optionally adjusted by scripts/recompute_ratio_calibration.json. CLI
 overrides still take highest precedence.
 
 Calibration is used as a parametric correction over hidden size, sequence
@@ -36,7 +36,7 @@ the primary prediction rule.
           configs/baseline.json。该配置提供 NPU core 拓扑、存储通道与带宽
           参数、SSD 结构参数以及数值精度。
     可选但推荐：
-        - docs/scripts/recompute_ratio_calibration.json，默认由 --calibration
+        - scripts/recompute_ratio_calibration.json，默认由 --calibration
           读取。该文件包含从已有仿真结果拟合得到的 per-layer DDR/SSD 利用率
           和参数化 compute-scale 模型。如果缺少该文件，脚本会退化为纯公式估算，
           结果通常不如带校准时可靠。
@@ -402,8 +402,8 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=Path, default=Path("configs/baseline.json"))
-    parser.add_argument("--calibration", type=Path, default=Path("docs/scripts/recompute_ratio_calibration.json"))
+    parser.add_argument("--config", type=Path, default=Path("configs/910C.json"))
+    parser.add_argument("--calibration", type=Path, default=Path("scripts/recompute_ratio_calibration.json"))
     parser.add_argument("--user", choices=["hot", "cold"], required=True)
     parser.add_argument("--layers", type=int, required=True)
     parser.add_argument("--hidden", type=int, required=True)
