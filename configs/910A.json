@@ -3,12 +3,12 @@
     "name": "910A",
     "target_fp16_tflops": 256.0,
     "target_hbm_bandwidth_GBps": 1228.8,
-    "target_ddr_bandwidth_GBps": 102.4,
+    "target_ddr_bandwidth_GBps": 51.2,
     "target_ssd_read_bandwidth_GBps": 14.0,
     "target_ssd_write_bandwidth_GBps": 7.0,
     "derived_fp16_tflops": 255.983616,
     "derived_hbm_bandwidth_GBps": 1228.8,
-    "derived_ddr_bandwidth_GBps": 102.4,
+    "derived_ddr_bandwidth_GBps": 51.2,
     "derived_ssd_read_bandwidth_GBps": 14.0,
     "derived_ssd_write_bandwidth_GBps": 7.0
   },
@@ -190,7 +190,7 @@
   },
   "ddr": {
     "enabled": true,
-    "freq": 1600,
+    "freq": 800,
     "channels": 16,
     "req_size": 32,
     "nbl": 8,

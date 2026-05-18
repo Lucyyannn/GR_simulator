@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import random
 from collections import Counter
 from pathlib import Path
@@ -404,6 +405,22 @@ def effective_cached_rows_after_item_recompute_action_reuse(
     return remaining_items + action_physical_rows
 
 
+def unreused_action_compute_ratio(kv_reuse_ratio):
+    if kv_reuse_ratio <= 0:
+        return 0.0
+    return max(0.0, 0.5 - clamp_ratio(kv_reuse_ratio))
+
+
+def history_action_compute_rows_after_recompute(history_recompute_len, kv_reuse_ratio):
+    if history_recompute_len <= 0:
+        return 0
+    return int(
+        math.ceil(
+            history_recompute_len * unreused_action_compute_ratio(kv_reuse_ratio)
+        )
+    )
+
+
 def build_item_recompute_action_reuse_mapping(
     kv_len, history_recompute_len, kv_reuse_ratio, reuse_axis=0
 ):
@@ -447,14 +464,17 @@ def recompute_attention_score_elements(
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
         cached_kv_len + history_recompute_len, history_recompute_len, kv_reuse_ratio
     )
+    action_compute_rows = history_action_compute_rows_after_recompute(
+        history_recompute_len, kv_reuse_ratio
+    )
     if history_recompute_len <= 0:
         return batch_size * candidate_tokens * (
             effective_cached_kv_len + candidate_tokens
         )
 
     history_scores = (
-        history_recompute_len * effective_cached_kv_len
-        + history_recompute_len * (history_recompute_len + 1) // 2
+        history_recompute_len * (history_recompute_len + 1) // 2
+        + history_recompute_len * action_compute_rows
     )
     candidate_scores = candidate_tokens * (
         effective_cached_kv_len + history_recompute_len + candidate_tokens
@@ -472,6 +492,9 @@ def split_recompute_attention_score_elements(
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
         cached_kv_len + history_recompute_len, history_recompute_len, kv_reuse_ratio
     )
+    action_compute_rows = history_action_compute_rows_after_recompute(
+        history_recompute_len, kv_reuse_ratio
+    )
     if history_recompute_len <= 0:
         return 0, batch_size * candidate_tokens * (
             effective_cached_kv_len + candidate_tokens
@@ -479,9 +502,10 @@ def split_recompute_attention_score_elements(
 
     early_scores = (
         history_recompute_len * (history_recompute_len + 1) // 2
+        + history_recompute_len * action_compute_rows
         + candidate_tokens * (history_recompute_len + candidate_tokens)
     )
-    cached_scores = (history_recompute_len + candidate_tokens) * effective_cached_kv_len
+    cached_scores = candidate_tokens * effective_cached_kv_len
     return batch_size * early_scores, batch_size * cached_scores
 
 
@@ -495,6 +519,9 @@ def recompute_attention_score_parts(
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
         cached_kv_len + history_recompute_len, history_recompute_len, kv_reuse_ratio
     )
+    action_compute_rows = history_action_compute_rows_after_recompute(
+        history_recompute_len, kv_reuse_ratio
+    )
     return {
         "candidate_self": batch_size * candidate_tokens * candidate_tokens,
         "candidate_cached": batch_size * candidate_tokens * effective_cached_kv_len,
@@ -502,9 +529,13 @@ def recompute_attention_score_parts(
             batch_size * candidate_tokens * history_recompute_len
         ),
         "history_prefix": (
-            batch_size * history_recompute_len * (history_recompute_len + 1) // 2
+            batch_size
+            * (
+                history_recompute_len * (history_recompute_len + 1) // 2
+                + history_recompute_len * action_compute_rows
+            )
         ),
-        "history_cached": batch_size * history_recompute_len * effective_cached_kv_len,
+        "history_cached": 0,
     }
 
 
@@ -614,6 +645,7 @@ def add_attention_part(
     cached_kv_len,
     effective_cached_kv_len,
     layer_meta,
+    history_action_compute_rows=0,
 ):
     add_op(
         ops,
@@ -632,6 +664,7 @@ def add_attention_part(
             "current_tokens": output_shape[-2] if len(output_shape) == 3 else output_shape[0],
             "candidate_tokens": candidate_tokens,
             "history_recompute_len": history_recompute_len,
+            "history_action_compute_rows": history_action_compute_rows,
             "cached_kv_len": cached_kv_len,
             "effective_cached_kv_len": effective_cached_kv_len,
             "mask_mode": part,
@@ -686,6 +719,9 @@ def add_recompute_split_layer_ops(
     batched=False,
     batch_size=1,
 ):
+    history_action_compute_rows = history_action_compute_rows_after_recompute(
+        history_recompute_len, kv_reuse_ratio
+    )
     active_tokens = candidate_tokens + history_recompute_len
     kv_axis = 1 if batched else 0
     candidate_shape = token_shape(candidate_tokens, hidden, batched, batch_size)
@@ -761,6 +797,7 @@ def add_recompute_split_layer_ops(
         0,
         0,
         layer_meta,
+        history_action_compute_rows=history_action_compute_rows,
     )
     candidate_parts.append(candidate_self)
 
@@ -789,6 +826,7 @@ def add_recompute_split_layer_ops(
             cached_kv_len,
             effective_cached_kv_len,
             layer_meta,
+            history_action_compute_rows=history_action_compute_rows,
         )
         candidate_parts.append(candidate_cached)
 
@@ -816,6 +854,7 @@ def add_recompute_split_layer_ops(
         0,
         0,
         layer_meta,
+        history_action_compute_rows=history_action_compute_rows,
     )
     candidate_parts.append(candidate_history)
 
@@ -844,10 +883,11 @@ def add_recompute_split_layer_ops(
         0,
         0,
         layer_meta,
+        history_action_compute_rows=history_action_compute_rows,
     )
     history_parts.append(history_prefix)
 
-    if cached_kv_len > 0:
+    if cached_kv_len > 0 and score_parts["history_cached"] > 0:
         history_cached = f"{prefix}.av_history_cached"
         add_attention_part(
             ops,
@@ -872,6 +912,7 @@ def add_recompute_split_layer_ops(
             cached_kv_len,
             effective_cached_kv_len,
             layer_meta,
+            history_action_compute_rows=history_action_compute_rows,
         )
         history_parts.append(history_cached)
 
@@ -1018,8 +1059,11 @@ def build_trace(
         raise ValueError("history_recompute_len must be in [0, kv_len]")
     candidate_tokens = tokens
     cached_kv_len = kv_len - history_recompute_len
-    active_tokens = history_recompute_len + candidate_tokens
     kv_reuse_ratio = clamp_ratio(kv_reuse_ratio if kv_reuse_enabled else 0.0)
+    history_action_compute_rows = history_action_compute_rows_after_recompute(
+        history_recompute_len, kv_reuse_ratio
+    )
+    active_tokens = history_recompute_len + candidate_tokens
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
         kv_len, history_recompute_len, kv_reuse_ratio
     )
@@ -1278,6 +1322,7 @@ def build_trace(
                         "current_tokens": active_tokens,
                         "candidate_tokens": candidate_tokens,
                         "history_recompute_len": history_recompute_len,
+                        "history_action_compute_rows": history_action_compute_rows,
                         "cached_kv_len": 0,
                         "effective_cached_kv_len": 0,
                         "mask_mode": "recompute_prefix_early",
@@ -1324,6 +1369,7 @@ def build_trace(
                             "current_tokens": active_tokens,
                             "candidate_tokens": candidate_tokens,
                             "history_recompute_len": history_recompute_len,
+                            "history_action_compute_rows": history_action_compute_rows,
                             "cached_kv_len": cached_kv_len,
                             "effective_cached_kv_len": effective_cached_kv_len,
                             "mask_mode": "cached_kv_late",
@@ -1378,6 +1424,7 @@ def build_trace(
                         "current_tokens": active_tokens,
                         "candidate_tokens": candidate_tokens,
                         "history_recompute_len": history_recompute_len,
+                        "history_action_compute_rows": history_action_compute_rows,
                         "cached_kv_len": cached_kv_len,
                         "effective_cached_kv_len": effective_cached_kv_len,
                         "mask_mode": attention_mask_mode(history_recompute_len),
@@ -1555,6 +1602,8 @@ def build_trace(
             "kv_reuse_ratio": kv_reuse_ratio,
             "candidate_tokens": candidate_tokens,
             "history_recompute_len": history_recompute_len,
+            "history_action_compute_rows": history_action_compute_rows,
+            "unreused_action_compute_ratio": unreused_action_compute_ratio(kv_reuse_ratio),
             "cached_kv_len": cached_kv_len,
             "effective_cached_kv_len": effective_cached_kv_len,
             "active_tokens": active_tokens,
@@ -1613,8 +1662,11 @@ def build_batched_trace(
         raise ValueError("history_recompute_len must be in [0, kv_len]")
     candidate_tokens = tokens
     cached_kv_len = kv_len - history_recompute_len
-    active_tokens = history_recompute_len + candidate_tokens
     kv_reuse_ratio = clamp_ratio(kv_reuse_ratio if kv_reuse_enabled else 0.0)
+    history_action_compute_rows = history_action_compute_rows_after_recompute(
+        history_recompute_len, kv_reuse_ratio
+    )
+    active_tokens = history_recompute_len + candidate_tokens
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
         kv_len, history_recompute_len, kv_reuse_ratio
     )
@@ -1997,6 +2049,7 @@ def build_batched_trace(
                         "current_tokens": active_tokens,
                         "candidate_tokens": candidate_tokens,
                         "history_recompute_len": history_recompute_len,
+                        "history_action_compute_rows": history_action_compute_rows,
                         "cached_kv_len": 0,
                         "effective_cached_kv_len": 0,
                         "mask_mode": "recompute_prefix_early",
@@ -2045,6 +2098,7 @@ def build_batched_trace(
                             "current_tokens": active_tokens,
                             "candidate_tokens": candidate_tokens,
                             "history_recompute_len": history_recompute_len,
+                            "history_action_compute_rows": history_action_compute_rows,
                             "cached_kv_len": cached_kv_len,
                             "effective_cached_kv_len": effective_cached_kv_len,
                             "mask_mode": "cached_kv_late",
@@ -2101,6 +2155,7 @@ def build_batched_trace(
                         "current_tokens": active_tokens,
                         "candidate_tokens": candidate_tokens,
                         "history_recompute_len": history_recompute_len,
+                        "history_action_compute_rows": history_action_compute_rows,
                         "cached_kv_len": cached_kv_len,
                         "effective_cached_kv_len": effective_cached_kv_len,
                         "mask_mode": attention_mask_mode(history_recompute_len),
@@ -2343,6 +2398,8 @@ def build_batched_trace(
             "kv_reuse_ratio": kv_reuse_ratio,
             "candidate_tokens": candidate_tokens,
             "history_recompute_len": history_recompute_len,
+            "history_action_compute_rows": history_action_compute_rows,
+            "unreused_action_compute_ratio": unreused_action_compute_ratio(kv_reuse_ratio),
             "cached_kv_len": cached_kv_len,
             "effective_cached_kv_len": effective_cached_kv_len,
             "active_tokens": active_tokens,
@@ -2398,9 +2455,11 @@ def history_recompute_indices(length, vocab, mode, rng, stream_base=0):
 
 def write_single_trace(args, op_modeling):
     rng = random.Random(args.seed)
-    active_tokens = args.tokens + args.history_recompute_len
     history_indices = history_recompute_indices(
-        args.history_recompute_len, args.vocab, args.history_recompute_index_mode, rng
+        args.history_recompute_len,
+        args.vocab,
+        args.history_recompute_index_mode,
+        rng,
     )
     candidate_indices = [rng.randrange(args.vocab) for _ in range(args.tokens)]
     indices = candidate_indices + history_indices
@@ -2548,6 +2607,10 @@ def write_pipeline_traces(args, op_modeling):
                 "embedding_source_medium": args.embedding_source_medium,
                 "history_recompute_source_medium": args.history_recompute_source_medium,
                 "history_recompute_len": args.history_recompute_len,
+                "history_action_compute_rows": history_action_compute_rows_after_recompute(
+                    args.history_recompute_len,
+                    args.kv_reuse_ratio if args.enable_kv_reuse else 0.0,
+                ),
                 "history_recompute_index_mode": args.history_recompute_index_mode,
                 "attention_mask_mode": attention_mask_mode(args.history_recompute_len),
             },
@@ -2570,8 +2633,8 @@ def main():
         type=int,
         default=0,
         help=(
-            "Number of tail history rows recomputed from embedding instead of "
-            "loaded from KV cache. 0 preserves baseline."
+            "Number of history item rows recomputed from embedding instead "
+            "of loaded from KV cache. 0 preserves baseline."
         ),
     )
     parser.add_argument(
