@@ -19,7 +19,7 @@ Options:
   --layers N                   HSTU layer count
   --hidden N                   Hidden dimension
   --kv-len N                   Historical KV length
-  --history-recompute-len N     Tail history rows recomputed from embedding instead of KV cache. Default: 0
+  --history-recompute-len N     History item rows recomputed from embedding instead of KV cache. Default: 0
   --history-recompute-index-mode MODE  Recomputed history index mode: stream or random. Default: stream
   --num-users N                Number of users in the generated workload
   --users-per-batch N          Users per batch

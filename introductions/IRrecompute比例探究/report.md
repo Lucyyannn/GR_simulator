@@ -1,6 +1,6 @@
 # report
 
-配置：HSTU-small，cold user，embedding 初始在 SSD，KV Cache 初始在 SSD，开启 KV Reuse，reuse_ratio=0.4791，只对 item 做 recompute。
+配置：HSTU-small，cold user，embedding 初始在 SSD，KV Cache 初始在 SSD，开启 KV Reuse，reuse_ratio=0.4360，只对 item 做 recompute。
 
 估算结果：
 - stream: recompute_ratio=68.7012% (history_recompute_len=1407), 

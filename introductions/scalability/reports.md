@@ -1,7 +1,7 @@
 # task4 扩展性实验报告
 
 配置：HSTU-small，kv_len=4096，candidates=128，batch_size=1，embedding 初始在 SSD，weights 在 HBM。
-KV Reuse ratio=0.4791；Recompute 在 hot/cold 间复用同一组物理结果。
+KV Reuse ratio=0.4360；Recompute 在 hot/cold 间复用同一组物理结果。
 
 ## 1. 910A/910B 配置对比
 
