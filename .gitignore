@@ -14,5 +14,4 @@ detail.csv
 *.log
 build/
 __pycache__
-*.xlsx
 IR_Recompute.md

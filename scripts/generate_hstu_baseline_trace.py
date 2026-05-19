@@ -405,20 +405,46 @@ def effective_cached_rows_after_item_recompute_action_reuse(
     return remaining_items + action_physical_rows
 
 
-def unreused_action_compute_ratio(kv_reuse_ratio):
-    # Recomputed items are selected from the history prefix. Under causal
-    # masking, their Q rows cannot attend later action rows, so AR-unreused
-    # action rows do not add history-recompute attention work.
-    return 0.0
-
-
-def history_action_compute_rows_after_recompute(history_recompute_len, kv_reuse_ratio):
+def prefix_action_rows_after_recompute(kv_len, history_recompute_len, kv_reuse_ratio):
     if history_recompute_len <= 0:
         return 0
-    return int(
-        math.ceil(
-            history_recompute_len * unreused_action_compute_ratio(kv_reuse_ratio)
-        )
+    action_count = kv_len // 2
+    if action_count <= 0:
+        return 0
+    prefix_action_rows = min(history_recompute_len, action_count)
+    if kv_reuse_ratio <= 0:
+        return prefix_action_rows
+
+    action_ratio = action_reuse_ratio_from_total(
+        kv_len, action_count, kv_reuse_ratio
+    )
+    retained_action_rows = compressed_rows_for_ratio(action_count, action_ratio)
+    # The unreused/retained action rows are modeled as concentrated near the
+    # beginning of the history, so the recomputed item prefix sees them first.
+    return min(prefix_action_rows, retained_action_rows)
+
+
+def prefix_item_to_action_causal_score_elements(
+    history_recompute_len, prefix_action_rows
+):
+    if history_recompute_len <= 0 or prefix_action_rows <= 0:
+        return 0
+    action_rows = min(history_recompute_len, prefix_action_rows)
+    # Recomputed history rows are item rows. With interleaved item/action
+    # history, item i attends the earlier retained action rows. Retained action
+    # rows are assumed to occupy the earliest action slots.
+    return action_rows * (action_rows + 1) // 2 + (
+        history_recompute_len - action_rows
+    ) * action_rows
+
+
+def history_action_compute_rows_after_recompute(
+    history_recompute_len, kv_reuse_ratio, kv_len=None
+):
+    if history_recompute_len <= 0 or kv_len is None:
+        return 0
+    return prefix_action_rows_after_recompute(
+        kv_len, history_recompute_len, kv_reuse_ratio
     )
 
 
@@ -470,7 +496,16 @@ def recompute_attention_score_elements(
             effective_cached_kv_len + candidate_tokens
         )
 
-    history_scores = history_recompute_len * (history_recompute_len + 1) // 2
+    total_kv_len = cached_kv_len + history_recompute_len
+    prefix_action_rows = prefix_action_rows_after_recompute(
+        total_kv_len, history_recompute_len, kv_reuse_ratio
+    )
+    history_scores = (
+        history_recompute_len * (history_recompute_len + 1) // 2
+        + prefix_item_to_action_causal_score_elements(
+            history_recompute_len, prefix_action_rows
+        )
+    )
     candidate_scores = candidate_tokens * (
         effective_cached_kv_len + history_recompute_len + candidate_tokens
     )
@@ -492,8 +527,15 @@ def split_recompute_attention_score_elements(
             effective_cached_kv_len + candidate_tokens
         )
 
+    total_kv_len = cached_kv_len + history_recompute_len
+    prefix_action_rows = prefix_action_rows_after_recompute(
+        total_kv_len, history_recompute_len, kv_reuse_ratio
+    )
     early_scores = (
         history_recompute_len * (history_recompute_len + 1) // 2
+        + prefix_item_to_action_causal_score_elements(
+            history_recompute_len, prefix_action_rows
+        )
         + candidate_tokens * (history_recompute_len + candidate_tokens)
     )
     cached_scores = candidate_tokens * effective_cached_kv_len
@@ -510,15 +552,23 @@ def recompute_attention_score_parts(
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
         cached_kv_len + history_recompute_len, history_recompute_len, kv_reuse_ratio
     )
+    total_kv_len = cached_kv_len + history_recompute_len
+    prefix_action_rows = prefix_action_rows_after_recompute(
+        total_kv_len, history_recompute_len, kv_reuse_ratio
+    )
+    history_prefix_scores = (
+        history_recompute_len * (history_recompute_len + 1) // 2
+        + prefix_item_to_action_causal_score_elements(
+            history_recompute_len, prefix_action_rows
+        )
+    )
     return {
         "candidate_self": batch_size * candidate_tokens * candidate_tokens,
         "candidate_cached": batch_size * candidate_tokens * effective_cached_kv_len,
         "candidate_recompute_history": (
             batch_size * candidate_tokens * history_recompute_len
         ),
-        "history_prefix": (
-            batch_size * history_recompute_len * (history_recompute_len + 1) // 2
-        ),
+        "history_prefix": batch_size * history_prefix_scores,
         "history_cached": 0,
     }
 
@@ -704,7 +754,7 @@ def add_recompute_split_layer_ops(
     batch_size=1,
 ):
     history_action_compute_rows = history_action_compute_rows_after_recompute(
-        history_recompute_len, kv_reuse_ratio
+        history_recompute_len, kv_reuse_ratio, cached_kv_len + history_recompute_len
     )
     active_tokens = candidate_tokens + history_recompute_len
     kv_axis = 1 if batched else 0
@@ -1050,7 +1100,7 @@ def build_trace(
         kv_reuse_ratio if ar_reduce_attention_compute else 0.0
     )
     history_action_compute_rows = history_action_compute_rows_after_recompute(
-        history_recompute_len, attention_kv_reuse_ratio
+        history_recompute_len, attention_kv_reuse_ratio, kv_len
     )
     active_tokens = history_recompute_len + candidate_tokens
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
@@ -1608,7 +1658,11 @@ def build_trace(
             "candidate_tokens": candidate_tokens,
             "history_recompute_len": history_recompute_len,
             "history_action_compute_rows": history_action_compute_rows,
-            "unreused_action_compute_ratio": unreused_action_compute_ratio(attention_kv_reuse_ratio),
+            "unreused_action_compute_ratio": (
+                history_action_compute_rows / history_recompute_len
+                if history_recompute_len > 0
+                else 0.0
+            ),
             "cached_kv_len": cached_kv_len,
             "effective_cached_kv_len": effective_cached_kv_len,
             "attention_effective_cached_kv_len": attention_effective_cached_kv_len,
@@ -1675,7 +1729,7 @@ def build_batched_trace(
         kv_reuse_ratio if ar_reduce_attention_compute else 0.0
     )
     history_action_compute_rows = history_action_compute_rows_after_recompute(
-        history_recompute_len, attention_kv_reuse_ratio
+        history_recompute_len, attention_kv_reuse_ratio, kv_len
     )
     active_tokens = history_recompute_len + candidate_tokens
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
@@ -2426,7 +2480,11 @@ def build_batched_trace(
             "candidate_tokens": candidate_tokens,
             "history_recompute_len": history_recompute_len,
             "history_action_compute_rows": history_action_compute_rows,
-            "unreused_action_compute_ratio": unreused_action_compute_ratio(attention_kv_reuse_ratio),
+            "unreused_action_compute_ratio": (
+                history_action_compute_rows / history_recompute_len
+                if history_recompute_len > 0
+                else 0.0
+            ),
             "cached_kv_len": cached_kv_len,
             "effective_cached_kv_len": effective_cached_kv_len,
             "attention_effective_cached_kv_len": attention_effective_cached_kv_len,
@@ -2644,6 +2702,7 @@ def write_pipeline_traces(args, op_modeling):
                     args.kv_reuse_ratio
                     if args.enable_kv_reuse and args.ar_reduce_attention_compute
                     else 0.0,
+                    args.kv_len,
                 ),
                 "history_recompute_index_mode": args.history_recompute_index_mode,
                 "attention_partial_start_enabled": args.attention_partial_start_enabled,
