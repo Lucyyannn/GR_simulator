@@ -406,9 +406,10 @@ def effective_cached_rows_after_item_recompute_action_reuse(
 
 
 def unreused_action_compute_ratio(kv_reuse_ratio):
-    if kv_reuse_ratio <= 0:
-        return 0.0
-    return max(0.0, 0.5 - clamp_ratio(kv_reuse_ratio))
+    # Recomputed items are selected from the history prefix. Under causal
+    # masking, their Q rows cannot attend later action rows, so AR-unreused
+    # action rows do not add history-recompute attention work.
+    return 0.0
 
 
 def history_action_compute_rows_after_recompute(history_recompute_len, kv_reuse_ratio):
@@ -464,18 +465,12 @@ def recompute_attention_score_elements(
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
         cached_kv_len + history_recompute_len, history_recompute_len, kv_reuse_ratio
     )
-    action_compute_rows = history_action_compute_rows_after_recompute(
-        history_recompute_len, kv_reuse_ratio
-    )
     if history_recompute_len <= 0:
         return batch_size * candidate_tokens * (
             effective_cached_kv_len + candidate_tokens
         )
 
-    history_scores = (
-        history_recompute_len * (history_recompute_len + 1) // 2
-        + history_recompute_len * action_compute_rows
-    )
+    history_scores = history_recompute_len * (history_recompute_len + 1) // 2
     candidate_scores = candidate_tokens * (
         effective_cached_kv_len + history_recompute_len + candidate_tokens
     )
@@ -492,9 +487,6 @@ def split_recompute_attention_score_elements(
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
         cached_kv_len + history_recompute_len, history_recompute_len, kv_reuse_ratio
     )
-    action_compute_rows = history_action_compute_rows_after_recompute(
-        history_recompute_len, kv_reuse_ratio
-    )
     if history_recompute_len <= 0:
         return 0, batch_size * candidate_tokens * (
             effective_cached_kv_len + candidate_tokens
@@ -502,7 +494,6 @@ def split_recompute_attention_score_elements(
 
     early_scores = (
         history_recompute_len * (history_recompute_len + 1) // 2
-        + history_recompute_len * action_compute_rows
         + candidate_tokens * (history_recompute_len + candidate_tokens)
     )
     cached_scores = candidate_tokens * effective_cached_kv_len
@@ -519,9 +510,6 @@ def recompute_attention_score_parts(
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
         cached_kv_len + history_recompute_len, history_recompute_len, kv_reuse_ratio
     )
-    action_compute_rows = history_action_compute_rows_after_recompute(
-        history_recompute_len, kv_reuse_ratio
-    )
     return {
         "candidate_self": batch_size * candidate_tokens * candidate_tokens,
         "candidate_cached": batch_size * candidate_tokens * effective_cached_kv_len,
@@ -529,11 +517,7 @@ def recompute_attention_score_parts(
             batch_size * candidate_tokens * history_recompute_len
         ),
         "history_prefix": (
-            batch_size
-            * (
-                history_recompute_len * (history_recompute_len + 1) // 2
-                + history_recompute_len * action_compute_rows
-            )
+            batch_size * history_recompute_len * (history_recompute_len + 1) // 2
         ),
         "history_cached": 0,
     }
@@ -1038,6 +1022,8 @@ def build_trace(
     history_recompute_source_medium=None,
     seed=0,
     history_recompute_len=0,
+    attention_partial_start_enabled=True,
+    ar_reduce_attention_compute=True,
 ):
     op_modeling = op_modeling or {}
     if source_medium not in {"ddr", "ssd"}:
@@ -1060,19 +1046,27 @@ def build_trace(
     candidate_tokens = tokens
     cached_kv_len = kv_len - history_recompute_len
     kv_reuse_ratio = clamp_ratio(kv_reuse_ratio if kv_reuse_enabled else 0.0)
+    attention_kv_reuse_ratio = (
+        kv_reuse_ratio if ar_reduce_attention_compute else 0.0
+    )
     history_action_compute_rows = history_action_compute_rows_after_recompute(
-        history_recompute_len, kv_reuse_ratio
+        history_recompute_len, attention_kv_reuse_ratio
     )
     active_tokens = history_recompute_len + candidate_tokens
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
         kv_len, history_recompute_len, kv_reuse_ratio
+    )
+    attention_effective_cached_kv_len = (
+        effective_cached_rows_after_item_recompute_action_reuse(
+            kv_len, history_recompute_len, attention_kv_reuse_ratio
+        )
     )
     score_elements = recompute_attention_score_elements(
         1,
         cached_kv_len,
         history_recompute_len,
         candidate_tokens,
-        kv_reuse_ratio,
+        attention_kv_reuse_ratio,
     )
     reuse_rng = random.Random(seed + user_id * 1000003 + batch_id * 9176 + macro_batch_id)
     ops = []
@@ -1127,6 +1121,7 @@ def build_trace(
             layer == 0
             and attention_modeling == "fused"
             and history_recompute_len > 0
+            and attention_partial_start_enabled
         ):
             candidate_input = source_to_hbm_tensor(
                 embedding_source_medium,
@@ -1184,8 +1179,8 @@ def build_trace(
                 candidate_tokens,
                 history_recompute_len,
                 cached_kv_len,
-                effective_cached_kv_len,
-                kv_reuse_ratio,
+                attention_effective_cached_kv_len,
+                attention_kv_reuse_ratio,
                 hidden,
                 source_medium,
                 layer_meta,
@@ -1299,11 +1294,19 @@ def build_trace(
                     cached_kv_len,
                     history_recompute_len,
                     candidate_tokens,
-                    kv_reuse_ratio,
+                    attention_kv_reuse_ratio,
                 )
             )
-            split_attention = history_recompute_len > 0 and cached_score_elements > 0
-            if split_attention or (history_recompute_len > 0 and cached_kv_len == 0):
+            split_attention = (
+                attention_partial_start_enabled
+                and history_recompute_len > 0
+                and cached_score_elements > 0
+            )
+            if split_attention or (
+                attention_partial_start_enabled
+                and history_recompute_len > 0
+                and cached_kv_len == 0
+            ):
                 early_av = av if not split_attention else f"{prefix}.av_recompute"
                 add_op(
                     ops,
@@ -1365,13 +1368,13 @@ def build_trace(
                         [hbm_tensor(cached_av, [active_tokens, hidden], role="activation", **layer_meta)],
                         {
                             "kv_axis": 0,
-                            "logical_kv_len": effective_cached_kv_len,
+                            "logical_kv_len": attention_effective_cached_kv_len,
                             "current_tokens": active_tokens,
                             "candidate_tokens": candidate_tokens,
                             "history_recompute_len": history_recompute_len,
                             "history_action_compute_rows": history_action_compute_rows,
                             "cached_kv_len": cached_kv_len,
-                            "effective_cached_kv_len": effective_cached_kv_len,
+                            "effective_cached_kv_len": attention_effective_cached_kv_len,
                             "mask_mode": "cached_kv_late",
                             "attention_score_elements": cached_score_elements,
                             "hidden": hidden,
@@ -1426,7 +1429,7 @@ def build_trace(
                         "history_recompute_len": history_recompute_len,
                         "history_action_compute_rows": history_action_compute_rows,
                         "cached_kv_len": cached_kv_len,
-                        "effective_cached_kv_len": effective_cached_kv_len,
+                        "effective_cached_kv_len": attention_effective_cached_kv_len,
                         "mask_mode": attention_mask_mode(history_recompute_len),
                         "attention_score_elements": score_elements,
                         "hidden": hidden,
@@ -1600,12 +1603,15 @@ def build_trace(
             "kv_reuse_action_offset": kv_reuse_action_offset,
             "kv_reuse_action_stride": kv_reuse_action_stride,
             "kv_reuse_ratio": kv_reuse_ratio,
+            "attention_partial_start_enabled": attention_partial_start_enabled,
+            "ar_reduce_attention_compute": ar_reduce_attention_compute,
             "candidate_tokens": candidate_tokens,
             "history_recompute_len": history_recompute_len,
             "history_action_compute_rows": history_action_compute_rows,
-            "unreused_action_compute_ratio": unreused_action_compute_ratio(kv_reuse_ratio),
+            "unreused_action_compute_ratio": unreused_action_compute_ratio(attention_kv_reuse_ratio),
             "cached_kv_len": cached_kv_len,
             "effective_cached_kv_len": effective_cached_kv_len,
+            "attention_effective_cached_kv_len": attention_effective_cached_kv_len,
             "active_tokens": active_tokens,
             "attention_mask_mode": attention_mask_mode(history_recompute_len),
         },
@@ -1641,6 +1647,8 @@ def build_batched_trace(
     history_recompute_source_medium=None,
     seed=0,
     history_recompute_len=0,
+    attention_partial_start_enabled=True,
+    ar_reduce_attention_compute=True,
 ):
     op_modeling = op_modeling or {}
     if source_medium not in {"ddr", "ssd"}:
@@ -1663,12 +1671,20 @@ def build_batched_trace(
     candidate_tokens = tokens
     cached_kv_len = kv_len - history_recompute_len
     kv_reuse_ratio = clamp_ratio(kv_reuse_ratio if kv_reuse_enabled else 0.0)
+    attention_kv_reuse_ratio = (
+        kv_reuse_ratio if ar_reduce_attention_compute else 0.0
+    )
     history_action_compute_rows = history_action_compute_rows_after_recompute(
-        history_recompute_len, kv_reuse_ratio
+        history_recompute_len, attention_kv_reuse_ratio
     )
     active_tokens = history_recompute_len + candidate_tokens
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
         kv_len, history_recompute_len, kv_reuse_ratio
+    )
+    attention_effective_cached_kv_len = (
+        effective_cached_rows_after_item_recompute_action_reuse(
+            kv_len, history_recompute_len, attention_kv_reuse_ratio
+        )
     )
 
     batch_size = len(user_ids)
@@ -1803,6 +1819,7 @@ def build_batched_trace(
             layer == 0
             and attention_modeling == "fused"
             and history_recompute_len > 0
+            and attention_partial_start_enabled
         ):
             candidate_indices_per_user = [
                 row[:candidate_tokens] for row in indices_values_per_user
@@ -1878,8 +1895,8 @@ def build_batched_trace(
                 candidate_tokens,
                 history_recompute_len,
                 cached_kv_len,
-                effective_cached_kv_len,
-                kv_reuse_ratio,
+                attention_effective_cached_kv_len,
+                attention_kv_reuse_ratio,
                 hidden,
                 source_medium,
                 layer_meta,
@@ -2026,11 +2043,19 @@ def build_batched_trace(
                     cached_kv_len,
                     history_recompute_len,
                     candidate_tokens,
-                    kv_reuse_ratio,
+                    attention_kv_reuse_ratio,
                 )
             )
-            split_attention = history_recompute_len > 0 and cached_score_elements > 0
-            if split_attention or (history_recompute_len > 0 and cached_kv_len == 0):
+            split_attention = (
+                attention_partial_start_enabled
+                and history_recompute_len > 0
+                and cached_score_elements > 0
+            )
+            if split_attention or (
+                attention_partial_start_enabled
+                and history_recompute_len > 0
+                and cached_kv_len == 0
+            ):
                 early_av = av if not split_attention else f"{prefix}.av_recompute"
                 add_op(
                     ops,
@@ -2094,13 +2119,13 @@ def build_batched_trace(
                         [hbm_tensor(cached_av, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
                         {
                             "kv_axis": 1,
-                            "logical_kv_len": effective_cached_kv_len,
+                            "logical_kv_len": attention_effective_cached_kv_len,
                             "current_tokens": active_tokens,
                             "candidate_tokens": candidate_tokens,
                             "history_recompute_len": history_recompute_len,
                             "history_action_compute_rows": history_action_compute_rows,
                             "cached_kv_len": cached_kv_len,
-                            "effective_cached_kv_len": effective_cached_kv_len,
+                            "effective_cached_kv_len": attention_effective_cached_kv_len,
                             "mask_mode": "cached_kv_late",
                             "attention_score_elements": cached_score_elements,
                             "hidden": hidden,
@@ -2157,14 +2182,14 @@ def build_batched_trace(
                         "history_recompute_len": history_recompute_len,
                         "history_action_compute_rows": history_action_compute_rows,
                         "cached_kv_len": cached_kv_len,
-                        "effective_cached_kv_len": effective_cached_kv_len,
+                        "effective_cached_kv_len": attention_effective_cached_kv_len,
                         "mask_mode": attention_mask_mode(history_recompute_len),
                         "attention_score_elements": recompute_attention_score_elements(
                             batch_size,
                             cached_kv_len,
                             history_recompute_len,
                             candidate_tokens,
-                            kv_reuse_ratio,
+                            attention_kv_reuse_ratio,
                         ),
                         "hidden": hidden,
                         "batch_size": batch_size,
@@ -2396,12 +2421,15 @@ def build_batched_trace(
             "kv_reuse_action_offset": kv_reuse_action_offset,
             "kv_reuse_action_stride": kv_reuse_action_stride,
             "kv_reuse_ratio": kv_reuse_ratio,
+            "attention_partial_start_enabled": attention_partial_start_enabled,
+            "ar_reduce_attention_compute": ar_reduce_attention_compute,
             "candidate_tokens": candidate_tokens,
             "history_recompute_len": history_recompute_len,
             "history_action_compute_rows": history_action_compute_rows,
-            "unreused_action_compute_ratio": unreused_action_compute_ratio(kv_reuse_ratio),
+            "unreused_action_compute_ratio": unreused_action_compute_ratio(attention_kv_reuse_ratio),
             "cached_kv_len": cached_kv_len,
             "effective_cached_kv_len": effective_cached_kv_len,
+            "attention_effective_cached_kv_len": attention_effective_cached_kv_len,
             "active_tokens": active_tokens,
             "attention_mask_mode": attention_mask_mode(history_recompute_len),
         },
@@ -2488,6 +2516,8 @@ def write_single_trace(args, op_modeling):
         history_recompute_source_medium=args.history_recompute_source_medium,
         seed=args.seed,
         history_recompute_len=args.history_recompute_len,
+        attention_partial_start_enabled=args.attention_partial_start_enabled,
+        ar_reduce_attention_compute=args.ar_reduce_attention_compute,
     )
     output = Path(args.output)
     write_json(output, trace, compact=args.compact_json)
@@ -2558,6 +2588,8 @@ def write_pipeline_traces(args, op_modeling):
                 history_recompute_source_medium=args.history_recompute_source_medium,
                 seed=args.seed,
                 history_recompute_len=args.history_recompute_len,
+                attention_partial_start_enabled=args.attention_partial_start_enabled,
+                ar_reduce_attention_compute=args.ar_reduce_attention_compute,
             )
             trace_path = output_dir / f"{model_name}.json"
             write_json(trace_path, trace, compact=args.compact_json)
@@ -2609,9 +2641,13 @@ def write_pipeline_traces(args, op_modeling):
                 "history_recompute_len": args.history_recompute_len,
                 "history_action_compute_rows": history_action_compute_rows_after_recompute(
                     args.history_recompute_len,
-                    args.kv_reuse_ratio if args.enable_kv_reuse else 0.0,
+                    args.kv_reuse_ratio
+                    if args.enable_kv_reuse and args.ar_reduce_attention_compute
+                    else 0.0,
                 ),
                 "history_recompute_index_mode": args.history_recompute_index_mode,
+                "attention_partial_start_enabled": args.attention_partial_start_enabled,
+                "ar_reduce_attention_compute": args.ar_reduce_attention_compute,
                 "attention_mask_mode": attention_mask_mode(args.history_recompute_len),
             },
             "models": models,
@@ -2767,6 +2803,22 @@ def main():
         choices=["decomposed", "fused"],
         default="fused",
         help="Use decomposed HSTU attention subgraph or one reuse-aware fused attention op.",
+    )
+    parser.add_argument(
+        "--disable-attention-partial-start",
+        dest="attention_partial_start_enabled",
+        action="store_false",
+        help="Disable out-of-order fused attention start on partial inputs.",
+    )
+    parser.add_argument(
+        "--disable-ar-reduce-attention-compute",
+        dest="ar_reduce_attention_compute",
+        action="store_false",
+        help="Keep AR data movement but charge full unreduced attention compute.",
+    )
+    parser.set_defaults(
+        attention_partial_start_enabled=True,
+        ar_reduce_attention_compute=True,
     )
     args = parser.parse_args()
     if args.embedding_source_medium is None:

@@ -58,6 +58,7 @@ by calibration.
     每组实验通常通过 CLI 修改的输入：
         --user hot|cold、--layers、--hidden、--kv-len、--batch-size、
         --candidates、--enable-kv-reuse、--kv-reuse-ratio、
+        --no-kv-reuse-reduce-npu、
         --embedding-source、--objective。
 """
 
@@ -267,9 +268,10 @@ def effective_cached_rows_after_item_recompute_action_reuse(
 
 
 def unreused_action_compute_ratio(kv_reuse_ratio: float) -> float:
-    if kv_reuse_ratio <= 0:
-        return 0.0
-    return max(0.0, 0.5 - clamp(kv_reuse_ratio, 0.0, 1.0))
+    # Recomputed items are selected from the history prefix. Under causal
+    # masking, their Q rows cannot attend later action rows, so AR-unreused
+    # action rows do not add history-recompute attention work.
+    return 0.0
 
 
 def history_action_compute_rows_after_recompute(
@@ -296,9 +298,6 @@ def split_recompute_attention_score_elements(
         history_recompute_len,
         kv_reuse_ratio,
     )
-    action_compute_rows = history_action_compute_rows_after_recompute(
-        history_recompute_len, kv_reuse_ratio
-    )
     if history_recompute_len <= 0:
         return (
             candidate_tokens * candidate_tokens,
@@ -307,7 +306,6 @@ def split_recompute_attention_score_elements(
 
     early_scores = (
         history_recompute_len * (history_recompute_len + 1) // 2
-        + history_recompute_len * action_compute_rows
         + candidate_tokens * (history_recompute_len + candidate_tokens)
     )
     cached_scores = candidate_tokens * effective_cached_kv_len
@@ -1013,23 +1011,33 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
         recompute_compute_scale = full_compute_scale * float(applied_context["recompute_compute_scale_mult"])
         pre_cached_compute_scale = recompute_compute_scale * float(applied_context["pre_cached_compute_scale_mult"])
         reuse_ratio = args.kv_reuse_ratio if args.enable_kv_reuse else 0.0
+        compute_reuse_ratio = (
+            reuse_ratio
+            if args.enable_kv_reuse and args.kv_reuse_reduce_npu
+            else 0.0
+        )
         remaining_items, remaining_actions = item_action_cached_rows_after_recompute(args.kv_len, k)
         action_reuse_ratio = action_reuse_ratio_from_total(args.kv_len, action_count, reuse_ratio)
         effective_action_rows = compressed_rows_for_ratio(remaining_actions, action_reuse_ratio)
         effective_cached_rows = effective_cached_rows_after_item_recompute_action_reuse(args.kv_len, k, reuse_ratio)
+        compute_action_reuse_ratio = action_reuse_ratio_from_total(args.kv_len, action_count, compute_reuse_ratio)
+        compute_effective_action_rows = compressed_rows_for_ratio(remaining_actions, compute_action_reuse_ratio)
+        compute_effective_cached_rows = effective_cached_rows_after_item_recompute_action_reuse(args.kv_len, k, compute_reuse_ratio)
         cached_kv_len = max(0, args.kv_len - k)
         action_compute_ratio = (
-            unreused_action_compute_ratio(reuse_ratio) if args.enable_kv_reuse else 0.0
+            unreused_action_compute_ratio(compute_reuse_ratio)
+            if args.enable_kv_reuse and args.kv_reuse_reduce_npu
+            else 0.0
         )
         history_action_compute_rows = history_action_compute_rows_after_recompute(
-            k, reuse_ratio
+            k, compute_reuse_ratio
         )
         active_tokens = C + k
         early_scores, cached_scores = split_recompute_attention_score_elements(
             cached_kv_len,
             k,
             C,
-            reuse_ratio,
+            compute_reuse_ratio,
         )
         Temb = batch * k * H * s / Bemb
         remaining_kv_rows = batch * effective_cached_rows
@@ -1174,7 +1182,11 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             "remaining_action_rows": remaining_actions * batch,
             "effective_action_rows": effective_action_rows * batch,
             "effective_cached_rows": effective_cached_rows * batch,
+            "compute_effective_action_rows": compute_effective_action_rows * batch,
+            "compute_effective_cached_rows": compute_effective_cached_rows * batch,
             "action_reuse_ratio": action_reuse_ratio,
+            "compute_action_reuse_ratio": compute_action_reuse_ratio,
+            "kv_reuse_reduce_npu": 1 if args.kv_reuse_reduce_npu else 0,
             "history_action_compute_rows": history_action_compute_rows * batch,
             "unreused_action_compute_ratio": action_compute_ratio,
             "active_tokens": active_tokens,
@@ -1284,7 +1296,13 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
     allow_baseline_regression = bool(getattr(args, "allow_baseline_regression", False)) or bool(
         getattr(args, "allow_negative_ir", False)
     )
-    min_gain = float(getattr(args, "min_ir_gain", 0.05))
+    configured_min_gain = getattr(args, "min_ir_gain", None)
+    if configured_min_gain is None:
+        model = calibration.get("ir_cost_model", {})
+        configured_min_gain = (
+            model.get("min_ir_gain", 0.05) if isinstance(model, dict) else 0.05
+        )
+    min_gain = float(configured_min_gain)
     baseline_proxy_us = float(zero_candidate["latency_proxy_us"])
     baseline_limit_us = baseline_proxy_us * (1.0 - min_gain)
 
@@ -1336,6 +1354,19 @@ def main() -> None:
     parser.add_argument("--candidates", type=int, default=128)
     parser.add_argument("--enable-kv-reuse", action="store_true")
     parser.add_argument("--kv-reuse-ratio", type=float, default=0.0)
+    parser.set_defaults(kv_reuse_reduce_npu=True)
+    parser.add_argument(
+        "--kv-reuse-reduce-npu",
+        dest="kv_reuse_reduce_npu",
+        action="store_true",
+        help="When KV reuse is enabled, also reduce NPU attention compute by the reused action rows.",
+    )
+    parser.add_argument(
+        "--no-kv-reuse-reduce-npu",
+        dest="kv_reuse_reduce_npu",
+        action="store_false",
+        help="Keep KV reuse data movement savings but charge unreduced attention compute.",
+    )
     parser.add_argument("--embedding-source", choices=["ssd", "ddr"], default="ssd")
     parser.set_defaults(weights_resident=True)
     parser.add_argument("--weights-resident", dest="weights_resident", action="store_true")
@@ -1378,7 +1409,15 @@ def main() -> None:
         action="store_true",
         help="Allow candidates whose latency proxy is not better than k=0 baseline.",
     )
-    parser.add_argument("--min-ir-gain", type=float, default=0.05, help="Required latency-proxy gain over the k=0 baseline.")
+    parser.add_argument(
+        "--min-ir-gain",
+        type=float,
+        default=None,
+        help=(
+            "Required latency-proxy gain over the k=0 baseline. Defaults to "
+            "ir_cost_model.min_ir_gain from calibration, or 0.05 if absent."
+        ),
+    )
     parser.add_argument(
         "--compute-preload-tolerance-us",
         type=float,

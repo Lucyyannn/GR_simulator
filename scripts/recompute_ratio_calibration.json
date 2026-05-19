@@ -1,23 +1,23 @@
 {
-  "source": "Fitted from completed results/main_task/W_IR and W_both HSTU-small/middle breakdown.csv files.",
+  "source": "Recalibrated for the updated 910C config from results/IRrecompute比例探究 and targeted task3 HSTU-small seq4096 bs4 W_IR/W_both retests.",
   "models": [
     "small",
     "middle"
   ],
   "effective_bandwidth_bps": {
-    "ddr": 90615647397.72668,
-    "ssd": 13765607965.970715
+    "ddr": 45300000000.0,
+    "ssd": 12300000000.0
   },
   "preload_bandwidth_model": {
     "ddr": {
-      "peak_utilization": 0.11061480395230308,
-      "median_effective_bps_at_reference": 90615647397.72668,
-      "reference_peak_bps": 819200000000.0
+      "peak_utilization": 0.884765625,
+      "median_effective_bps_at_reference": 45300000000.0,
+      "reference_peak_bps": 51200000000.0
     },
     "ssd": {
-      "peak_utilization": 0.9832539610245462,
-      "median_effective_bps_at_reference": 13765607965.970715,
-      "reference_peak_bps": 14000053405.965446
+      "peak_utilization": 0.8785714285714286,
+      "median_effective_bps_at_reference": 12300000000.0,
+      "reference_peak_bps": 14000000000.0
     }
   },
   "compute_scale_model": {
@@ -47,10 +47,61 @@
   },
   "npu_balance_model": {
     "definition": "sum(core active_cycles) / (num_cores * max(core active_cycles)) from hardware_summary.csv",
-    "median_efficiency": 0.46511823791199636,
-    "mean_efficiency": 0.5029086435004952,
-    "sample_count": 66,
-    "usage_note": "Diagnostic only when compute_scale_model is available; the fitted compute scale already absorbs baseline core imbalance and scheduling overhead. For a new NPU topology, set HW_NPU_PARALLEL_EFFICIENCY or recalibrate with representative runs."
+    "median_efficiency": 0.43134872925224593,
+    "mean_efficiency": 0.41067880366750625,
+    "min_efficiency": 0.2764530131349005,
+    "max_efficiency": 0.577057546573499,
+    "sample_count": 15,
+    "usage_note": "Diagnostic from updated 910C IR sweep plus targeted W_IR/W_both retests. Batch-4 attention does not scale linearly across cores, but the current cost-model context lookup cannot distinguish hot/cold users, so global batch_gamma is left unchanged and context bounds are used instead."
+  },
+  "ir_cost_model": {
+    "source": "Updated 910C IR selection calibration from layer kvcache preload timings and hardware_summary bandwidths.",
+    "min_ir_gain": 0.01,
+    "kv_preload_bandwidth_GBps": {
+      "ddr": 45.3,
+      "ssd": 12.3
+    },
+    "ar_split_merge_scale": {
+      "ddr": 1.4,
+      "ssd": 0.0
+    },
+    "notes": [
+      "DDR KV preload bandwidth comes from hot W_IR/W_both HSTU-small seq4096 bs4 layer kvcache stages, which are about 45.3 GB/s even though whole-run DDR bandwidth is 40-43 GB/s.",
+      "SSD KV preload bandwidth uses the conservative 12.3 GB/s whole-run/read-bandwidth level from cold retests and IR sweep; kvcache-only stages can be higher but random history embedding lowers end-to-end SSD efficiency.",
+      "The minimum IR gain guard is 1% for updated 910C: W_both hot positive-k retests improved seq4096 bs4 by 2.15% and seq8192 bs1 by 3.13%, so the older 5% guard incorrectly clamped them to k=0.",
+      "compute_correction and batch_gamma are intentionally not overridden here: measured NPU core balance is poor and batch dependent, and the current context key does not include hot/cold user type."
+    ]
+  },
+  "ir_calibration": {
+    "source": "Context bounds from updated 910C measurements.",
+    "contexts": {
+      "910C": {
+        "ssd": {
+          "1": {
+            "W_IR": {
+              "safe_max_history_recompute_len": 1638,
+              "calibrated_kv_len": 4096,
+              "calibrated_candidates": 128,
+              "note": "results/IRrecompute比例探究 continuous_80 was fastest at 0.961677 ms; continuous_100 regressed to 1.01709 ms, and random layouts were slower because history embedding preload became scattered."
+            }
+          },
+          "4": {
+            "W_IR": {
+              "safe_max_history_recompute_len": 1638,
+              "calibrated_kv_len": 4096,
+              "calibrated_candidates": 128,
+              "note": "Batch-4 W_IR cold retest with old k=1802 remained KV-preload dominated; use the sweep-derived 80% cap for this shape."
+            },
+            "W_both": {
+              "safe_max_history_recompute_len": 1079,
+              "calibrated_kv_len": 4096,
+              "calibrated_candidates": 128,
+              "note": "Targeted batch-4 W_both cold retest used k=1079 and completed in 2.05553 ms. W_both hot positive-k validation used k=181 for seq4096 bs4 and improved latency from 0.880261 ms to 0.861371 ms."
+            }
+          }
+        }
+      }
+    }
   },
   "compute_scale_by_hidden": {
     "512": 14.098079989088632,

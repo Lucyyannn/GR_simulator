@@ -21,7 +21,7 @@ Options:
   --hidden N                   Hidden dimension
   --kv-len N                   Historical KV length
   --history-recompute-len N     History item rows recomputed from embedding instead of KV cache. Default: 0
-  --history-recompute-index-mode MODE  Recomputed history index mode: stream or random. Default: stream
+  --history-recompute-index-mode MODE  Recomputed history index mode: continuous or random. Default: continuous
   --num-users N                Number of users in the generated workload
   --users-per-batch N          Users per batch
   --candidates-per-user N      Candidates per user
@@ -31,6 +31,8 @@ Options:
   --seed N                     Random seed
   --op-modeling SPEC           Operator modeling modes, e.g. split=materialize,view=materialize,concat=materialize
   --attention-modeling MODE     Attention modeling mode: decomposed or fused. Default: fused
+  --disable-attention-partial-start  Force attention to wait for all inputs before starting. Default: disabled
+  --disable-ar-reduce-attention-compute  Keep AR data movement but do not reduce attention compute. Default: disabled
   --enable-kv-reuse             Enable KV row reuse metadata in generated traces
   --kv-reuse-variant MODE       KV reuse variant: global or window_topk. Default: window_topk
   --kv-reuse-ratio R            KV reuse compression ratio for cached KV rows. Default: 0
@@ -59,6 +61,8 @@ VOCAB="${VOCAB:-262144}"
 SEED="${SEED:-1234}"
 OP_MODELING="${OP_MODELING:-split=materialize,view=materialize,concat=materialize}"
 ATTENTION_MODELING="${ATTENTION_MODELING:-fused}"
+ATTENTION_PARTIAL_START_ENABLED="${ATTENTION_PARTIAL_START_ENABLED:-1}"
+AR_REDUCE_ATTENTION_COMPUTE="${AR_REDUCE_ATTENTION_COMPUTE:-1}"
 ENABLE_KV_REUSE="${ENABLE_KV_REUSE:-0}"
 KV_REUSE_VARIANT="${KV_REUSE_VARIANT:-window_topk}"
 KV_REUSE_ACTION_COUNT="${KV_REUSE_ACTION_COUNT:-4}"
@@ -148,6 +152,14 @@ while [[ $# -gt 0 ]]; do
     --attention-modeling)
       ATTENTION_MODELING="$2"
       shift 2
+      ;;
+    --disable-attention-partial-start)
+      ATTENTION_PARTIAL_START_ENABLED=0
+      shift
+      ;;
+    --disable-ar-reduce-attention-compute)
+      AR_REDUCE_ATTENTION_COMPUTE=0
+      shift
       ;;
     --enable-kv-reuse)
       ENABLE_KV_REUSE=1
@@ -290,6 +302,14 @@ TRACE_ARGS=(
   --output "${TRACE_DIR}"
   --models-list "${MODELS_JSON}"
 )
+
+if [[ "${ATTENTION_PARTIAL_START_ENABLED}" == "0" ]]; then
+  TRACE_ARGS+=(--disable-attention-partial-start)
+fi
+
+if [[ "${AR_REDUCE_ATTENTION_COMPUTE}" == "0" ]]; then
+  TRACE_ARGS+=(--disable-ar-reduce-attention-compute)
+fi
 
 if [[ "${ENABLE_KV_REUSE}" == "1" ]]; then
   TRACE_ARGS+=(--enable-kv-reuse)
