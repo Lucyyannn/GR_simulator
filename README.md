@@ -2,87 +2,73 @@
 
 [![Docker Image CI](https://github.com/PSAL-POSTECH/ONNXim/actions/workflows/docker-image.yml/badge.svg)](https://github.com/PSAL-POSTECH/ONNXim/actions/workflows/docker-image.yml)
 
-GR\_simulator 是基于 [ONNXim](https://ieeexplore.ieee.org/document/10726822) 扩展的NPU仿真器，可支持 **生成式推荐模型（GR）** 工作负载（如 HSTU）的多种算子。当前支持三种运行模式：ONNX算子图、语言模型trace、**算子trace**，可在多核NPU上进行周期精确的 DRAM/NoC/SSD 仿真。
+GR\_simulator是基于 [ONNXim](https://ieeexplore.ieee.org/document/10726822) 扩展得到的NPU仿真系统，可支持 **生成式推荐（GR）模型** 工作负载（如 HSTU）的推理仿真。系统具备面向 UB 的分层存储架构，由 UB 连接 NPU、DRAM 与 SSD，并统一协调不同存储层级中的用户数据进入 NPU 侧执行。
 
 ***
 
 ## 目录
 
 - [系统架构图](#系统架构图)
+- [代码结构说明](#代码结构说明)
 - [环境配置](#环境配置)
-- [编译和执行](#编译和执行测试)
+- [编译运行](#编译运行)
+- [实验复现说明](#实验复现说明)
 
 
 ***
 
 ## 系统架构图
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  输入前端                                                           │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
-│  │ ONNX算子图   │  │ 语言模型     │  │ ★ 算子Trace (PyTorch)   │    │
-│  │   (.onnx)    │  │ (LLM .csv)   │  │     (.json)             │  │
-│  └──────┬───────┘  └──────┬───────┘  └────────────┬─────────────┘  │
-└─────────┼─────────────────┼───────────────────────┼────────────────┘
-          ▼                 ▼                       ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  解析层                                                             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
-│  │ ONNX解析器   │  │ 语言模型     │  │ ★ Trace解析器            │  │
-│  │  (protobuf)  │  │ 解析器       │  │  TraceParser             │  │
-│  │              │  │(LanguageModel)│  │  → TraceOpConverter      │  │
-│  └──────┬───────┘  └──────┬───────┘  └────────────┬─────────────┘  │
-└─────────┼─────────────────┼───────────────────────┼────────────────┘
-          ▼                 ▼                       ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  模型层                                                             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
-│  │ Model        │  │ LanguageModel│  │ ★ TraceModel             │  │
-│  │(ONNX图→算子) │  │(LLM算子+调度)│  │  (trace→算子)            │  │
-│  └──────┬───────┘  └──────┬───────┘  └────────────┬─────────────┘  │
-└─────────┼─────────────────┼───────────────────────┼────────────────┘
-          └─────────────────┼───────────────────────┘
-                            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  算子层                                                             │
-│  GemmWS/OS │ ConvWS/OS │ Attention │ SkipLayerNorm │ BiasGelu/Act │
-│  MaxPool   │ AdaptiveAvgPool │ GlobalAvgPool │ Softmax │ Flatten  │
-│  Concat    │ KVCacheConcat   │ EmbedLayerNorm │ Dummy              │
-└────────────────────────────┬────────────────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  映射与分块    MappingTable → 回退映射 (gemm_mapping / conv_mapping) │
-└────────────────────────────┬────────────────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  仿真核心                                                           │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │ 调度器 (simple / spatial_split / time_multiplex)            │   │
-│  └──────────┬──────────┬──────────┬──────────┬─────────────────┘   │
-│             ▼          ▼          ▼          ▼                     │
-│  ┌─────────────┐┌─────────────┐┌─────────────┐┌─────────────┐     │
-│  │  Core 0     ││  Core 1     ││  Core 2     ││  Core 3     │     │
-│  │ SystolicWS  ││ SystolicWS  ││ SystolicWS  ││ SystolicWS  │     │
-│  │  128×128    ││  128×128    ││  128×128    ││  128×128    │     │
-│  └──────┬──────┘└──────┬──────┘└──────┬──────┘└──────┬──────┘     │
-└─────────┼──────────────┼──────────────┼──────────────┼────────────┘
-          └──────────────┼──────────────┼──────────────┘
-                         ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│  存储层次                                                           │
-│  SRAM/Scratchpad (每核16MB)                                         │
-│         ▼                                                           │
-│  互连网络 (Simple互连 / Booksim2 NoC)                                │
-│         ▼                                                           │
-│  HBM ———— Ramulator 2.0 (HBM2)                                      │
-│         ▼                                                           │
-│  DDR ─── Ramulator 2.0  (DDR4)                                      │
-│         ▼                                                           │
-│  SSD ──── FEMU (8通道NAND)                                          │
-└─────────────────────────────────────────────────────────────────────┘
-```
+![GR simulator system architecture](img/arch.png)
 
+GR\_simulator 以 trace 作为主要输入，Trace Frontend 负责解析算子与访存描述，Pipe Scheduler 将计算与预取请求组织成流水执行。NPU 侧基于 ONNXim 的 tile scheduler 与多核执行模型，存储侧由 Storage Controller 统一管理 HBM、DDR 和 SSD 请求，其中 HBM/DDR 使用 Ramulator2 建模，SSD 使用 FEMU BlackBoxSSD 建模。NPU Core 通过 NoC 与多级存储连接。
+
+
+***
+
+## 代码结构说明
+
+本节介绍仿真器代码中的核心目录和文件。
+
+```text
+GR_simulator/
+├── CMakeLists.txt              # C++ 仿真器构建入口
+├── Dockerfile                  # Docker 运行环境
+├── conanfile.txt               # C++ 依赖声明
+├── configs/                    # 仿真器配置文件
+│   ├── 910A.json
+│   ├── 910B.json
+│   ├── 910C.json
+│   ├── booksim2_configs/       # Booksim2 NoC 配置
+│   └── ramulator2_configs/     # Ramulator2 DDR/HBM 配置
+├── src/                        # 仿真器主体源码
+│   ├── main.cc                 # 程序入口
+│   ├── Simulator.*             # 仿真主循环与组件协调
+│   ├── Core.* / Systolic*.cc   # NPU core 与 systolic array 建模
+│   ├── Dram.* / Hbm.* / Ssd.*  # DDR、HBM、SSD 接口封装
+│   ├── Interconnect.*          # NoC/互连建模
+│   ├── frontend/trace/         # trace 解析
+│   ├── memory/                 # storage controller建模
+│   ├── operations/             # Gemm、Embedding、HSTUAttention 等算子模型
+│   ├── scheduler/              # 算子/语言模型调度器
+│   ├── models/                 # 语言模型 workload 支持
+│   └── benchmark/              # 单项内存带宽 benchmark
+├── scripts/                    # trace 生成、校准、实验运行和结果处理脚本
+│   ├── run_hstu.sh             # HSTU 实验的通用入口
+│   ├── generate_hstu_baseline_trace.py
+│   ├── recompute_ratio_cost_model_new.py
+│   ├── recompute_ratio_calibration.json
+│   ├── run_ActionReuse.sh
+│   ├── run_ItemRecompute.sh
+│   ├── run_OoO_pipeline_Ablation.sh
+│   ├── run_SpeedupComparison.sh
+│   └── run_scalability.sh
+├── docs/                       # 公式、流程与可复现性说明
+├── introductions/              # 论文/报告用实验结果、表格和图
+├── example/                    # models list 和 trace 示例入口
+├── extern/                     # protobuf、Ramulator2 等第三方组件
+└── img/                        # README 和文档图片资源
+```
 
 ***
 
@@ -139,12 +125,20 @@ docker run -it --name gr-simulator-mini \
 | spdlog             | 1.11.0 |
 | nlohmann\_json     | 3.11.2 |
 
+### 3.环境验证
+
+运行简单的算子来验证环境配置成功：
+```bash
+bash scripts/run_embedding.sh # 一个简单的embedding算子测试
+bash scripts/run_gemm.sh      # 一个简单的gemm算子测试
+```
+运行脚本后，终端输出日志信息，并在最后报告仿真时间。
 
 ***
 
-## 编译和执行测试
+## 编译运行
 
-### 编译
+### 1.编译
 
 ```bash
 cd /path/to/GR_simulator
@@ -154,92 +148,55 @@ cmake ..
 make -j$(nproc)
 ```
 
-### 运行仿真
+### 2.运行 HSTU 模型推理
 
-#### 模式1：ONNX算子图（默认）
+仿真器使用`run_hstu.sh`脚本作为HSTU推理仿真的主入口，脚本通过参数指定模型层数、请求数量、优化策略等配置，详细说明可见 `introductions/run_experiments.md`。
 
-```bash
-./build/bin/Simulator \
-  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4.json \
-  --models_list ./example/models_list.json
-```
 
-#### 模式2：语言模型（自回归LLM）
+## 实验复现说明
+
+### 1. Action KV Cache Reuse 参数网格实验
 
 ```bash
-./build/bin/Simulator \
-  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4.json \
-  --models_list ./example/language_models.json \
-  --mode language
+bash scripts/run_ActionReuse.sh
 ```
 
-#### 模式3：算子Trace（PyTorch trace JSON）
+该脚本用于复现 action KV reuse 的参数网格实验。脚本固定 HSTU-small、`kv_len=4096`、cold/SSD 场景，遍历 `window_size={64,128,256,512}` 与 `top_k={1,2,3,4,5}`，并为每组参数设置对应的 `kv_reuse_ratio`，该值取自HSTU模型侧[recsys](https://github.com/cry-daniel/recsys)在各参数配置下的实际复用率。默认输出目录为 `results/ActionReuse`。
+
+### 2. Item Recompute 参数实验
 
 ```bash
-./build/bin/Simulator \
-  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd.json \
-  --models_list ./example/trace_models_list.json \
-  --mode trace
+bash scripts/run_ItemRecompute.sh
 ```
 
-#### 模式4：存储微基准（mem_bench）
+该脚本用于复现 Item Recompute 比例与索引模式实验。它会运行 `continuous` 与 `random` 两种历史 embedding 索引模式，覆盖 `0%/20%/40%/60%/80%/100%` 以及由 `scripts/recompute_ratio_cost_model_new.py` 估算出的 `optimal` recompute 长度，对比不同的Item Recompute设置的效果。默认输出目录为 `results/ItemRecompute`。
+
+### 3. Out-of-Order Pipeline 消融实验
 
 ```bash
-./build/bin/Simulator \
-  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd.json \
-  --mode mem_bench \
-  --bench_config ./configs/mem_benchmark_default.json \
-  --bench_output_dir ./results/hbmddrssd/mem_bench
+bash scripts/run_OoO_pipeline_Ablation.sh
 ```
 
-**命令行参数：**
+该脚本用于复现 Out-of-Order pipeline 的消融实验，比较开启和关闭 out-of-order pipeline 时，action reuse 与 item recompute 组合后的表现。脚本默认遍历 `cold/hot`、`batch_size={1,4,8}`、`kv_len={4096,8192,16384}`，并调用 recompute ratio 估算脚本为每个 case 选择 `history_recompute_len`。默认输出目录为 `results/OoO_pipeline_ablation`。
 
-| 参数              | 说明                                                 | 默认值         |
-| --------------- | -------------------------------------------------- | ----------- |
-| `--config`      | 硬件配置JSON文件路径                                       | *必填*        |
-| `--models_list` | 模型列表JSON文件路径；`mem_bench` 模式下不需要                    | *模型模式必填*   |
-| `--mode`        | 运行模式：`default` / `language` / `trace` / `mem_bench` | `default`   |
-| `--log_level`   | 日志级别：`trace` / `debug` / `info` / `warn` / `error` | `info`      |
-| `--trace_file`  | LLM请求trace文件（language模式）                           | `input.csv` |
-| `--trace_path`  | 算子trace JSON路径（trace模式）                            | —           |
-| `--bench_config` | `mem_bench` 配置文件路径                                | —           |
-| `--bench_output_dir` | `mem_bench` 输出目录                             | `results/hbmddrssd/mem_bench` |
 
-### 运行Trace测试
-
-单个trace测试：
+### 4. Speedup Comparison 实验
 
 ```bash
-# 临时生成单模型列表
-echo '{"models":[{"name":"test_gemm","trace_path":"example/trace_tests/test_gemm.json"}]}' > /tmp/test.json
-
-./build/bin/Simulator \
-  --config ./configs/systolic_ws_128x128_c4_simple_noc_tpuv4_half_ramulator2_ssd.json \
-  --mode trace \
-  --models_list /tmp/test.json \
-  --log_level info
+bash scripts/run_SpeedupComparison.sh
 ```
 
-`example/trace_tests/` 中可用的测试用例：
+该脚本用于复现各方法加速比对比实验，覆盖 `Recompute`、`FullCache`、`W_AR`、`W_IR`、`W_both` 五类方法，并遍历 HSTU-small/middle/large、`kv_len={4096,8192,16384}`、`batch_size={1,4,8}`、hot/cold 用户。W_IR 和 W_both 会自动调用 recompute ratio 估算脚本生成每个 case 的 recompute 长度。默认输出目录为 `results/SpeedupComparison`。
 
-| 测试文件                         | 算子                          | 输入形状                          | 说明             |
-| ---------------------------- | --------------------------- | ----------------------------- | -------------- |
-| `test_gemm.json`             | Gemm（aten::linear）          | \[128,512] × \[512,256]       | 带偏置的线性层        |
-| `test_matmul.json`           | Gemm（aten::mm）              | \[128,512] × \[512,512]       | 矩阵乘法           |
-| `test_conv2d.json`           | Conv（aten::conv2d）          | \[128,8,8,64]，卷积核3×3          | 2D卷积           |
-| `test_maxpool.json`          | MaxPool（aten::max\_pool2d）  | \[128,16,16,64]，核2×2          | 最大池化           |
-| `test_adaptive_avgpool.json` | AdaptiveAvgPool             | \[128,8,8,64] → \[128,1,1,64] | 自适应平均池化        |
-| `test_flatten.json`          | Flatten（aten::flatten）      | \[128,1,1,64] → \[128,64]     | 张量展平           |
-| `test_softmax.json`          | Softmax（aten::softmax）      | \[128,256]                    | Softmax（dim=1） |
-| `test_layernorm_gelu.json`   | SkipLayerNorm + BiasGelu    | \[128,512]                    | 融合LN + GELU流水线 |
-| `test_pipeline.json`         | Linear → LN → GELU → Linear | \[128,512]                    | 多算子流水线         |
+### 5. Scalability 实验
 
-
-### 运行layer级pipeline，并根据breakdown绘图
-
-通过以下命令运行测试，可在run_hstu.sh中修改trace参数。run_hstu.sh脚本中默认根据910c_mini_{ddr,ssd}.json生成支持pipeline的配置文件
 ```bash
-# --source-medium指定数据初始存放位置，这里支持DDR->HBM的baseline模式和SSD->HBM，不包含调度
-bash scripts/run_hstu.sh --source-medium ddr --result-dir "results/ddr1_$(date +%Y%m%d_%H%M%S)" &
-bash scripts/run_hstu.sh --source-medium ssd --result-dir "results/ssd1_$(date +%Y%m%d_%H%M%S)" &
+bash scripts/run_scalability.sh \
+  --result-root results/hstu_scalability_$(date +%Y%m%d_%H%M%S) \
+  --max-concurrent 45 \
+  --docker-container gr-simulator \
 ```
+
+该脚本用于复现 HSTU 模型规模可扩展性实验，默认在单 NPU、单用户设置下运行 HSTU-small/middle/large，并覆盖 `910A/910B/910C`三种配置、Cold/Hot用户以及 `Full_Cache`、`Full_Recompute`、`w_AR`、`w_IR`、`w_both` 五类方法。脚本会先执行内存带宽校准，并使用代价模型的估算脚本为 `w_IR` 和 `w_both` 自动估算 `history_recompute_len`，然后执行HSTU模型推理。
+
+

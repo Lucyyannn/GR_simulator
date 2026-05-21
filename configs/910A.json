@@ -176,7 +176,7 @@
   "dram_latency": 10,
   "dram_size": 32,
   "dram_nbl": 2,
-  "dram_print_interval": 100000,
+  "dram_print_interval": 10000000,
   "dram_config_path": "../configs/ramulator2_configs/HBM2_4800.yaml",
   "hbm": {
     "enabled": true,

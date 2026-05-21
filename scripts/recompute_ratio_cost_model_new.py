@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Formula-based item recompute ratio estimator from SOW2 Section 6.
+"""Formula-based item recompute ratio estimator from SOW.
 
 The model scans candidate recompute count k and chooses the value that balances
 the repeated non-layer0 layer cost:
@@ -1099,8 +1099,19 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
         Tcore_late_user = s * (C * H + 2 * effective_cached_rows * H) / Bcore
         Tcore_early_base_user = s * (2 * C * H) / Bcore
         Tcore_early_recompute_user = s * (7 * k * H) / Bcore
+        Thbm_restore_layer = (
+            (4 * batch * args.kv_len * H * s / Bcore)
+            if bool(getattr(args, "without_ooo_pipeline", False)) and k > 0
+            else 0.0
+        )
         Tar_split_merge_layer = 0.0
-        if args.enable_kv_reuse and k > 0 and effective_cached_rows > 0:
+        ar_split_merge_scale = 0.0
+        if (
+            args.enable_kv_reuse
+            and k > 0
+            and effective_cached_rows > 0
+            and not bool(getattr(args, "without_ooo_pipeline", False))
+        ):
             # Split IR+AR attention produces early/cached AV tensors and a
             # merge elementwise op. Once AR shrinks cached attention, this
             # fixed active-token cost is visible on fast KV media such as DDR.
@@ -1165,7 +1176,13 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
         Tnpu = Tcube + Tvec + Tcore
         Tlat = max(Tmem, Tnpu)
         Tearly_layer = Tcube_rec_layer + Tvec_rec_layer + Tcore_rec_layer
-        Tlate_layer = Tcube_rank_layer + Tvec_rank_layer + Tcore_rank_layer + Tar_split_merge_layer
+        Tlate_layer = (
+            Tcube_rank_layer
+            + Tvec_rank_layer
+            + Tcore_rank_layer
+            + Tar_split_merge_layer
+            + Thbm_restore_layer
+        )
         Tcompute_layer = Tearly_layer + Tlate_layer
         pipeline_layer = max(Tkv_layer, Tpre_cached_layer) + Tlate_layer
         steady_layer = max(Tkv_layer, Tcompute_layer)
@@ -1194,6 +1211,7 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             "layer_early_compute_us": Tearly_layer * 1e6,
             "layer_late_compute_us": Tlate_layer * 1e6,
             "ar_split_merge_us": Tar_split_merge_layer * 1e6,
+            "hbm_history_restore_us": Thbm_restore_layer * 1e6,
             "layer_compute_us": layer_compute_us,
             "layer_compute_minus_preload_us": compute_minus_preload_us,
             "compute_preload_tolerance_us": overrun_tolerance_us,
@@ -1220,6 +1238,7 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             "action_reuse_ratio": action_reuse_ratio,
             "compute_action_reuse_ratio": compute_action_reuse_ratio,
             "kv_reuse_reduce_npu": 1 if args.kv_reuse_reduce_npu else 0,
+            "without_ooo_pipeline": 1 if bool(getattr(args, "without_ooo_pipeline", False)) else 0,
             "history_action_compute_rows": history_action_compute_rows * batch,
             "unreused_action_compute_ratio": action_compute_ratio,
             "active_tokens": active_tokens,
@@ -1267,7 +1286,7 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             "compute_scale_mult": applied_context["compute_scale_mult"],
             "recompute_compute_scale_mult": applied_context["recompute_compute_scale_mult"],
             "pre_cached_compute_scale_mult": applied_context["pre_cached_compute_scale_mult"],
-            "ar_split_merge_scale": ar_split_merge_scale if args.enable_kv_reuse and k > 0 and effective_cached_rows > 0 else 0.0,
+            "ar_split_merge_scale": ar_split_merge_scale,
         }
         candidates.append(candidate)
         if k == 0:
@@ -1400,6 +1419,14 @@ def main() -> None:
         action="store_false",
         help="Keep KV reuse data movement savings but charge unreduced attention compute.",
     )
+    parser.add_argument(
+        "--without-ooo-pipeline",
+        action="store_true",
+        help=(
+            "Estimate standard wo_ooo mode: no partial attention start, no AR "
+            "compute reduction, and an extra HBM-to-HBM history restore before attention."
+        ),
+    )
     parser.add_argument("--embedding-source", choices=["ssd", "ddr"], default="ssd")
     parser.set_defaults(weights_resident=True)
     parser.add_argument("--weights-resident", dest="weights_resident", action="store_true")
@@ -1464,6 +1491,8 @@ def main() -> None:
         help="Relative tolerance for layer compute exceeding KV preload.",
     )
     args = parser.parse_args()
+    if args.without_ooo_pipeline:
+        args.kv_reuse_reduce_npu = False
     result = estimate(args)
     if args.field == "len":
         print(result["history_recompute_len"])

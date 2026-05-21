@@ -33,6 +33,7 @@ Options:
   --attention-modeling MODE     Attention modeling mode: decomposed or fused. Default: fused
   --disable-attention-partial-start  Force attention to wait for all inputs before starting. Default: disabled
   --disable-ar-reduce-attention-compute  Keep AR data movement but do not reduce attention compute. Default: disabled
+  --without-ooo-pipeline        Disable partial attention start, disable AR compute reduction, and add HBM restore movement
   --enable-kv-reuse             Enable KV row reuse metadata in generated traces
   --kv-reuse-variant MODE       KV reuse variant: global or window_topk. Default: window_topk
   --kv-reuse-ratio R            KV reuse compression ratio for cached KV rows. Default: 0
@@ -63,6 +64,7 @@ OP_MODELING="${OP_MODELING:-split=materialize,view=materialize,concat=materializ
 ATTENTION_MODELING="${ATTENTION_MODELING:-fused}"
 ATTENTION_PARTIAL_START_ENABLED="${ATTENTION_PARTIAL_START_ENABLED:-1}"
 AR_REDUCE_ATTENTION_COMPUTE="${AR_REDUCE_ATTENTION_COMPUTE:-1}"
+WITHOUT_OOO_PIPELINE="${WITHOUT_OOO_PIPELINE:-0}"
 ENABLE_KV_REUSE="${ENABLE_KV_REUSE:-0}"
 KV_REUSE_VARIANT="${KV_REUSE_VARIANT:-window_topk}"
 KV_REUSE_ACTION_COUNT="${KV_REUSE_ACTION_COUNT:-4}"
@@ -74,6 +76,8 @@ KV_REUSE_ACTION_OFFSET="${KV_REUSE_ACTION_OFFSET:-1}"
 KV_REUSE_ACTION_STRIDE="${KV_REUSE_ACTION_STRIDE:-2}"
 LOG_LEVEL="${LOG_LEVEL:-warn}"
 SIMULATOR_BIN="${SIMULATOR_BIN:-./build/bin/Simulator}"
+WAIT_IF_SIMULATOR_RUNNING="${WAIT_IF_SIMULATOR_RUNNING:-1}"
+SIMULATOR_SLOT_LOCK="${SIMULATOR_SLOT_LOCK:-/tmp/hstu-simulator-slot.lock}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -158,6 +162,12 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --disable-ar-reduce-attention-compute)
+      AR_REDUCE_ATTENTION_COMPUTE=0
+      shift
+      ;;
+    --without-ooo-pipeline)
+      WITHOUT_OOO_PIPELINE=1
+      ATTENTION_PARTIAL_START_ENABLED=0
       AR_REDUCE_ATTENTION_COMPUTE=0
       shift
       ;;
@@ -255,6 +265,10 @@ fi
 if [[ -z "${HISTORY_RECOMPUTE_SOURCE_MEDIUM}" ]]; then
   HISTORY_RECOMPUTE_SOURCE_MEDIUM="${SOURCE_MEDIUM}"
 fi
+if [[ "${WITHOUT_OOO_PIPELINE}" == "1" ]]; then
+  ATTENTION_PARTIAL_START_ENABLED=0
+  AR_REDUCE_ATTENTION_COMPUTE=0
+fi
 
 TRACE_DIR="${RESULT_DIR}/traces"
 MODELS_JSON="${RESULT_DIR}/models.json"
@@ -265,6 +279,20 @@ TIMELINE_PNG="${RESULT_DIR}/layer_timeline.png"
 LOG_PATH="${RESULT_DIR}/layer.log"
 if [[ -d "${REPO_ROOT}/build/lib" ]]; then
   export LD_LIBRARY_PATH="${REPO_ROOT}/build/lib:${LD_LIBRARY_PATH-}"
+fi
+
+simulator_running() {
+  pgrep -x Simulator >/dev/null 2>&1 ||
+    pgrep -f '(^|[[:space:]])(\./)?build/bin/Simulator([[:space:]]|$)' >/dev/null 2>&1
+}
+
+exec 8>"${SIMULATOR_SLOT_LOCK}"
+flock 8
+if [[ "${WAIT_IF_SIMULATOR_RUNNING}" == "1" ]]; then
+  while simulator_running; do
+    echo "[run_hstu] waiting for existing Simulator in this container at $(date -Is)" >&2
+    sleep 60
+  done
 fi
 
 if [[ -d "${RESULT_DIR}" ]]; then
@@ -309,6 +337,10 @@ fi
 
 if [[ "${AR_REDUCE_ATTENTION_COMPUTE}" == "0" ]]; then
   TRACE_ARGS+=(--disable-ar-reduce-attention-compute)
+fi
+
+if [[ "${WITHOUT_OOO_PIPELINE}" == "1" ]]; then
+  TRACE_ARGS+=(--without-ooo-pipeline)
 fi
 
 if [[ "${ENABLE_KV_REUSE}" == "1" ]]; then
