@@ -52,7 +52,6 @@
 
 该示例不启用 Action KV Reuse 和 Item Recompute等优化。默认使用 HSTU-small 形状：`layers=4`、`hidden=256`、`kv_len=4096`、`batch_size=1`、`candidates=128`；使用910C配置，通过指定--source-medium ssd 对cold用户进行请求推理。
 
-
 ```bash
 bash scripts/run_hstu.sh \
   --source-medium ssd \
