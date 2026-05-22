@@ -1,5 +1,5 @@
 models/*
-results/
+results*/
 MISC/
 .continue/
 example/trace_tests/*

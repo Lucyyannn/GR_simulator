@@ -193,7 +193,15 @@ bash scripts/run_scalability.sh \
 
 完成实验后，可运行 `scripts/plot_pipeline_comparison.py `脚本对统一配置下五种方法的流水线可视化，直观对比不同方法的性能差异。
 
-### 3. Action Reuse 参数选择实验
+### 3. M/M/1 P99 Latency 实验
+
+```bash
+bash scripts/run_main_task_mm1_p99.sh
+```
+
+该脚本用于基于主实验结果计算稳态 M/M/1 P99 latency。脚本会读取 `results/main_task` 下 HSTU-middle、`seq_len=16384`、`batch_size=1`、cold 用户场景中 `Recompute`、`FullCache`、`W_AR`、`W_IR`、`W_both` 五类方法的 `hardware_summary.csv`，并覆盖 `request_rate={16,32,48,64,80,96,114,128}`。运行前需要先生成或拷贝主实验结果到 `results/main_task`；默认输出为 `results/p99_mm1_HSTU_middle_seq16384_bs1_cold.csv` 和 `results/p99_mm1_HSTU_middle_seq16384_bs1_cold.png`。
+
+### 4. Action Reuse 参数选择实验
 
 ```bash
 bash scripts/run_ActionReuse.sh
@@ -201,7 +209,7 @@ bash scripts/run_ActionReuse.sh
 
 该脚本用于复现 Action KV Reuse 方法的参数网格实验，测试不同窗口大小与`Top-K`取值下的端到端推理时延。脚本默认选择 HSTU-small、`kv_len=4096`、cold/SSD 场景，遍历 `window_size={64,128,256,512}` 与 `top_k={1,2,3,4,5}`，并为每组参数设置对应的 `kv_reuse_ratio`，该值取自HSTU模型侧[recsys](https://github.com/cry-daniel/recsys)在各参数配置下测试得到的实际复用率。默认输出目录为 `results/ActionReuse`。
 
-### 4. Item Re-computation 方法有效性实验
+### 5. Item Re-computation 方法有效性实验
 
 ```bash
 bash scripts/run_ItemRecompute.sh
@@ -210,14 +218,13 @@ bash scripts/run_ItemRecompute.sh
 该脚本用于探究Item Re-computation 方法的embedding索引模式、不同recompute比例的影响。它会运行 `continuous` 与 `random` 两种历史 embedding 索引模式，覆盖 `0%/20%/40%/60%/80%/100%` 以及代价模型估算出的最优 recompute 比例，对比不同的Item Recompute设置的效果。默认输出目录为 `results/ItemRecompute`。
 
 
-### 5. Out-of-Order Pipeline 消融实验
+### 6. Out-of-Order Pipeline 消融实验
 
 ```bash
 bash scripts/run_OoO_pipeline_Ablation.sh
 ```
 
 该脚本用于复现 Out-of-Order pipeline 的消融实验，比较开启和关闭 out-of-order pipeline 时，action reuse 与 item recompute 组合后的表现。脚本默认遍历 `cold/hot`、`batch_size={1,4,8}`、`kv_len={4096,8192,16384}`，默认输出目录为 `results/OoO_pipeline_ablation`。
-
 
 
 
