@@ -188,7 +188,15 @@ bash scripts/run_SpeedupComparison.sh
 
 该脚本用于复现各方法加速比对比实验，覆盖 `Recompute`、`FullCache`、`W_AR`、`W_IR`、`W_both` 五类方法，并遍历 HSTU-small/middle/large、`kv_len={4096,8192,16384}`、`batch_size={1,4,8}`、hot/cold 用户。W_IR 和 W_both 会自动调用 recompute ratio 估算脚本生成每个 case 的 recompute 长度。默认输出目录为 `results/SpeedupComparison`。
 
-### 5. Scalability 实验
+### 5. M/M/1 P99 Latency 实验
+
+```bash
+bash scripts/run_main_task_mm1_p99.sh
+```
+
+该脚本用于基于主实验结果计算稳态 M/M/1 P99 latency。脚本会读取 `results/main_task` 下 HSTU-middle、`seq_len=16384`、`batch_size=1`、cold 用户场景中 `Recompute`、`FullCache`、`W_AR`、`W_IR`、`W_both` 五类方法的 `hardware_summary.csv`，并覆盖 `request_rate={16,32,48,64,80,96,114,128}`。运行前需要先生成或拷贝主实验结果到 `results/main_task`；默认输出为 `results/p99_mm1_HSTU_middle_seq16384_bs1_cold.csv` 和 `results/p99_mm1_HSTU_middle_seq16384_bs1_cold.png`。
+
+### 6. Scalability 实验
 
 ```bash
 bash scripts/run_scalability.sh \
@@ -198,5 +206,4 @@ bash scripts/run_scalability.sh \
 ```
 
 该脚本用于复现 HSTU 模型规模可扩展性实验，默认在单 NPU、单用户设置下运行 HSTU-small/middle/large，并覆盖 `910A/910B/910C`三种配置、Cold/Hot用户以及 `Full_Cache`、`Full_Recompute`、`w_AR`、`w_IR`、`w_both` 五类方法。脚本会先执行内存带宽校准，并使用代价模型的估算脚本为 `w_IR` 和 `w_both` 自动估算 `history_recompute_len`，然后执行HSTU模型推理。
-
 
