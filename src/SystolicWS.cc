@@ -99,6 +99,27 @@ void SystolicWS::cycle() {
   if (is_vector_busy)
     _stat_vec_compute_cycle++;
 
+  Tile* cube_tile =
+      is_compute_busy ? _compute_pipeline.front()->my_tile : nullptr;
+  Tile* vector_tile =
+      is_vector_busy ? _vector_pipeline.front()->my_tile : nullptr;
+  if (cube_tile != nullptr) {
+    auto& activity = _op_compute_activity[cube_tile->layer_id];
+    activity.op_name = cube_tile->optype;
+    activity.cube_active_cycles++;
+    if (is_vector_busy) activity.cube_overlap_with_vector_cycles++;
+  }
+  if (vector_tile != nullptr) {
+    auto& activity = _op_compute_activity[vector_tile->layer_id];
+    activity.op_name = vector_tile->optype;
+    activity.vector_active_cycles++;
+    if (is_compute_busy) activity.vector_overlap_with_cube_cycles++;
+  }
+  if (cube_tile != nullptr && vector_tile != nullptr &&
+      cube_tile->layer_id == vector_tile->layer_id) {
+    _op_compute_activity[cube_tile->layer_id].same_op_overlap_cycles++;
+  }
+
   if (is_compute_busy || is_vector_busy)
     _stat_compute_cycle++;
 

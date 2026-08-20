@@ -50,7 +50,9 @@ class Simulator {
   void print_simulation_time_summary(double wall_clock_seconds) const;
   uint64_t final_sim_time_ps() const;
   std::string hardware_summary_csv_path() const;
+  std::string compute_activity_csv_path() const;
   void write_final_hardware_summary_csv(uint64_t sim_time_ps) const;
+  void write_final_compute_activity_csv(uint64_t sim_time_ps) const;
   void append_memory_hardware_summary_rows(std::ostream& out,
                                            const std::string& name,
                                            const Dram* memory,

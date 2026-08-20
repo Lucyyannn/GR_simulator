@@ -2,12 +2,26 @@
 #include <robin_hood.h>
 
 #include <memory>
+#include <map>
+#include <string>
 #include <vector>
 
 #include "Dram.h"
 #include "SimulationConfig.h"
 #include "Sram.h"
 #include "Stat.h"
+
+struct OpComputeActivity {
+  std::string op_name;
+  cycle_type cube_active_cycles = 0;
+  cycle_type vector_active_cycles = 0;
+  // Attribution follows the named pipeline. These two fields are equal after
+  // summing over all ops, but can differ for an individual op when Cube and
+  // Vector instructions from different ops overlap.
+  cycle_type vector_overlap_with_cube_cycles = 0;
+  cycle_type cube_overlap_with_vector_cycles = 0;
+  cycle_type same_op_overlap_cycles = 0;
+};
 
 class Core {
  public:
@@ -31,6 +45,21 @@ class Core {
   virtual void print_current_stats();
 
   virtual cycle_type get_compute_cycles() const { return _stat_tot_compute_cycle; }
+  virtual cycle_type get_cube_active_cycles() const {
+    return _stat_tot_systolic_active_cycle;
+  }
+  virtual cycle_type get_vector_active_cycles() const {
+    return _stat_tot_vec_compute_cycle;
+  }
+  virtual cycle_type get_cube_vector_overlap_cycles() const {
+    const cycle_type sum =
+        _stat_tot_systolic_active_cycle + _stat_tot_vec_compute_cycle;
+    return sum >= _stat_tot_compute_cycle ? sum - _stat_tot_compute_cycle : 0;
+  }
+  virtual const std::map<uint32_t, OpComputeActivity>&
+  get_op_compute_activity() const {
+    return _op_compute_activity;
+  }
   virtual cycle_type get_total_cycles() const { return _core_cycle; }
   virtual double get_core_utilization_percent() const {
     return _core_cycle == 0
@@ -85,6 +114,7 @@ class Core {
   cycle_type _stat_tot_systolic_active_cycle = 0;
   double _stat_matmul_cycle = 0;
   double _stat_tot_matmul_cycle = 0;
+  std::map<uint32_t, OpComputeActivity> _op_compute_activity;
 
   int _running_layer;
   uint32_t tile_rr = 0;

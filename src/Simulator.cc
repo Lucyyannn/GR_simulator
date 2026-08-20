@@ -683,6 +683,7 @@ void Simulator::print_simulation_time_summary(double wall_clock_seconds) const {
 void Simulator::print_final_summary(double wall_clock_seconds) const {
   print_simulation_time_summary(wall_clock_seconds);
   write_final_hardware_summary_csv(final_sim_time_ps());
+  write_final_compute_activity_csv(final_sim_time_ps());
 }
 
 uint64_t Simulator::final_sim_time_ps() const {
@@ -699,6 +700,134 @@ std::string Simulator::hardware_summary_csv_path() const {
     return path.parent_path().append("hardware_summary.csv").string();
   }
   return "hardware_summary.csv";
+}
+
+std::string Simulator::compute_activity_csv_path() const {
+  fs::path hardware_path(hardware_summary_csv_path());
+  if (!hardware_path.parent_path().empty()) {
+    return hardware_path.parent_path().append("compute_activity.csv").string();
+  }
+  return "compute_activity.csv";
+}
+
+void Simulator::write_final_compute_activity_csv(uint64_t sim_time_ps) const {
+  const std::string output_path = compute_activity_csv_path();
+  fs::path path(output_path);
+  if (!path.parent_path().empty()) fs::create_directories(path.parent_path());
+
+  std::ofstream out(output_path);
+  if (!out.is_open()) {
+    spdlog::warn("Failed to write compute activity CSV: {}", output_path);
+    return;
+  }
+
+  out << "scope,index,op_id,op_name,sim_time_us,total_core_cycles,"
+         "cube_active_cycles,vector_active_cycles,"
+         "vector_overlap_with_cube_cycles,"
+         "cube_overlap_with_vector_cycles,same_op_overlap_cycles,"
+         "union_active_cycles,cube_utilization_percent,"
+         "vector_utilization_percent,vector_overlap_utilization_percent\n";
+
+  std::map<uint32_t, OpComputeActivity> overall_by_op;
+  uint64_t total_core_cycles = 0;
+  uint64_t total_cube_cycles = 0;
+  uint64_t total_vector_cycles = 0;
+  uint64_t total_union_cycles = 0;
+  uint64_t total_overlap_cycles = 0;
+  uint64_t total_same_op_overlap_cycles = 0;
+
+  const auto write_activity_row = [&](const std::string& scope,
+                                      const std::string& index,
+                                      const std::string& op_id,
+                                      const std::string& op_name,
+                                      uint64_t cycles,
+                                      uint64_t cube_cycles,
+                                      uint64_t vector_cycles,
+                                      uint64_t vector_overlap_cycles,
+                                      uint64_t cube_overlap_cycles,
+                                      uint64_t same_op_overlap_cycles,
+                                      uint64_t union_cycles) {
+    const auto utilization = [cycles](uint64_t active) {
+      return cycles == 0
+                 ? 0.0
+                 : static_cast<double>(active) * 100.0 /
+                       static_cast<double>(cycles);
+    };
+    write_csv_row(out, {
+        scope, index, op_id, op_name, csv_value(ps_to_us(sim_time_ps)),
+        csv_value(cycles), csv_value(cube_cycles), csv_value(vector_cycles),
+        csv_value(vector_overlap_cycles), csv_value(cube_overlap_cycles),
+        csv_value(same_op_overlap_cycles), csv_value(union_cycles),
+        csv_value(utilization(cube_cycles)),
+        csv_value(utilization(vector_cycles)),
+        csv_value(utilization(vector_overlap_cycles)),
+    });
+  };
+
+  for (size_t core_id = 0; core_id < _cores.size(); ++core_id) {
+    const Core* core = _cores[core_id].get();
+    if (core == nullptr) continue;
+    const uint64_t cycles = core->get_total_cycles();
+    const uint64_t cube_cycles = core->get_cube_active_cycles();
+    const uint64_t vector_cycles = core->get_vector_active_cycles();
+    const uint64_t union_cycles = core->get_compute_cycles();
+    const uint64_t overlap_cycles = core->get_cube_vector_overlap_cycles();
+    uint64_t same_op_overlap_cycles = 0;
+    for (const auto& [op_id, activity] : core->get_op_compute_activity()) {
+      (void)op_id;
+      same_op_overlap_cycles += activity.same_op_overlap_cycles;
+    }
+    write_activity_row("core_total", std::to_string(core_id), "all", "all",
+                       cycles, cube_cycles, vector_cycles, overlap_cycles,
+                       overlap_cycles, same_op_overlap_cycles, union_cycles);
+
+    total_core_cycles += cycles;
+    total_cube_cycles += cube_cycles;
+    total_vector_cycles += vector_cycles;
+    total_union_cycles += union_cycles;
+    total_overlap_cycles += overlap_cycles;
+    total_same_op_overlap_cycles += same_op_overlap_cycles;
+
+    for (const auto& [op_id, activity] : core->get_op_compute_activity()) {
+      const uint64_t op_union = activity.cube_active_cycles +
+                                activity.vector_active_cycles -
+                                activity.same_op_overlap_cycles;
+      write_activity_row(
+          "core_op", std::to_string(core_id), std::to_string(op_id),
+          activity.op_name, cycles, activity.cube_active_cycles,
+          activity.vector_active_cycles,
+          activity.vector_overlap_with_cube_cycles,
+          activity.cube_overlap_with_vector_cycles,
+          activity.same_op_overlap_cycles, op_union);
+
+      auto& aggregate = overall_by_op[op_id];
+      aggregate.op_name = activity.op_name;
+      aggregate.cube_active_cycles += activity.cube_active_cycles;
+      aggregate.vector_active_cycles += activity.vector_active_cycles;
+      aggregate.vector_overlap_with_cube_cycles +=
+          activity.vector_overlap_with_cube_cycles;
+      aggregate.cube_overlap_with_vector_cycles +=
+          activity.cube_overlap_with_vector_cycles;
+      aggregate.same_op_overlap_cycles += activity.same_op_overlap_cycles;
+    }
+  }
+
+  write_activity_row("npu_total", "all", "all", "all", total_core_cycles,
+                     total_cube_cycles, total_vector_cycles,
+                     total_overlap_cycles, total_overlap_cycles,
+                     total_same_op_overlap_cycles, total_union_cycles);
+  for (const auto& [op_id, activity] : overall_by_op) {
+    const uint64_t op_union = activity.cube_active_cycles +
+                              activity.vector_active_cycles -
+                              activity.same_op_overlap_cycles;
+    write_activity_row(
+        "npu_op", "all", std::to_string(op_id), activity.op_name,
+        total_core_cycles, activity.cube_active_cycles,
+        activity.vector_active_cycles,
+        activity.vector_overlap_with_cube_cycles,
+        activity.cube_overlap_with_vector_cycles,
+        activity.same_op_overlap_cycles, op_union);
+  }
 }
 
 void Simulator::append_memory_hardware_summary_rows(std::ostream& out,
