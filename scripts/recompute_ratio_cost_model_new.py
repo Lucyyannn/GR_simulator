@@ -220,6 +220,23 @@ def derive_hardware(config_path: Path) -> dict[str, float]:
         "B_core": hbm_bps,
         "F_cube": f_cube,
         "F_vec": f_vec,
+        "core_freq_hz": core_freq,
+        "core_width": core_width,
+        "core_height": core_height,
+        "vector_process_bits": vector_bits,
+        "vector_add_latency": float(first_core.get("add_latency", 1)),
+        "vector_mul_latency": float(first_core.get("mul_latency", 1)),
+        "vector_div_latency": float(first_core.get("div_latency", 1)),
+        "vector_swish_latency": float(first_core.get("swish_latency", 1)),
+        "vector_add_tree_latency": float(first_core.get("add_tree_latency", 1)),
+        "scalar_mul_latency": float(first_core.get("scalar_mul_latency", 1)),
+        "scalar_sqrt_latency": float(first_core.get("scalar_sqrt_latency", 1)),
+        "npu_parallel_efficiency": parallel_eff,
+        "ssd_page_bytes": page_bytes,
+        "ssd_parallel_pages": parallel_pages,
+        "ssd_page_read_latency_s": float(
+            first_not_none(HW_SSD_PAGE_READ_LAT_NS, ssd["pg_rd_lat"])
+        ) * 1e-9,
         "s": precision_bytes,
         "num_cores": core_count,
         "chip": str(metadata.get("name", config_path.stem)),
@@ -297,8 +314,8 @@ def prefix_item_to_action_causal_score_elements(
     action_rows = min(history_recompute_len, prefix_action_rows)
     # Recomputed history rows are item rows. With interleaved item/action
     # history, item i attends the earlier retained action rows. Retained action
-    # rows are assumed to occupy the earliest action slots.
-    return action_rows * (action_rows + 1) // 2 + (
+    # [item_i, action_i] ordering means item i sees actions 0..i-1.
+    return action_rows * (action_rows - 1) // 2 + (
         history_recompute_len - action_rows
     ) * action_rows
 
@@ -326,8 +343,8 @@ def split_recompute_attention_score_elements(
     )
     if history_recompute_len <= 0:
         return (
-            candidate_tokens * candidate_tokens,
-            candidate_tokens * effective_cached_kv_len,
+            0,
+            candidate_tokens * (effective_cached_kv_len + 1),
         )
 
     total_kv_len = cached_kv_len + history_recompute_len
@@ -336,12 +353,15 @@ def split_recompute_attention_score_elements(
     )
     early_scores = (
         history_recompute_len * (history_recompute_len + 1) // 2
-        + prefix_item_to_action_causal_score_elements(
+        + candidate_tokens * history_recompute_len
+        + candidate_tokens
+    )
+    cached_scores = (
+        prefix_item_to_action_causal_score_elements(
             history_recompute_len, prefix_action_rows
         )
-        + candidate_tokens * (history_recompute_len + candidate_tokens)
+        + candidate_tokens * effective_cached_kv_len
     )
-    cached_scores = candidate_tokens * effective_cached_kv_len
     return early_scores, cached_scores
 
 
@@ -619,6 +639,56 @@ def batch_effective(batch: int, calibration: dict) -> float:
     gamma = float(calibration.get("batch_gamma", 1.0))
     scale = float(calibration.get("batch_scale", 1.0))
     return scale * math.pow(batch, gamma)
+
+
+def dynamic_efficiency_model(calibration: dict) -> dict | None:
+    model = calibration.get("ir_cost_model", {})
+    if not isinstance(model, dict):
+        return None
+    dynamic = model.get("dynamic_efficiency")
+    if not isinstance(dynamic, dict) or dynamic.get("version") not in (1, 2):
+        return None
+    if dynamic.get("version") == 1:
+        if not isinstance(dynamic.get("ssd_time_scale"), dict):
+            return None
+        if not isinstance(dynamic.get("compute_time_scale"), dict):
+            return None
+    else:
+        required = [
+            "history_time_scale", "kv_time_scale",
+            "layer0_base_time_scale", "layer0_recompute_time_scale",
+            "layer0_late_time_scale", "repeated_early_time_scale",
+            "repeated_late_time_scale",
+        ]
+        if any(not isinstance(dynamic.get(key), dict) for key in required):
+            return None
+    return dynamic
+
+
+def fitted_time_scale(spec: dict, features: list[float]) -> float:
+    coefficients = [float(value) for value in spec.get("coefficients", [])]
+    means = [float(value) for value in spec.get("feature_mean", [])]
+    scales = [float(value) for value in spec.get("feature_scale", [])]
+    if not (len(coefficients) == len(features) == len(means) == len(scales)):
+        raise ValueError("dynamic efficiency feature dimensions do not match")
+    value = float(spec.get("intercept", 0.0))
+    for coefficient, feature, mean, scale in zip(
+        coefficients, features, means, scales
+    ):
+        value += coefficient * ((feature - mean) / max(abs(scale), 1e-12))
+    value = math.exp(clamp(value, -20.0, 20.0))
+    return clamp(
+        value,
+        float(spec.get("min_scale", 1.0)),
+        float(spec.get("max_scale", 200.0)),
+    )
+
+
+def fitted_named_time_scale(spec: dict, values: dict[str, float]) -> float:
+    names = spec.get("features", [])
+    if not isinstance(names, list) or not all(name in values for name in names):
+        raise ValueError("dynamic efficiency feature names do not match")
+    return fitted_time_scale(spec, [values[name] for name in names])
 
 
 def scheme_aliases(scheme: str) -> tuple[str, ...]:
@@ -907,13 +977,20 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
     hw = derive_hardware(args.config)
     calibration = load_calibration(args.calibration)
     apply_calibrated_bandwidth(hw, calibration)
+    dynamic_model = dynamic_efficiency_model(calibration)
 
     L = args.layers
     H = args.hidden
     batch = args.batch_size
     batch_eff = batch_effective(batch, calibration)
     scheme = "W_both" if args.enable_kv_reuse else "W_IR"
-    source_medium = args.embedding_source
+    history_embedding_medium = (
+        args.history_embedding_source or args.embedding_source
+    )
+    candidate_embedding_medium = (
+        args.candidate_embedding_source or args.embedding_source
+    )
+    source_medium = history_embedding_medium
     ir_context = lookup_ir_context(calibration, str(hw["chip"]), source_medium, batch, scheme)
     applied_context = apply_ir_context_calibration(hw, ir_context, source_medium)
     overridden: set[str] = set()
@@ -937,7 +1014,8 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
     kv_row_bytes = max(1, int(2 * H * s))
     chip = str(hw["chip"])
     kv_medium = "ddr" if args.user == "hot" else "ssd"
-    emb_medium = args.embedding_source
+    emb_medium = history_embedding_medium
+    cand_medium = candidate_embedding_medium
     weight_medium = "hbm" if args.weights_resident else args.weight_source
 
     if f"B_{kv_medium}" in overridden:
@@ -964,12 +1042,12 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
     Bcand, Bcand_cal = memory_bandwidth_bps(
         calibration,
         chip,
-        emb_medium,
+        cand_medium,
         "random_512b_index",
         "read",
         embedding_row_bytes,
-        hw[f"B_{emb_medium}"],
-        f"B_{emb_medium}" in overridden,
+        hw[f"B_{cand_medium}"],
+        f"B_{cand_medium}" in overridden,
     )
     if args.weights_resident:
         Bw, Bw_cal = memory_bandwidth_bps(
@@ -1009,16 +1087,22 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
         calibration, chip, H
     )
 
-    # The trace path currently panics when every item row is recomputed. Keep
-    # the formula search just below that simulator boundary.
-    max_recompute_items = max(0, item_count - 1)
+    # IR counts item rows, so ratio=1.0 is exactly item_count. The trace
+    # generator accepts this boundary and ratio sweeps must not silently turn
+    # it into item_count-1.
+    max_recompute_items = item_count
     fixed_recompute_len = getattr(args, "fixed_recompute_len", None)
     use_calibrated_len = bool(getattr(args, "use_calibrated_len", False))
     if fixed_recompute_len is None and use_calibrated_len:
         fixed_recompute_len = exact_context_recompute_len(ir_context, args)
     calibrated_bound = None
     calibrated_bound_source = ""
-    if fixed_recompute_len is None and not bool(getattr(args, "ignore_calibrated_bound", False)):
+    if (
+        fixed_recompute_len is None
+        and args.objective != "e2e"
+        and dynamic_model is None
+        and not bool(getattr(args, "ignore_calibrated_bound", False))
+    ):
         bound = calibrated_recompute_bound(ir_context, args, max_recompute_items)
         if bound is not None:
             calibrated_bound, calibrated_bound_source = bound
@@ -1040,9 +1124,17 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
     for k in recompute_lengths:
         recompute_ratio = k / item_count if item_count else 0.0
         op_scale = ir_compute_scale(calibration)
-        full_compute_scale = op_scale * applied_context["compute_scale_mult"]
-        recompute_compute_scale = full_compute_scale * float(applied_context["recompute_compute_scale_mult"])
-        pre_cached_compute_scale = recompute_compute_scale * float(applied_context["pre_cached_compute_scale_mult"])
+        if dynamic_model is None:
+            full_compute_scale = op_scale * applied_context["compute_scale_mult"]
+            recompute_compute_scale = full_compute_scale * float(applied_context["recompute_compute_scale_mult"])
+            pre_cached_compute_scale = recompute_compute_scale * float(applied_context["pre_cached_compute_scale_mult"])
+        else:
+            # Dynamic calibration starts from config-derived peak throughput;
+            # it replaces the legacy chip-name and hidden-size multipliers.
+            op_scale = 1.0
+            full_compute_scale = 1.0
+            recompute_compute_scale = 1.0
+            pre_cached_compute_scale = 1.0
         reuse_ratio = args.kv_reuse_ratio if args.enable_kv_reuse else 0.0
         compute_reuse_ratio = (
             reuse_ratio
@@ -1072,11 +1164,72 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             C,
             compute_reuse_ratio,
         )
-        Temb = batch * k * H * s / Bemb
+        dynamic_ssd_time_scale = 1.0
+        dynamic_compute_time_scale = 1.0
+        if dynamic_model is not None and dynamic_model.get("version") == 1:
+            ssd_features = [
+                math.log2(max(float(H), 1.0) / 256.0),
+                math.log2(max(float(batch), 1.0)),
+                recompute_ratio,
+            ]
+            is_w_both = 1.0 if args.enable_kv_reuse else 0.0
+            work_per_core = (
+                8.0 * batch * (C + k) * H * H
+                + 4.0 * batch * (early_scores + cached_scores) * H
+            ) / max(float(hw["num_cores"]), 1.0)
+            reference_work = 8.0 * 128.0 * 256.0 * 256.0 / 8.0
+            compute_features = [
+                math.log2(max(work_per_core, 1.0) / reference_work),
+                math.log2(max(float(batch), 1.0)),
+                recompute_ratio,
+                is_w_both,
+                recompute_ratio * is_w_both,
+            ]
+            dynamic_ssd_time_scale = fitted_time_scale(
+                dynamic_model["ssd_time_scale"], ssd_features
+            )
+            dynamic_compute_time_scale = fitted_time_scale(
+                dynamic_model["compute_time_scale"], compute_features
+            )
+
+        emb_bandwidth = Bemb
+        kv_bandwidth = Bkv
+        cand_bandwidth = Bcand
+        if dynamic_model is not None and dynamic_model.get("version") == 1:
+            if emb_medium == "ssd":
+                emb_bandwidth = hw["B_ssd_peak"] / dynamic_ssd_time_scale
+            if cand_medium == "ssd":
+                cand_bandwidth = hw["B_ssd_peak"] / dynamic_ssd_time_scale
+            if kv_medium == "ssd":
+                kv_bandwidth = hw["B_ssd_peak"] / dynamic_ssd_time_scale
+
+        Temb = batch * k * H * s / emb_bandwidth
         remaining_kv_rows = batch * effective_cached_rows
-        Tkv_layer = remaining_kv_rows * 2 * H * s / Bkv
+        Tkv_layer = remaining_kv_rows * 2 * H * s / kv_bandwidth
         Tkv = L * Tkv_layer
-        Tcand = batch * C * H * s / Bcand
+        if cand_medium == "ssd":
+            # Candidate rows for one user are issued as one random embedding
+            # movement.  In the current SSD model they fit within one fully
+            # parallel page-read wave, so latency is page-read-latency × batch,
+            # not bytes / peak bandwidth.  This exactly matches the observed
+            # 37.449 us per user for C=128 in the HSTU traces.
+            # Candidate ids are random embedding lookups.  Each row therefore
+            # normally touches a distinct SSD page (all supported HSTU row
+            # widths are <= one 4-KiB page); do not treat them as one packed
+            # contiguous tensor.  C=128 still fits one 128-LUN wave.
+            pages_per_candidate_row = math.ceil(
+                H * s / max(hw["ssd_page_bytes"], 1.0)
+            )
+            candidate_pages_per_user = C * pages_per_candidate_row
+            candidate_waves_per_user = math.ceil(
+                candidate_pages_per_user / max(hw["ssd_parallel_pages"], 1.0)
+            )
+            Tcand = (
+                batch * candidate_waves_per_user
+                * hw["ssd_page_read_latency_s"]
+            )
+        else:
+            Tcand = batch * C * H * s / cand_bandwidth
         Tw = 0.0 if args.weights_resident else L * Mw * H * H * s / Bw
         Tmem = Temb + Tkv + Tcand + Tw
 
@@ -1084,19 +1237,88 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
         # batch factor. This mirrors the trace generator's split recompute
         # attention model and lets AR reduce cached KV preload, cached-late
         # attention work, and HBM-side cached KV traffic together.
-        Tcube_late_user = (8 * C * H * H + 4 * cached_scores * H) / Fcube
-        # The early side contains a fixed candidate/self-attention term even
-        # at k=0 plus the true history-recompute increment. Context calibration
-        # should only stretch the increment; otherwise a 910C recompute
-        # correction would incorrectly inflate Full-Cache / pure-AR baselines.
-        base_early_scores = C * C
+        # Meta HSTU uses H->4H before attention (8H^2 FLOPs/token) and 3H->H
+        # after gating (6H^2 FLOPs/token).  Candidate input projection can run
+        # before cached-KV readiness; the output projection is necessarily in
+        # the late phase and covers both candidate and recomputed history rows.
+        Tcube_late_user = (
+            6 * (C + k) * H * H + 4 * cached_scores * H
+        ) / Fcube
+        # Partial-start attention exists only when k>0.  At k=0 the trace puts
+        # candidate self-attention in the cached/late phase; at k>0 that same
+        # C-element diagonal term runs in the early split.
+        base_early_scores = C if k > 0 else 0
         recompute_early_scores = max(0, early_scores - base_early_scores)
-        Tcube_early_base_user = 4 * base_early_scores * H / Fcube
+        Tcube_early_base_user = (
+            8 * C * H * H + 4 * base_early_scores * H
+        ) / Fcube
         Tcube_early_recompute_user = (8 * k * H * H + 4 * recompute_early_scores * H) / Fcube
-        Tvec_late_user = (cached_scores + 2 * C * H) / Fvec
-        Tvec_early_base_user = base_early_scores / Fvec
-        Tvec_early_recompute_user = (recompute_early_scores + 2 * k * H) / Fvec
-        Tcore_late_user = s * (C * H + 2 * effective_cached_rows * H) / Bcore
+
+        # Vector service follows the actual fused Meta HSTU primitives.  One
+        # attention score executes MUL+SWISH+DIV+MUL.  Input/output LayerNorm
+        # use the simulator's row-wise reduction formula; Split applies SiLU
+        # to u, and output prep applies the point-wise gating MUL.  Fvec is the
+        # throughput of a one-cycle vector pass, so multi-cycle primitives are
+        # weighted explicitly rather than hidden in a fitted compute factor.
+        vector_elements = hw["vector_process_bits"] / (8.0 * s)
+        vector_cycle_rate = Fvec / max(vector_elements, 1.0)
+        vector_row_bytes = int(H * s)
+        vector_chunk_bytes = max(1, int(hw["vector_process_bits"] // 8))
+
+        def vector_iterations(byte_count: int) -> int:
+            return max(1, math.ceil(byte_count / vector_chunk_bytes))
+
+        def add_tree_iterations(byte_count: int) -> int:
+            if byte_count <= vector_chunk_bytes:
+                return 1
+            iterations = math.ceil(byte_count / vector_chunk_bytes)
+            return iterations + add_tree_iterations(iterations)
+
+        row_vector_iterations = vector_iterations(vector_row_bytes)
+        row_add_tree_iterations = add_tree_iterations(vector_row_bytes)
+        layernorm_cycles_per_token = (
+            2 * row_add_tree_iterations * hw["vector_add_tree_latency"]
+            + 2 * hw["scalar_mul_latency"] + hw["scalar_sqrt_latency"]
+            + row_vector_iterations * (
+                2 * hw["vector_add_latency"]
+                + 3 * hw["vector_mul_latency"]
+            )
+        )
+        input_vector_cycles_per_token = (
+            layernorm_cycles_per_token
+            + row_vector_iterations * hw["vector_swish_latency"]
+        )
+        output_vector_cycles_per_token = (
+            layernorm_cycles_per_token
+            + row_vector_iterations * hw["vector_mul_latency"]
+        )
+        attention_pointwise_weight = args.num_heads * (
+            2 * hw["vector_mul_latency"]
+            + hw["vector_swish_latency"]
+            + hw["vector_div_latency"]
+        )
+        Tvec_early_base_user = (
+            C * input_vector_cycles_per_token / vector_cycle_rate
+            + base_early_scores * attention_pointwise_weight / Fvec
+        )
+        Tvec_early_recompute_user = (
+            k * input_vector_cycles_per_token / vector_cycle_rate
+            + recompute_early_scores * attention_pointwise_weight / Fvec
+        )
+        split_join_elements = (2 * C + k) * H if k > 0 else 0
+        concat_elements = 3 * (C + k) * H if k > 0 else 0
+        Tvec_late_user = (
+            cached_scores * attention_pointwise_weight / Fvec
+            + (C + k) * output_vector_cycles_per_token / vector_cycle_rate
+            + split_join_elements * hw["vector_add_latency"] / Fvec
+            + concat_elements / Fvec
+        )
+        # Remote AR may reduce the physical SSD KV preload without reducing
+        # logical QK/AV work.  Compute-side movement must follow the logical
+        # compute rows selected by --[no-]kv-reuse-reduce-npu.
+        Tcore_late_user = s * (
+            C * H + 2 * compute_effective_cached_rows * H
+        ) / Bcore
         Tcore_early_base_user = s * (2 * C * H) / Bcore
         Tcore_early_recompute_user = s * (7 * k * H) / Bcore
         Thbm_restore_layer = (
@@ -1141,22 +1363,63 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             + recompute_compute_scale * Tcore_early_recompute_user
         )
 
-        Tpre_cached_layer = batch_eff * (
-            full_compute_scale
-            * (Tcube_early_base_user + Tvec_early_base_user + Tcore_early_base_user)
-            + pre_cached_compute_scale
-            * (Tcube_early_recompute_user + Tvec_early_recompute_user + Tcore_early_recompute_user)
+        Tpre_base_peak_layer = batch_eff * (
+            Tcube_early_base_user
+            + Tvec_early_base_user
+            + Tcore_early_base_user
         )
+        Tpre_recompute_peak_layer = batch_eff * (
+            Tcube_early_recompute_user
+            + Tvec_early_recompute_user
+            + Tcore_early_recompute_user
+        )
+        Tlate_peak_layer = batch_eff * (
+            Tcube_late_user + Tvec_late_user + Tcore_late_user
+        ) + Tar_split_merge_layer + Thbm_restore_layer
 
-        w_both_compute_correction, w_both_compute_correction_detail = (
-            w_both_compute_correction_factor(
-                calibration,
-                H,
-                bool(args.enable_kv_reuse),
-                k,
-            )
+        Tpre_base_layer = batch_eff * full_compute_scale * (
+            Tcube_early_base_user
+            + Tvec_early_base_user
+            + Tcore_early_base_user
         )
-        total_compute_correction = compute_correction * w_both_compute_correction
+        Tpre_recompute_layer = batch_eff * pre_cached_compute_scale * (
+            Tcube_early_recompute_user
+            + Tvec_early_recompute_user
+            + Tcore_early_recompute_user
+        )
+        Tpre_cached_layer = Tpre_base_layer + Tpre_recompute_layer
+
+        if dynamic_model is None:
+            if args.kv_reuse_reduce_npu:
+                w_both_compute_correction, w_both_compute_correction_detail = (
+                    w_both_compute_correction_factor(
+                        calibration,
+                        H,
+                        bool(args.enable_kv_reuse),
+                        k,
+                    )
+                )
+            else:
+                w_both_compute_correction = 1.0
+                w_both_compute_correction_detail = {
+                    "source": "disabled_without_ar_compute_reduction",
+                    "factor": 1.0,
+                }
+            total_compute_correction = compute_correction * w_both_compute_correction
+        else:
+            compute_correction = 1.0
+            compute_correction_detail = {
+                "source": "ir_cost_model.dynamic_efficiency",
+                "mode": "config_and_workload_features",
+                "factor": 1.0,
+            }
+            w_both_compute_correction = 1.0
+            w_both_compute_correction_detail = {
+                "source": "ir_cost_model.dynamic_efficiency",
+                "mode": "method_feature",
+                "factor": 1.0,
+            }
+            total_compute_correction = dynamic_compute_time_scale
 
         Tcube_rank_layer *= total_compute_correction
         Tcube_rec_layer *= total_compute_correction
@@ -1164,6 +1427,8 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
         Tvec_rec_layer *= total_compute_correction
         Tcore_rank_layer *= total_compute_correction
         Tcore_rec_layer *= total_compute_correction
+        Tpre_base_layer *= total_compute_correction
+        Tpre_recompute_layer *= total_compute_correction
         Tpre_cached_layer *= total_compute_correction
         Tar_split_merge_layer *= total_compute_correction
 
@@ -1183,9 +1448,123 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             + Tar_split_merge_layer
             + Thbm_restore_layer
         )
+        layer0_base_layer = Tpre_base_layer
+        layer0_recompute_layer = Tpre_recompute_layer
+        layer0_late_layer = Tlate_layer
+        v2_scales = {
+            "history": 1.0,
+            "kv": 1.0,
+            "layer0_base": 1.0,
+            "layer0_recompute": 1.0,
+            "layer0_late": 1.0,
+            "repeated_early": 1.0,
+            "repeated_late": 1.0,
+        }
+        if dynamic_model is not None and dynamic_model.get("version") == 2:
+            log_hidden = math.log2(max(float(H), 1.0) / 256.0)
+            log_batch = math.log2(max(float(batch), 1.0))
+            log_sequence = math.log2(max(float(args.kv_len), 1.0) / 4096.0)
+            log_cores = math.log2(max(float(hw["num_cores"]), 1.0) / 8.0)
+            is_split = 1.0 if k > 0 else 0.0
+            total_peak_us = 1e6 * (
+                Tpre_base_peak_layer
+                + Tpre_recompute_peak_layer
+                + Tlate_peak_layer
+            )
+            feature_values_v2 = {
+                "log2_hidden": log_hidden,
+                "log2_batch": log_batch,
+                "log2_sequence": log_sequence,
+                "log2_cores": log_cores,
+                "ratio": recompute_ratio,
+                "ratio_sq": recompute_ratio * recompute_ratio,
+                "is_split": is_split,
+                "ratio_x_log2_batch": recompute_ratio * log_batch,
+                "ratio_x_log2_hidden": recompute_ratio * log_hidden,
+                "ratio_x_log2_cores": recompute_ratio * log_cores,
+                "ratio_x_log2_sequence": recompute_ratio * log_sequence,
+                "split_x_log2_batch": is_split * log_batch,
+                "split_x_log2_hidden": is_split * log_hidden,
+                "log2_peak_stage_us": math.log2(max(total_peak_us, 1e-12)),
+                "log2_batch_x_log2_hidden": log_batch * log_hidden,
+                "log2_batch_x_log2_cores": log_batch * log_cores,
+                "is_w_both": 1.0 if args.enable_kv_reuse else 0.0,
+                "ratio_x_w_both": (
+                    recompute_ratio if args.enable_kv_reuse else 0.0
+                ),
+            }
+            spec_names = {
+                "history": "history_time_scale",
+                "kv": "kv_time_scale",
+                "layer0_base": "layer0_base_time_scale",
+                "layer0_recompute": "layer0_recompute_time_scale",
+                "layer0_late": "layer0_late_time_scale",
+                "repeated_early": "repeated_early_time_scale",
+                "repeated_late": "repeated_late_time_scale",
+            }
+            for scale_name, spec_name in spec_names.items():
+                v2_scales[scale_name] = fitted_named_time_scale(
+                    dynamic_model[spec_name], feature_values_v2
+                )
+            Temb *= v2_scales["history"]
+            Tkv_layer *= v2_scales["kv"]
+            Tkv = L * Tkv_layer
+            Tmem = Temb + Tkv + Tcand + Tw
+            Tpre_base_layer = (
+                Tpre_base_peak_layer * v2_scales["repeated_early"]
+            )
+            Tpre_recompute_layer = (
+                Tpre_recompute_peak_layer * v2_scales["repeated_early"]
+            )
+            Tpre_cached_layer = Tpre_base_layer + Tpre_recompute_layer
+            Tlate_layer = Tlate_peak_layer * v2_scales["repeated_late"]
+            layer0_base_layer = (
+                Tpre_base_peak_layer * v2_scales["layer0_base"]
+            )
+            layer0_recompute_layer = (
+                Tpre_recompute_peak_layer * v2_scales["layer0_recompute"]
+            )
+            layer0_late_layer = (
+                Tlate_peak_layer * v2_scales["layer0_late"]
+            )
+            Tearly_layer = Tpre_cached_layer
+            Tcompute_layer = Tearly_layer + Tlate_layer
+            Tnpu = (
+                layer0_base_layer + layer0_recompute_layer + layer0_late_layer
+                + max(0, L - 1) * Tcompute_layer
+            )
+            Tlat = max(Tmem, Tnpu)
         Tcompute_layer = Tearly_layer + Tlate_layer
         pipeline_layer = max(Tkv_layer, Tpre_cached_layer) + Tlate_layer
         steady_layer = max(Tkv_layer, Tcompute_layer)
+        # Reconstruct the two asynchronous streams used by the trace:
+        # cached-KV preloads are serialized and run ahead of layer compute;
+        # layer0 candidate-side work overlaps the history embedding read.
+        # This recurrence preserves the analytical components while matching
+        # the scheduler dependency graph instead of multiplying one isolated
+        # layer proxy by L.
+        candidate_ready = Tcand
+        history_ready = candidate_ready + Temb
+        kv_cursor = history_ready
+        compute_cursor = candidate_ready
+        layer0_early_ready = 0.0
+        layer0_finish = 0.0
+        for layer_index in range(L):
+            kv_cursor += Tkv_layer
+            if layer_index == 0:
+                early_ready = (
+                    max(compute_cursor + layer0_base_layer, history_ready)
+                    + layer0_recompute_layer
+                )
+                layer0_early_ready = early_ready
+                current_late_layer = layer0_late_layer
+            else:
+                early_ready = compute_cursor + Tpre_cached_layer
+                current_late_layer = Tlate_layer
+            compute_cursor = max(early_ready, kv_cursor) + current_late_layer
+            if layer_index == 0:
+                layer0_finish = compute_cursor
+        e2e_proxy = compute_cursor + Tw
         whole_layer_balance = abs(Tkv_layer - Tcompute_layer)
         overlap_balance = abs(Tkv_layer - Tpre_cached_layer)
         layer_kv_preload_us = Tkv_layer * 1e6
@@ -1197,6 +1576,8 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             objective_value = whole_layer_balance
         elif args.objective == "steady":
             objective_value = steady_layer
+        elif args.objective == "e2e":
+            objective_value = e2e_proxy
         else:
             objective_value = pipeline_layer
 
@@ -1206,8 +1587,14 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             "Tmem_us": Tmem * 1e6,
             "Tnpu_us": Tnpu * 1e6,
             "Tlatency_us": Tlat * 1e6,
+            "history_embedding_us": Temb * 1e6,
+            "candidate_embedding_us": Tcand * 1e6,
+            "weight_read_us": Tw * 1e6,
             "balance_error_us": abs(Tmem - Tnpu) * 1e6,
             "layer_kv_preload_us": layer_kv_preload_us,
+            "layer_cube_us": Tcube_layer * 1e6,
+            "layer_vector_us": Tvec_layer * 1e6,
+            "layer_core_movement_us": Tcore_layer * 1e6,
             "layer_early_compute_us": Tearly_layer * 1e6,
             "layer_late_compute_us": Tlate_layer * 1e6,
             "ar_split_merge_us": Tar_split_merge_layer * 1e6,
@@ -1218,8 +1605,20 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             "compute_preload_overrun_us": compute_preload_overrun_us,
             "compute_preload_safe": 1 if compute_preload_overrun_us <= 0.0 else 0,
             "pre_cached_compute_us": Tpre_cached_layer * 1e6,
+            "pre_base_compute_us": Tpre_base_layer * 1e6,
+            "pre_recompute_compute_us": Tpre_recompute_layer * 1e6,
+            "pre_base_peak_us": Tpre_base_peak_layer * 1e6,
+            "pre_recompute_peak_us": Tpre_recompute_peak_layer * 1e6,
+            "late_peak_us": Tlate_peak_layer * 1e6,
             "pipeline_layer_us": pipeline_layer * 1e6,
             "latency_proxy_us": pipeline_layer * 1e6,
+            "e2e_proxy_us": e2e_proxy * 1e6,
+            "layer0_early_ready_us": layer0_early_ready * 1e6,
+            "layer0_finish_us": layer0_finish * 1e6,
+            "layer0_base_compute_us": layer0_base_layer * 1e6,
+            "layer0_recompute_compute_us": layer0_recompute_layer * 1e6,
+            "layer0_late_compute_us": layer0_late_layer * 1e6,
+            "kv_stream_finish_us": kv_cursor * 1e6,
             "steady_layer_us": steady_layer * 1e6,
             "objective_value_us": objective_value * 1e6,
             "objective_layer_us": objective_value * 1e6,
@@ -1242,6 +1641,7 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             "history_action_compute_rows": history_action_compute_rows * batch,
             "unreused_action_compute_ratio": action_compute_ratio,
             "active_tokens": active_tokens,
+            "num_heads": args.num_heads,
             "early_attention_score_elements": early_scores * batch,
             "cached_attention_score_elements": cached_scores * batch,
             "Sh": Sh,
@@ -1249,6 +1649,8 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             "num_cores": int(hw["num_cores"]),
             "chip": hw["chip"],
             "source_medium": source_medium,
+            "history_embedding_source_medium": emb_medium,
+            "candidate_embedding_source_medium": cand_medium,
             "precision_bytes": s,
             "weights_resident": args.weights_resident,
             "effective_batch": batch_eff,
@@ -1265,6 +1667,16 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             "B_cand": Bcand,
             "B_weight": Bw,
             "B_core_used": Bcore,
+            "F_cube": Fcube,
+            "F_vec": Fvec,
+            "core_freq_hz": hw["core_freq_hz"],
+            "core_width": hw["core_width"],
+            "core_height": hw["core_height"],
+            "vector_process_bits": hw["vector_process_bits"],
+            "npu_parallel_efficiency": hw["npu_parallel_efficiency"],
+            "ssd_page_bytes": hw["ssd_page_bytes"],
+            "ssd_parallel_pages": hw["ssd_parallel_pages"],
+            "ssd_page_read_latency_us": hw["ssd_page_read_latency_s"] * 1e6,
             "B_ddr_peak": hw["B_ddr_peak"],
             "B_ssd_peak": hw["B_ssd_peak"],
             "B_hbm_peak": hw["B_hbm_peak"],
@@ -1287,6 +1699,10 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             "recompute_compute_scale_mult": applied_context["recompute_compute_scale_mult"],
             "pre_cached_compute_scale_mult": applied_context["pre_cached_compute_scale_mult"],
             "ar_split_merge_scale": ar_split_merge_scale,
+            "dynamic_efficiency_enabled": 1 if dynamic_model is not None else 0,
+            "dynamic_ssd_time_scale": dynamic_ssd_time_scale,
+            "dynamic_compute_time_scale": dynamic_compute_time_scale,
+            "dynamic_v2_scales": v2_scales,
         }
         candidates.append(candidate)
         if k == 0:
@@ -1318,6 +1734,7 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
     zero_tolerance_us = compute_preload_tolerance_us(args, zero_preload_us)
     ar_baseline_guard = (
         bool(args.enable_kv_reuse)
+        and args.objective != "e2e"
         and not bool(getattr(args, "allow_negative_ir", False))
         and zero_preload_us <= zero_compute_us + zero_tolerance_us
     )
@@ -1344,9 +1761,15 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             best["clamped_from_latency_proxy_us"] = raw_best["latency_proxy_us"]
         return best
 
-    allow_overrun = bool(getattr(args, "allow_compute_overrun", False)) or bool(getattr(args, "allow_negative_ir", False))
-    allow_baseline_regression = bool(getattr(args, "allow_baseline_regression", False)) or bool(
-        getattr(args, "allow_negative_ir", False)
+    allow_overrun = (
+        args.objective == "e2e"
+        or bool(getattr(args, "allow_compute_overrun", False))
+        or bool(getattr(args, "allow_negative_ir", False))
+    )
+    allow_baseline_regression = (
+        args.objective == "e2e"
+        or bool(getattr(args, "allow_baseline_regression", False))
+        or bool(getattr(args, "allow_negative_ir", False))
     )
     configured_min_gain = getattr(args, "min_ir_gain", None)
     if configured_min_gain is None:
@@ -1404,9 +1827,13 @@ def main() -> None:
     parser.add_argument("--kv-len", type=int, required=True)
     parser.add_argument("--batch-size", type=int, default=1, help="Accepted for interface compatibility; model is per request.")
     parser.add_argument("--candidates", type=int, default=128)
+    parser.add_argument(
+        "--num-heads", type=int, default=4,
+        help="HSTU attention heads; matches HSTUAttention's simulator default.",
+    )
     parser.add_argument("--enable-kv-reuse", action="store_true")
     parser.add_argument("--kv-reuse-ratio", type=float, default=0.0)
-    parser.set_defaults(kv_reuse_reduce_npu=True)
+    parser.set_defaults(kv_reuse_reduce_npu=False)
     parser.add_argument(
         "--kv-reuse-reduce-npu",
         dest="kv_reuse_reduce_npu",
@@ -1427,7 +1854,21 @@ def main() -> None:
             "compute reduction, and an extra HBM-to-HBM history restore before attention."
         ),
     )
-    parser.add_argument("--embedding-source", choices=["ssd", "ddr"], default="ssd")
+    parser.add_argument(
+        "--embedding-source", choices=["ssd", "ddr"], default="ssd",
+        help=(
+            "Backward-compatible default for history and candidate embedding "
+            "sources. More specific source options override it."
+        ),
+    )
+    parser.add_argument(
+        "--history-embedding-source", choices=["ssd", "ddr"], default=None,
+        help="Source medium for recomputed history embedding rows.",
+    )
+    parser.add_argument(
+        "--candidate-embedding-source", choices=["ssd", "ddr"], default=None,
+        help="Source medium for candidate embedding rows.",
+    )
     parser.set_defaults(weights_resident=True)
     parser.add_argument("--weights-resident", dest="weights_resident", action="store_true")
     parser.add_argument("--no-weights-resident", dest="weights_resident", action="store_false")
@@ -1448,12 +1889,13 @@ def main() -> None:
     parser.add_argument("--f_vec", type=float, default=None, help="Override vector throughput in element/s.")
     parser.add_argument(
         "--objective",
-        choices=["balance", "steady", "pipeline"],
+        choices=["balance", "steady", "pipeline", "e2e"],
         default="balance",
         help=(
             "balance minimizes abs(kv_preload-busy_compute); steady minimizes "
             "max(kv_preload,busy_compute); pipeline minimizes "
-            "max(kv_preload,early_compute)+late_compute."
+            "max(kv_preload,early_compute)+late_compute; e2e adds one-time "
+            "embedding work and repeats the pipeline term for every layer."
         ),
     )
     parser.add_argument("--field", choices=["json", "len", "ratio"], default="json")
