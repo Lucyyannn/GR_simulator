@@ -14,4 +14,7 @@ class GemmWS : public Gemm {
  protected:
   virtual void initialize_instructions(Tile* tile, Mapping mapping);
  private:
+  bool _resident_input = false;
+  bool _resident_output = false;
+  bool _residual_input = false;
 };

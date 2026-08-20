@@ -20,7 +20,7 @@ class HSTUAttention : public Operation {
   void initialize_output_compute_tiles();
   void append_gemm_compute(Tile* tile, uint32_t n, uint32_t c, uint32_t m,
                            addr_type dest_addr);
-  void append_silu_compute(Tile* tile, uint64_t score_elements);
+  void append_pointwise_compute(Tile* tile, uint64_t score_elements);
   void initialize_movin_compute_tile(uint32_t operand_id,
                                      const std::set<addr_type>& input_addrs,
                                      uint32_t logical_request_count,
@@ -44,6 +44,7 @@ class HSTUAttention : public Operation {
   uint32_t _logical_kv_len = 0;
   uint32_t _current_tokens = 0;
   uint32_t _hidden = 0;
+  uint32_t _num_heads = 4;
   uint64_t _attention_score_elements = 0;
   uint64_t _dense_elements_per_tile = 1;
   uint32_t _kv_rows_per_tile = 1;

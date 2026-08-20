@@ -17,6 +17,8 @@
 #include "Elementwise.h"
 #include "EmbedLayerNorm.h"
 #include "HSTUAttention.h"
+#include "HSTUInputPrep.h"
+#include "HSTUOutputPrep.h"
 #include "LayerNorm.h"
 #include "SkipLayerNorm.h"
 #include "BiasAct.h"
@@ -162,6 +164,10 @@ std::unique_ptr<Operation> OperationFactory::create_from_trace(
     return std::make_unique<Softmax>(_config, model, entry.name, attrs, target_core);
   } else if (optype == "HSTUAttention") {
     return std::make_unique<HSTUAttention>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "HSTUInputPrep") {
+    return std::make_unique<HSTUInputPrep>(_config, model, entry.name, attrs, target_core);
+  } else if (optype == "HSTUOutputPrep") {
+    return std::make_unique<HSTUOutputPrep>(_config, model, entry.name, attrs, target_core);
   }
 
   spdlog::warn("[TraceOpConverter] optype \"{}\" (from \"{}\") returned Dummy",

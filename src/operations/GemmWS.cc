@@ -22,6 +22,12 @@ GemmWS::GemmWS(SimulationConfig config, Model* model, std::string name,
                std::map<std::string, std::string>& attributes, uint32_t target_core)
     : Gemm(config, model, name, attributes, target_core) {
   has_bias = std::stoi(get_attribute("has_bias"));
+  _resident_input = _attributes.count("hstu_resident_input") &&
+                    std::stoi(get_attribute("hstu_resident_input"));
+  _resident_output = _attributes.count("hstu_resident_output") &&
+                     std::stoi(get_attribute("hstu_resident_output"));
+  _residual_input = _attributes.count("hstu_residual_input") &&
+                    std::stoi(get_attribute("hstu_residual_input"));
 }
 
 void GemmWS::initialize_tiles(MappingTable& mapping_table) {
@@ -120,10 +126,24 @@ void GemmWS::initialize_instructions(Tile* tile, Mapping mapping) {
     /* MOVIN BIAS */
     if(!tile->accum && has_bias) { 
       std::vector<addr_type> bias_addrs;
-      for (int iter_m = 0; iter_m < m_loop; iter_m+=elems_per_access) {
+      if (_residual_input) {
+        for (int iter_n = 0; iter_n < mapping.tile_in_loop.N; ++iter_n) {
+          int N = tout_n_offset + iter_n;
+          if (N >= mapping.total_loop.N) continue;
+          for (int iter_m = 0; iter_m < m_loop; iter_m += elems_per_access) {
             int M = M_offset + iter_m;
             if (M >= mapping.total_loop.M) continue;
-            bias_addrs.push_back(third_addr + _config.align_address(M * _config.precision));
+            bias_addrs.push_back(third_addr + _config.align_address(
+                (static_cast<uint64_t>(N) * mapping.total_loop.M + M) *
+                _config.precision));
+          }
+        }
+      } else {
+        for (int iter_m = 0; iter_m < m_loop; iter_m+=elems_per_access) {
+          int M = M_offset + iter_m;
+          if (M >= mapping.total_loop.M) continue;
+          bias_addrs.push_back(third_addr + _config.align_address(M * _config.precision));
+        }
       }
       tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
               .opcode = Opcode::MOVIN,
@@ -181,7 +201,7 @@ void GemmWS::initialize_instructions(Tile* tile, Mapping mapping) {
             (Ns * mapping.tile_in_loop.M + Ms) * _config.precision;
 
         /* MOVIN Activation */
-        if (Ms == 0) {
+        if (Ms == 0 && !_resident_input) {
           std::set<addr_type> input_set;
           for (int iter_n = 0; iter_n < n_loop; iter_n++) {
             for (int iter_c = 0; iter_c < c_in_loop; iter_c+=elems_per_access) {
@@ -238,13 +258,15 @@ void GemmWS::initialize_instructions(Tile* tile, Mapping mapping) {
             (Ns * mapping.tile_in_loop.M + Ms) * _config.precision;
         for(int c_iter = 0; c_iter < c_in_loop; c_iter+=_config.core_config[target_core].core_height) {
           int c_iter_size = c_in_loop - c_iter > _config.core_config[target_core].core_height ? _config.core_config[target_core].core_height : c_in_loop - c_iter;
+          std::vector<addr_type> gemm_sources;
+          if (!_resident_input) gemm_sources.push_back(act_sp_addr);
+          gemm_sources.push_back(weight_sp_addr);
           tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
               .opcode = Opcode::GEMM_PRELOAD,
               .dest_addr = out_sp_addr,
               .size = (uint32_t)n_loop,
               .compute_size = (uint32_t)n_loop,
-              .src_addrs =
-                  std::vector<addr_type>{act_sp_addr, weight_sp_addr},
+              .src_addrs = std::move(gemm_sources),
               .tile_m = static_cast<unsigned int>(m_loop),
               .tile_k = static_cast<unsigned int>(c_iter_size),
               .tile_n = static_cast<unsigned int>(n_loop)}));
@@ -254,7 +276,8 @@ void GemmWS::initialize_instructions(Tile* tile, Mapping mapping) {
   }
 
   /* MOVOUT */
-  if (tout_c_offset + mapping.tile_in_loop.C >= mapping.total_loop.C){
+  if (!_resident_output &&
+      tout_c_offset + mapping.tile_in_loop.C >= mapping.total_loop.C){
     for (int Ms = 0; Ms < mapping.tile_in_loop.M; Ms += loop_size) {
       int M_offset = tout_m_offset + Ms;
       int m_loop = M_offset + loop_size > mapping.total_loop.M

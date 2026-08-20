@@ -17,6 +17,8 @@ class Split : public Operation {
 
   std::vector<uint32_t> _input_shape;
   std::vector<std::vector<uint32_t>> _output_shapes;
+  bool _resident_input = false;
+  bool _silu_first_output = false;
   std::vector<std::string> _output_names;
   uint32_t _axis = 0;
 };

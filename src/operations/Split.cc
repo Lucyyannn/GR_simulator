@@ -44,6 +44,10 @@ Split::Split(SimulationConfig config, Model* model, std::string name,
   _optype = "Split";
   _input_shape = parse_dims(get_attribute("input_shape"));
   _axis = static_cast<uint32_t>(std::stoul(get_attribute("axis")));
+  _resident_input = _attributes.count("hstu_resident_input") &&
+                    std::stoi(get_attribute("hstu_resident_input"));
+  _silu_first_output = _attributes.count("hstu_silu_first_output") &&
+                       std::stoi(get_attribute("hstu_silu_first_output"));
   _output_names = split_csv(get_attribute("output_names"));
 
   auto shape_specs = split_csv(get_attribute("output_shapes"));
@@ -141,20 +145,35 @@ void Split::initialize_copy_tile(uint32_t output_idx, uint64_t element_offset,
       .skip = false,
   });
 
-  tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
-      .opcode = Opcode::MOVIN,
-      .dest_addr = SPAD_BASE,
-      .size = static_cast<uint32_t>(input_addrs.size()),
-      .src_addrs = std::vector<addr_type>(input_addrs.begin(), input_addrs.end()),
-      .operand_id = _INPUT_OPERAND,
-  }));
-  tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
-      .opcode = Opcode::COMP,
-      .dest_addr = SPAD_BASE,
-      .size = static_cast<uint32_t>(input_addrs.size()),
-      .compute_size = static_cast<uint32_t>(elements * _config.precision),
-      .src_addrs = std::vector<addr_type>{SPAD_BASE},
-  }));
+  if (!_resident_input) {
+    tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
+        .opcode = Opcode::MOVIN,
+        .dest_addr = SPAD_BASE,
+        .size = static_cast<uint32_t>(input_addrs.size()),
+        .src_addrs = std::vector<addr_type>(input_addrs.begin(), input_addrs.end()),
+        .operand_id = _INPUT_OPERAND,
+    }));
+  }
+  if (_silu_first_output && output_idx == 0) {
+    tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
+        .opcode = Opcode::SWISH,
+        .dest_addr = SPAD_BASE,
+        .size = static_cast<uint32_t>(input_addrs.size()),
+        .compute_size = static_cast<uint32_t>(elements * _config.precision),
+        .src_addrs = {},
+    }));
+  } else if (_resident_input) {
+    // Register the fused projection slice in the local buffer without charging
+    // a copy pass. This makes the following MOVOUT observable to the core's
+    // dependency tracker while preserving the resident-kernel abstraction.
+    tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
+        .opcode = Opcode::COMP,
+        .dest_addr = SPAD_BASE,
+        .size = static_cast<uint32_t>(input_addrs.size()),
+        .compute_size = 0,
+        .src_addrs = {},
+    }));
+  }
   tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
       .opcode = Opcode::MOVOUT,
       .dest_addr = SPAD_BASE,

@@ -32,7 +32,8 @@ Options:
   --op-modeling SPEC           Operator modeling modes, e.g. split=materialize,view=materialize,concat=materialize
   --attention-modeling MODE     Attention modeling mode: decomposed or fused. Default: fused
   --disable-attention-partial-start  Force attention to wait for all inputs before starting. Default: disabled
-  --disable-ar-reduce-attention-compute  Keep AR data movement but do not reduce attention compute. Default: disabled
+  --disable-ar-reduce-attention-compute  Keep AR data movement but charge full logical QK/AV compute. Default
+  --enable-ar-reduce-attention-compute   Allow AR to reduce logical QK/AV compute
   --without-ooo-pipeline        Disable partial attention start, disable AR compute reduction, and add HBM restore movement
   --enable-kv-reuse             Enable KV row reuse metadata in generated traces
   --kv-reuse-variant MODE       KV reuse variant: global or window_topk. Default: window_topk
@@ -63,7 +64,7 @@ SEED="${SEED:-1234}"
 OP_MODELING="${OP_MODELING:-split=materialize,view=materialize,concat=materialize}"
 ATTENTION_MODELING="${ATTENTION_MODELING:-fused}"
 ATTENTION_PARTIAL_START_ENABLED="${ATTENTION_PARTIAL_START_ENABLED:-1}"
-AR_REDUCE_ATTENTION_COMPUTE="${AR_REDUCE_ATTENTION_COMPUTE:-1}"
+AR_REDUCE_ATTENTION_COMPUTE="${AR_REDUCE_ATTENTION_COMPUTE:-0}"
 WITHOUT_OOO_PIPELINE="${WITHOUT_OOO_PIPELINE:-0}"
 ENABLE_KV_REUSE="${ENABLE_KV_REUSE:-0}"
 KV_REUSE_VARIANT="${KV_REUSE_VARIANT:-window_topk}"
@@ -163,6 +164,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --disable-ar-reduce-attention-compute)
       AR_REDUCE_ATTENTION_COMPUTE=0
+      shift
+      ;;
+    --enable-ar-reduce-attention-compute)
+      AR_REDUCE_ATTENTION_COMPUTE=1
       shift
       ;;
     --without-ooo-pipeline)
@@ -337,6 +342,8 @@ fi
 
 if [[ "${AR_REDUCE_ATTENTION_COMPUTE}" == "0" ]]; then
   TRACE_ARGS+=(--disable-ar-reduce-attention-compute)
+else
+  TRACE_ARGS+=(--enable-ar-reduce-attention-compute)
 fi
 
 if [[ "${WITHOUT_OOO_PIPELINE}" == "1" ]]; then

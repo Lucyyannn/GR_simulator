@@ -7,6 +7,8 @@ import random
 from collections import Counter
 from pathlib import Path
 
+HSTU_NUM_HEADS = 4
+
 
 def tensor(name, shape, dtype="float16", is_weight=False, **meta):
     data = {
@@ -352,6 +354,28 @@ def compressed_rows_for_ratio(logical_rows, reuse_ratio):
     return max(1, int(round(logical_rows * (1.0 - ratio))))
 
 
+def is_full_recompute(kv_len, history_recompute_len):
+    return kv_len > 0 and history_recompute_len == kv_len
+
+
+def recomputed_history_rows(kv_len, history_recompute_len):
+    """Return active history rows: item rows for IR, all rows for full recompute."""
+    if is_full_recompute(kv_len, history_recompute_len):
+        return kv_len
+    return history_recompute_len
+
+
+def validate_recompute_len(kv_len, history_recompute_len):
+    item_count = (kv_len + 1) // 2
+    if history_recompute_len < 0 or history_recompute_len > kv_len:
+        raise ValueError("history_recompute_len must be in [0, kv_len]")
+    if history_recompute_len > item_count and history_recompute_len != kv_len:
+        raise ValueError(
+            "IR history_recompute_len counts item rows and must be <= ceil(kv_len/2); "
+            "use history_recompute_len=kv_len only for Full Recompute"
+        )
+
+
 def build_ratio_reuse_mapping(length, reuse_ratio, reuse_axis=0):
     physical_rows = compressed_rows_for_ratio(length, reuse_ratio)
     if physical_rows >= length:
@@ -372,14 +396,13 @@ def build_ratio_reuse_mapping(length, reuse_ratio, reuse_axis=0):
 
 
 def item_action_cached_rows_after_recompute(kv_len, history_recompute_len):
-    if history_recompute_len >= kv_len:
+    if is_full_recompute(kv_len, history_recompute_len):
         return 0, 0
     item_count = (kv_len + 1) // 2
     action_count = kv_len // 2
     recomputed_items = min(history_recompute_len, item_count)
-    recomputed_actions = max(0, history_recompute_len - item_count)
     remaining_items = max(0, item_count - recomputed_items)
-    remaining_actions = max(0, action_count - recomputed_actions)
+    remaining_actions = action_count
     return remaining_items, remaining_actions
 
 
@@ -430,10 +453,9 @@ def prefix_item_to_action_causal_score_elements(
     if history_recompute_len <= 0 or prefix_action_rows <= 0:
         return 0
     action_rows = min(history_recompute_len, prefix_action_rows)
-    # Recomputed history rows are item rows. With interleaved item/action
-    # history, item i attends the earlier retained action rows. Retained action
-    # rows are assumed to occupy the earliest action slots.
-    return action_rows * (action_rows + 1) // 2 + (
+    # History is [item_0, action_0, item_1, action_1, ...]. Recomputed item i
+    # can attend actions 0..i-1, not action_i, hence the strict triangle.
+    return action_rows * (action_rows - 1) // 2 + (
         history_recompute_len - action_rows
     ) * action_rows
 
@@ -609,15 +631,18 @@ def recompute_attention_score_elements(
     candidate_tokens,
     kv_reuse_ratio=0.0,
 ):
+    total_kv_len = cached_kv_len + history_recompute_len
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
-        cached_kv_len + history_recompute_len, history_recompute_len, kv_reuse_ratio
+        total_kv_len, history_recompute_len, kv_reuse_ratio
     )
     if history_recompute_len <= 0:
-        return batch_size * candidate_tokens * (
-            effective_cached_kv_len + candidate_tokens
-        )
+        return batch_size * candidate_tokens * (effective_cached_kv_len + 1)
 
-    total_kv_len = cached_kv_len + history_recompute_len
+    if is_full_recompute(total_kv_len, history_recompute_len):
+        history_scores = history_recompute_len * (history_recompute_len + 1) // 2
+        candidate_scores = candidate_tokens * history_recompute_len + candidate_tokens
+        return batch_size * (history_scores + candidate_scores)
+
     prefix_action_rows = prefix_action_rows_after_recompute(
         total_kv_len, history_recompute_len, kv_reuse_ratio
     )
@@ -628,8 +653,8 @@ def recompute_attention_score_elements(
         )
     )
     candidate_scores = candidate_tokens * (
-        effective_cached_kv_len + history_recompute_len + candidate_tokens
-    )
+        effective_cached_kv_len + history_recompute_len
+    ) + candidate_tokens
     return batch_size * (history_scores + candidate_scores)
 
 
@@ -640,26 +665,35 @@ def split_recompute_attention_score_elements(
     candidate_tokens,
     kv_reuse_ratio=0.0,
 ):
+    total_kv_len = cached_kv_len + history_recompute_len
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
-        cached_kv_len + history_recompute_len, history_recompute_len, kv_reuse_ratio
+        total_kv_len, history_recompute_len, kv_reuse_ratio
     )
     if history_recompute_len <= 0:
-        return 0, batch_size * candidate_tokens * (
-            effective_cached_kv_len + candidate_tokens
-        )
+        return 0, batch_size * candidate_tokens * (effective_cached_kv_len + 1)
 
-    total_kv_len = cached_kv_len + history_recompute_len
+    if is_full_recompute(total_kv_len, history_recompute_len):
+        early_scores = (
+            history_recompute_len * (history_recompute_len + 1) // 2
+            + candidate_tokens * history_recompute_len
+            + candidate_tokens
+        )
+        return batch_size * early_scores, 0
+
     prefix_action_rows = prefix_action_rows_after_recompute(
         total_kv_len, history_recompute_len, kv_reuse_ratio
     )
     early_scores = (
         history_recompute_len * (history_recompute_len + 1) // 2
-        + prefix_item_to_action_causal_score_elements(
+        + candidate_tokens * history_recompute_len
+        + candidate_tokens
+    )
+    cached_scores = (
+        prefix_item_to_action_causal_score_elements(
             history_recompute_len, prefix_action_rows
         )
-        + candidate_tokens * (history_recompute_len + candidate_tokens)
+        + candidate_tokens * effective_cached_kv_len
     )
-    cached_scores = candidate_tokens * effective_cached_kv_len
     return batch_size * early_scores, batch_size * cached_scores
 
 
@@ -670,27 +704,28 @@ def recompute_attention_score_parts(
     candidate_tokens,
     kv_reuse_ratio=0.0,
 ):
-    effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
-        cached_kv_len + history_recompute_len, history_recompute_len, kv_reuse_ratio
-    )
     total_kv_len = cached_kv_len + history_recompute_len
+    effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
+        total_kv_len, history_recompute_len, kv_reuse_ratio
+    )
+    full_recompute = is_full_recompute(total_kv_len, history_recompute_len)
     prefix_action_rows = prefix_action_rows_after_recompute(
         total_kv_len, history_recompute_len, kv_reuse_ratio
     )
-    history_prefix_scores = (
-        history_recompute_len * (history_recompute_len + 1) // 2
-        + prefix_item_to_action_causal_score_elements(
+    history_prefix_scores = history_recompute_len * (history_recompute_len + 1) // 2
+    history_cached_scores = 0 if full_recompute else (
+        prefix_item_to_action_causal_score_elements(
             history_recompute_len, prefix_action_rows
         )
     )
     return {
-        "candidate_self": batch_size * candidate_tokens * candidate_tokens,
+        "candidate_self": batch_size * candidate_tokens,
         "candidate_cached": batch_size * candidate_tokens * effective_cached_kv_len,
         "candidate_recompute_history": (
             batch_size * candidate_tokens * history_recompute_len
         ),
         "history_prefix": batch_size * history_prefix_scores,
-        "history_cached": 0,
+        "history_cached": batch_size * history_cached_scores,
     }
 
 
@@ -723,16 +758,45 @@ def add_projection_path(
 ):
     shape = token_shape(rows, hidden, batched, batch_size)
     z = f"{path_prefix}.z"
-    zact = f"{path_prefix}.zact"
+    x_norm = f"{path_prefix}.x_norm"
     u = f"{path_prefix}.u"
     v = f"{path_prefix}.v"
     q = f"{path_prefix}.q"
     k = f"{path_prefix}.k"
     add_op(
         ops,
-        "aten::linear",
+        "hstu::input_prep",
         [
             input_tensor,
+            source_to_hbm_tensor(
+                source_medium,
+                f"{shared_layer}.input_norm_w",
+                [hidden],
+                is_weight=True,
+                logical_id=f"{shared_layer}.input_norm_w",
+                role="weight",
+                preload_group="pre_attention",
+                **layer_meta,
+            ),
+            source_to_hbm_tensor(
+                source_medium,
+                f"{shared_layer}.input_norm_b",
+                [hidden],
+                is_weight=True,
+                logical_id=f"{shared_layer}.input_norm_b",
+                role="weight",
+                preload_group="pre_attention",
+                **layer_meta,
+            ),
+        ],
+        [hbm_tensor(x_norm, shape, role="resident_activation", **layer_meta)],
+        {"hstu_ub_resident_output": 1},
+    )
+    add_op(
+        ops,
+        "aten::linear",
+        [
+            hbm_tensor(x_norm, shape, role="resident_activation", **layer_meta),
             source_to_hbm_tensor(
                 source_medium,
                 f"{shared_layer}.w1",
@@ -754,25 +818,24 @@ def add_projection_path(
                 **layer_meta,
             ),
         ],
-        [hbm_tensor(z, token_shape(rows, hidden * 4, batched, batch_size), role="activation", **layer_meta)],
-    )
-    add_op(
-        ops,
-        "aten::silu",
-        [hbm_tensor(z, token_shape(rows, hidden * 4, batched, batch_size), role="activation", **layer_meta)],
-        [hbm_tensor(zact, token_shape(rows, hidden * 4, batched, batch_size), role="activation", **layer_meta)],
+        [hbm_tensor(z, token_shape(rows, hidden * 4, batched, batch_size), role="resident_activation", **layer_meta)],
+        {"hstu_resident_input": 1, "hstu_resident_output": 1},
     )
     add_op(
         ops,
         "aten::split",
-        [hbm_tensor(zact, token_shape(rows, hidden * 4, batched, batch_size), role="activation", **layer_meta)],
+        [hbm_tensor(z, token_shape(rows, hidden * 4, batched, batch_size), role="resident_activation", **layer_meta)],
         [
             hbm_tensor(u, shape, role="activation", **layer_meta),
             hbm_tensor(v, shape, role="activation", **layer_meta),
             hbm_tensor(q, shape, role="activation", **layer_meta),
             hbm_tensor(k, shape, role="activation", **layer_meta),
         ],
-        {"axis": 2 if batched else 1, **op_modeling_attrs(op_modeling, "split")},
+        {
+            "axis": 2 if batched else 1,
+            "hstu_resident_input": 1,
+            "hstu_silu_first_output": 1,
+        },
     )
     return {"u": u, "v": v, "q": q, "k": k, "shape": shape}
 
@@ -825,6 +888,7 @@ def add_attention_part(
             "mask_mode": part,
             "attention_score_elements": score_elements,
             "hidden": hidden,
+            "num_heads": HSTU_NUM_HEADS,
             "batch_size": batch_size,
             "attention_part": part,
             "name_hint": f"{prefix}.{part}",
@@ -842,7 +906,7 @@ def join_part_outputs(ops, parts, final_name, shape, layer_meta):
         out = final_name if idx == len(parts) - 1 else f"{final_name}.join{idx}"
         add_op(
             ops,
-            "aten::mul",
+            "aten::add",
             [
                 hbm_tensor(current, shape, role="activation", **layer_meta),
                 hbm_tensor(next_part, shape, role="activation", **layer_meta),
@@ -851,6 +915,78 @@ def join_part_outputs(ops, parts, final_name, shape, layer_meta):
         )
         current = out
     return current
+
+
+def add_meta_output_path(
+    ops,
+    prefix,
+    shared_layer,
+    attention_name,
+    u_name,
+    residual_tensor,
+    output_name,
+    shape,
+    hidden,
+    source_medium,
+    layer_meta,
+):
+    prep = f"{prefix}.output_prep"
+    prep_shape = list(shape)
+    prep_shape[-1] = hidden * 3
+    add_op(
+        ops,
+        "hstu::output_prep",
+        [
+            hbm_tensor(attention_name, shape, role="activation", **layer_meta),
+            hbm_tensor(u_name, shape, role="activation", **layer_meta),
+            source_to_hbm_tensor(
+                source_medium,
+                f"{shared_layer}.output_norm_w",
+                [hidden],
+                is_weight=True,
+                logical_id=f"{shared_layer}.output_norm_w",
+                role="weight",
+                preload_group="post_attention_weights",
+                **layer_meta,
+            ),
+            source_to_hbm_tensor(
+                source_medium,
+                f"{shared_layer}.output_norm_b",
+                [hidden],
+                is_weight=True,
+                logical_id=f"{shared_layer}.output_norm_b",
+                role="weight",
+                preload_group="post_attention_weights",
+                **layer_meta,
+            ),
+        ],
+        [hbm_tensor(prep, prep_shape, role="resident_activation", **layer_meta)],
+        {"concat_u": 1, "concat_x": 1, "hstu_ub_resident_output": 1},
+    )
+    add_op(
+        ops,
+        "aten::linear",
+        [
+            hbm_tensor(prep, prep_shape, role="resident_activation", **layer_meta),
+            source_to_hbm_tensor(
+                source_medium,
+                f"{shared_layer}.w2",
+                [hidden * 3, hidden],
+                is_weight=True,
+                logical_id=f"{shared_layer}.w2",
+                role="weight",
+                preload_group="post_attention_weights",
+                **layer_meta,
+            ),
+            residual_tensor,
+        ],
+        [hbm_tensor(output_name, shape, role="activation", **layer_meta)],
+        {
+            "hstu_resident_input": 1,
+            "hstu_residual_input": 1,
+            "meta_addmm_residual": 1,
+        },
+    )
 
 
 def add_recompute_split_layer_ops(
@@ -1081,8 +1217,8 @@ def add_recompute_split_layer_ops(
         ops,
         "aten::cat",
         [
-            hbm_tensor(candidate_av, candidate_shape, role="activation", **layer_meta),
             hbm_tensor(history_av, history_shape, role="activation", **layer_meta),
+            hbm_tensor(candidate_av, candidate_shape, role="activation", **layer_meta),
         ],
         [hbm_tensor(av, active_shape, role="activation", **layer_meta)],
         {"axis": 1 if batched else 0, **op_modeling_attrs(op_modeling, "concat")},
@@ -1091,77 +1227,35 @@ def add_recompute_split_layer_ops(
         ops,
         "aten::cat",
         [
-            hbm_tensor(candidate["u"], candidate_shape, role="activation", **layer_meta),
             hbm_tensor(history["u"], history_shape, role="activation", **layer_meta),
+            hbm_tensor(candidate["u"], candidate_shape, role="activation", **layer_meta),
         ],
         [hbm_tensor(u, active_shape, role="activation", **layer_meta)],
         {"axis": 1 if batched else 0, **op_modeling_attrs(op_modeling, "concat")},
     )
+    residual = f"{prefix}.residual"
     add_op(
         ops,
-        "aten::layer_norm",
+        "aten::cat",
         [
-            hbm_tensor(av, active_shape, role="activation", **layer_meta),
-            source_to_hbm_tensor(
-                source_medium,
-                f"{shared_layer}.ln_w",
-                [hidden],
-                is_weight=True,
-                logical_id=f"{shared_layer}.ln_w",
-                role="weight",
-                preload_group="post_attention_weights",
-                **layer_meta,
-            ),
-            source_to_hbm_tensor(
-                source_medium,
-                f"{shared_layer}.ln_b",
-                [hidden],
-                is_weight=True,
-                logical_id=f"{shared_layer}.ln_b",
-                role="weight",
-                preload_group="post_attention_weights",
-                **layer_meta,
-            ),
+            history_input,
+            candidate_input,
         ],
-        [hbm_tensor(av_norm, active_shape, role="activation", **layer_meta)],
-        {**op_modeling_attrs(op_modeling, "layer_norm")},
+        [hbm_tensor(residual, active_shape, role="activation", **layer_meta)],
+        {"axis": 1 if batched else 0, **op_modeling_attrs(op_modeling, "concat")},
     )
-    add_op(
+    add_meta_output_path(
         ops,
-        "aten::mul",
-        [
-            hbm_tensor(av_norm, active_shape, role="activation", **layer_meta),
-            hbm_tensor(u, active_shape, role="activation", **layer_meta),
-        ],
-        [hbm_tensor(gated, active_shape, role="activation", **layer_meta)],
-    )
-    add_op(
-        ops,
-        "aten::linear",
-        [
-            hbm_tensor(gated, active_shape, role="activation", **layer_meta),
-            source_to_hbm_tensor(
-                source_medium,
-                f"{shared_layer}.w2",
-                [hidden, hidden],
-                is_weight=True,
-                logical_id=f"{shared_layer}.w2",
-                role="weight",
-                preload_group="post_attention_weights",
-                **layer_meta,
-            ),
-            source_to_hbm_tensor(
-                source_medium,
-                f"{shared_layer}.b2",
-                [hidden],
-                is_weight=True,
-                logical_id=f"{shared_layer}.b2",
-                role="weight",
-                preload_group="post_attention_weights",
-                **layer_meta,
-            ),
-        ],
-        [hbm_tensor(out, active_shape, role="activation", **layer_meta)],
+        prefix,
+        shared_layer,
+        av,
+        u,
+        hbm_tensor(residual, active_shape, role="activation", **layer_meta),
+        out,
+        active_shape,
+        hidden,
+        source_medium,
+        layer_meta,
     )
 
 
@@ -1194,7 +1288,7 @@ def build_trace(
     seed=0,
     history_recompute_len=0,
     attention_partial_start_enabled=True,
-    ar_reduce_attention_compute=True,
+    ar_reduce_attention_compute=False,
     without_ooo_pipeline=False,
 ):
     op_modeling = op_modeling or {}
@@ -1216,10 +1310,10 @@ def build_trace(
             "Unsupported history recompute source medium: "
             f"{history_recompute_source_medium}"
         )
-    if history_recompute_len < 0 or history_recompute_len > kv_len:
-        raise ValueError("history_recompute_len must be in [0, kv_len]")
+    validate_recompute_len(kv_len, history_recompute_len)
     candidate_tokens = tokens
-    cached_kv_len = kv_len - history_recompute_len
+    active_history_rows = recomputed_history_rows(kv_len, history_recompute_len)
+    cached_kv_len = kv_len - active_history_rows
     kv_reuse_ratio = clamp_ratio(kv_reuse_ratio if kv_reuse_enabled else 0.0)
     hbm_history_restore_enabled = without_ooo_pipeline and history_recompute_len > 0
     attention_kv_reuse_ratio = (
@@ -1228,7 +1322,7 @@ def build_trace(
     history_action_compute_rows = history_action_compute_rows_after_recompute(
         history_recompute_len, attention_kv_reuse_ratio, kv_len
     )
-    active_tokens = history_recompute_len + candidate_tokens
+    active_tokens = active_history_rows + candidate_tokens
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
         kv_len, history_recompute_len, kv_reuse_ratio
     )
@@ -1271,6 +1365,7 @@ def build_trace(
     for layer in range(layers):
         prefix = f"u{user_id}.b{batch_id}.m{macro_batch_id}.layer{layer}"
         shared_layer = f"layer{layer}"
+        x_norm = f"{prefix}.x_norm"
         z = f"{prefix}.z"
         zact = f"{prefix}.zact"
         u = f"{prefix}.u"
@@ -1332,7 +1427,7 @@ def build_trace(
                 preload_group="candidate_embedding",
                 source_logical_id="embedding.table",
                 source_shape=[vocab, hidden],
-                indices_values=indices_values[:candidate_tokens],
+                indices_values=indices_values[-candidate_tokens:],
                 **layer_meta,
             )
             history_input = source_to_hbm_tensor(
@@ -1344,7 +1439,7 @@ def build_trace(
                 preload_group="history_recompute_embedding",
                 source_logical_id="embedding.table",
                 source_shape=[vocab, hidden],
-                indices_values=indices_values[candidate_tokens:],
+                indices_values=indices_values[:history_recompute_len],
                 **layer_meta,
             )
             k_cache_tensor = source_to_hbm_tensor(
@@ -1405,7 +1500,7 @@ def build_trace(
                     preload_group="candidate_embedding",
                     source_logical_id="embedding.table",
                     source_shape=[vocab, hidden],
-                    indices_values=indices_values[:candidate_tokens],
+                    indices_values=indices_values[-candidate_tokens:],
                     **layer_meta,
                 )
                 history_input = source_to_hbm_tensor(
@@ -1417,19 +1512,16 @@ def build_trace(
                     preload_group="history_recompute_embedding",
                     source_logical_id="embedding.table",
                     source_shape=[vocab, hidden],
-                    indices_values=indices_values[candidate_tokens:],
+                    indices_values=indices_values[:history_recompute_len],
                     **layer_meta,
                 )
-                if without_ooo_pipeline:
-                    wo_ooo_preload_dependencies.extend([candidate_input, history_input])
-                else:
-                    add_op(
-                        ops,
-                        "aten::cat",
-                        [candidate_input, history_input],
-                        [hbm_tensor(current, [active_tokens, hidden], role="activation", **layer_meta)],
-                        {"axis": 0, **op_modeling_attrs(op_modeling, "concat")},
-                    )
+                add_op(
+                    ops,
+                    "aten::cat",
+                    [history_input, candidate_input],
+                    [hbm_tensor(current, [active_tokens, hidden], role="activation", **layer_meta)],
+                    {"axis": 0, **op_modeling_attrs(op_modeling, "concat")},
+                )
             else:
                 current_input = source_to_hbm_tensor(
                     embedding_source_medium,
@@ -1444,8 +1536,27 @@ def build_trace(
                     **layer_meta,
                 )
 
+        add_op(
+            ops,
+            "hstu::input_prep",
+            [
+                current_input,
+                source_to_hbm_tensor(
+                    source_medium, f"{shared_layer}.input_norm_w", [hidden],
+                    is_weight=True, logical_id=f"{shared_layer}.input_norm_w",
+                    role="weight", preload_group="pre_attention", **layer_meta,
+                ),
+                source_to_hbm_tensor(
+                    source_medium, f"{shared_layer}.input_norm_b", [hidden],
+                    is_weight=True, logical_id=f"{shared_layer}.input_norm_b",
+                    role="weight", preload_group="pre_attention", **layer_meta,
+                ),
+            ],
+            [hbm_tensor(x_norm, [active_tokens, hidden], role="resident_activation", **layer_meta)],
+            {"hstu_ub_resident_output": 1},
+        )
         linear_inputs = [
-            current_input,
+            hbm_tensor(x_norm, [active_tokens, hidden], role="resident_activation", **layer_meta),
             source_to_hbm_tensor(
                 source_medium,
                 f"{shared_layer}.w1",
@@ -1474,25 +1585,20 @@ def build_trace(
             ops,
             "aten::linear",
             linear_inputs,
-            [hbm_tensor(z, [active_tokens, hidden * 4], role="activation", **layer_meta)],
-        )
-        add_op(
-            ops,
-            "aten::silu",
-            [hbm_tensor(z, [active_tokens, hidden * 4], role="activation", **layer_meta)],
-            [hbm_tensor(zact, [active_tokens, hidden * 4], role="activation", **layer_meta)],
+            [hbm_tensor(z, [active_tokens, hidden * 4], role="resident_activation", **layer_meta)],
+            {"hstu_resident_input": 1, "hstu_resident_output": 1},
         )
         add_op(
             ops,
             "aten::split",
-            [hbm_tensor(zact, [active_tokens, hidden * 4], role="activation", **layer_meta)],
+            [hbm_tensor(z, [active_tokens, hidden * 4], role="resident_activation", **layer_meta)],
             [
                 hbm_tensor(u, [active_tokens, hidden], role="activation", **layer_meta),
                 hbm_tensor(v, [active_tokens, hidden], role="activation", **layer_meta),
                 hbm_tensor(q, [active_tokens, hidden], role="activation", **layer_meta),
                 hbm_tensor(k, [active_tokens, hidden], role="activation", **layer_meta),
             ],
-            {"axis": 1, **op_modeling_attrs(op_modeling, "split")},
+            {"axis": 1, "hstu_resident_input": 1, "hstu_silu_first_output": 1},
         )
         if hbm_history_restore_enabled:
             restored_k_cache, restored_v_cache = add_hbm_history_restore_ops(
@@ -1558,6 +1664,7 @@ def build_trace(
                         "mask_mode": "recompute_prefix_early",
                         "attention_score_elements": early_score_elements,
                         "hidden": hidden,
+                        "num_heads": HSTU_NUM_HEADS,
                         "batch_size": 1,
                         "attention_part": "recompute_early",
                     },
@@ -1605,13 +1712,14 @@ def build_trace(
                             "mask_mode": "cached_kv_late",
                             "attention_score_elements": cached_score_elements,
                             "hidden": hidden,
+                            "num_heads": HSTU_NUM_HEADS,
                             "batch_size": 1,
                             "attention_part": "cached_late",
                         },
                     )
                     add_op(
                         ops,
-                        "aten::mul",
+                        "aten::add",
                         [
                             hbm_tensor(early_av, [active_tokens, hidden], role="activation", **layer_meta),
                             hbm_tensor(cached_av, [active_tokens, hidden], role="activation", **layer_meta),
@@ -1692,6 +1800,7 @@ def build_trace(
                         "mask_mode": attention_mask_mode(history_recompute_len),
                         "attention_score_elements": score_elements,
                         "hidden": hidden,
+                        "num_heads": HSTU_NUM_HEADS,
                         "batch_size": 1,
                     },
                 )
@@ -1765,71 +1874,18 @@ def build_trace(
                 ],
                 [hbm_tensor(av, [active_tokens, hidden], role="activation", **layer_meta)],
             )
-        add_op(
+        add_meta_output_path(
             ops,
-            "aten::layer_norm",
-            [
-                hbm_tensor(av, [active_tokens, hidden], role="activation", **layer_meta),
-                source_to_hbm_tensor(
-                    source_medium,
-                    f"{shared_layer}.ln_w",
-                    [hidden],
-                    is_weight=True,
-                    logical_id=f"{shared_layer}.ln_w",
-                    role="weight",
-                    preload_group="post_attention_weights",
-                    **layer_meta,
-                ),
-                source_to_hbm_tensor(
-                    source_medium,
-                    f"{shared_layer}.ln_b",
-                    [hidden],
-                    is_weight=True,
-                    logical_id=f"{shared_layer}.ln_b",
-                    role="weight",
-                    preload_group="post_attention_weights",
-                    **layer_meta,
-                ),
-            ],
-            [hbm_tensor(av_norm, [active_tokens, hidden], role="activation", **layer_meta)],
-            {**op_modeling_attrs(op_modeling, "layer_norm")},
-        )
-        add_op(
-            ops,
-            "aten::mul",
-            [
-                hbm_tensor(av_norm, [active_tokens, hidden], role="activation", **layer_meta),
-                hbm_tensor(u, [active_tokens, hidden], role="activation", **layer_meta),
-            ],
-            [hbm_tensor(gated, [active_tokens, hidden], role="activation", **layer_meta)],
-        )
-        add_op(
-            ops,
-            "aten::linear",
-            [
-                hbm_tensor(gated, [active_tokens, hidden], role="activation", **layer_meta),
-                source_to_hbm_tensor(
-                    source_medium,
-                    f"{shared_layer}.w2",
-                    [hidden, hidden],
-                    is_weight=True,
-                    logical_id=f"{shared_layer}.w2",
-                    role="weight",
-                    preload_group="post_attention_weights",
-                    **layer_meta,
-                ),
-                source_to_hbm_tensor(
-                    source_medium,
-                    f"{shared_layer}.b2",
-                    [hidden],
-                    is_weight=True,
-                    logical_id=f"{shared_layer}.b2",
-                    role="weight",
-                    preload_group="post_attention_weights",
-                    **layer_meta,
-                ),
-            ],
-            [hbm_tensor(out, [active_tokens, hidden], role="activation", **layer_meta)],
+            prefix,
+            shared_layer,
+            av,
+            u,
+            current_input,
+            out,
+            [active_tokens, hidden],
+            hidden,
+            source_medium,
+            layer_meta,
         )
         current = out
 
@@ -1913,7 +1969,7 @@ def build_batched_trace(
     seed=0,
     history_recompute_len=0,
     attention_partial_start_enabled=True,
-    ar_reduce_attention_compute=True,
+    ar_reduce_attention_compute=False,
     without_ooo_pipeline=False,
 ):
     op_modeling = op_modeling or {}
@@ -1935,10 +1991,10 @@ def build_batched_trace(
             "Unsupported history recompute source medium: "
             f"{history_recompute_source_medium}"
         )
-    if history_recompute_len < 0 or history_recompute_len > kv_len:
-        raise ValueError("history_recompute_len must be in [0, kv_len]")
+    validate_recompute_len(kv_len, history_recompute_len)
     candidate_tokens = tokens
-    cached_kv_len = kv_len - history_recompute_len
+    active_history_rows = recomputed_history_rows(kv_len, history_recompute_len)
+    cached_kv_len = kv_len - active_history_rows
     kv_reuse_ratio = clamp_ratio(kv_reuse_ratio if kv_reuse_enabled else 0.0)
     hbm_history_restore_enabled = without_ooo_pipeline and history_recompute_len > 0
     attention_kv_reuse_ratio = (
@@ -1947,7 +2003,7 @@ def build_batched_trace(
     history_action_compute_rows = history_action_compute_rows_after_recompute(
         history_recompute_len, attention_kv_reuse_ratio, kv_len
     )
-    active_tokens = history_recompute_len + candidate_tokens
+    active_tokens = active_history_rows + candidate_tokens
     effective_cached_kv_len = effective_cached_rows_after_item_recompute_action_reuse(
         kv_len, history_recompute_len, kv_reuse_ratio
     )
@@ -2057,6 +2113,7 @@ def build_batched_trace(
     for layer in range(layers):
         prefix = f"b{batch_id}.m{macro_batch_id}.layer{layer}"
         shared_layer = f"layer{layer}"
+        x_norm = f"{prefix}.x_norm"
         kv_reuse_meta = batch_kv_reuse_meta(layer)
         z = f"{prefix}.z"
         zact = f"{prefix}.zact"
@@ -2118,10 +2175,10 @@ def build_batched_trace(
             and attention_partial_start_enabled
         ):
             candidate_indices_per_user = [
-                row[:candidate_tokens] for row in indices_values_per_user
+                row[-candidate_tokens:] for row in indices_values_per_user
             ]
             history_indices_per_user = [
-                row[candidate_tokens:] for row in indices_values_per_user
+                row[:history_recompute_len] for row in indices_values_per_user
             ]
             flat_candidate_indices = [
                 idx for row in candidate_indices_per_user for idx in row
@@ -2212,10 +2269,10 @@ def build_batched_trace(
         if layer == 0:
             if history_recompute_len > 0:
                 candidate_indices_per_user = [
-                    row[:candidate_tokens] for row in indices_values_per_user
+                    row[-candidate_tokens:] for row in indices_values_per_user
                 ]
                 history_indices_per_user = [
-                    row[candidate_tokens:] for row in indices_values_per_user
+                    row[:history_recompute_len] for row in indices_values_per_user
                 ]
                 flat_candidate_indices = [
                     idx for row in candidate_indices_per_user for idx in row
@@ -2251,16 +2308,13 @@ def build_batched_trace(
                     indices_values_per_user=history_indices_per_user,
                     **layer_meta,
                 )
-                if without_ooo_pipeline:
-                    wo_ooo_preload_dependencies.extend([candidate_input, history_input])
-                else:
-                    add_op(
-                        ops,
-                        "aten::cat",
-                        [candidate_input, history_input],
-                        [hbm_tensor(current, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
-                        {"axis": 1, **op_modeling_attrs(op_modeling, "concat")},
-                    )
+                add_op(
+                    ops,
+                    "aten::cat",
+                    [history_input, candidate_input],
+                    [hbm_tensor(current, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
+                    {"axis": 1, **op_modeling_attrs(op_modeling, "concat")},
+                )
             else:
                 current_input = source_to_hbm_tensor(
                     embedding_source_medium,
@@ -2277,8 +2331,33 @@ def build_batched_trace(
                     **layer_meta,
                 )
 
+        add_op(
+            ops,
+            "hstu::input_prep",
+            [
+                current_input,
+                source_to_hbm_tensor(
+                    source_medium, f"{shared_layer}.input_norm_w", [hidden],
+                    is_weight=True, logical_id=f"{shared_layer}.input_norm_w",
+                    role="weight", preload_group="pre_attention", **layer_meta,
+                ),
+                source_to_hbm_tensor(
+                    source_medium, f"{shared_layer}.input_norm_b", [hidden],
+                    is_weight=True, logical_id=f"{shared_layer}.input_norm_b",
+                    role="weight", preload_group="pre_attention", **layer_meta,
+                ),
+            ],
+            [hbm_tensor(
+                x_norm, [batch_size, active_tokens, hidden],
+                role="resident_activation", **layer_meta,
+            )],
+            {"hstu_ub_resident_output": 1},
+        )
         linear_inputs = [
-            current_input,
+            hbm_tensor(
+                x_norm, [batch_size, active_tokens, hidden],
+                role="resident_activation", **layer_meta,
+            ),
             source_to_hbm_tensor(
                 source_medium,
                 f"{shared_layer}.w1",
@@ -2309,26 +2388,17 @@ def build_batched_trace(
             linear_inputs,
             [
                 hbm_tensor(
-                    z, [batch_size, active_tokens, hidden * 4], role="activation", **layer_meta
+                    z, [batch_size, active_tokens, hidden * 4], role="resident_activation", **layer_meta
                 )
             ],
-        )
-        add_op(
-            ops,
-            "aten::silu",
-            [hbm_tensor(z, [batch_size, active_tokens, hidden * 4], role="activation", **layer_meta)],
-            [
-                hbm_tensor(
-                    zact, [batch_size, active_tokens, hidden * 4], role="activation", **layer_meta
-                )
-            ],
+            {"hstu_resident_input": 1, "hstu_resident_output": 1},
         )
         add_op(
             ops,
             "aten::split",
             [
                 hbm_tensor(
-                    zact, [batch_size, active_tokens, hidden * 4], role="activation", **layer_meta
+                    z, [batch_size, active_tokens, hidden * 4], role="resident_activation", **layer_meta
                 )
             ],
             [
@@ -2337,7 +2407,7 @@ def build_batched_trace(
                 hbm_tensor(q, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
                 hbm_tensor(k, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
             ],
-            {"axis": 2, **op_modeling_attrs(op_modeling, "split")},
+            {"axis": 2, "hstu_resident_input": 1, "hstu_silu_first_output": 1},
         )
         if hbm_history_restore_enabled:
             restored_k_cache, restored_v_cache = add_hbm_history_restore_ops(
@@ -2403,6 +2473,7 @@ def build_batched_trace(
                         "mask_mode": "recompute_prefix_early",
                         "attention_score_elements": early_score_elements,
                         "hidden": hidden,
+                        "num_heads": HSTU_NUM_HEADS,
                         "batch_size": batch_size,
                         "attention_part": "recompute_early",
                     },
@@ -2452,13 +2523,14 @@ def build_batched_trace(
                             "mask_mode": "cached_kv_late",
                             "attention_score_elements": cached_score_elements,
                             "hidden": hidden,
+                            "num_heads": HSTU_NUM_HEADS,
                             "batch_size": batch_size,
                             "attention_part": "cached_late",
                         },
                     )
                     add_op(
                         ops,
-                        "aten::mul",
+                        "aten::add",
                         [
                             hbm_tensor(early_av, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
                             hbm_tensor(cached_av, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
@@ -2553,6 +2625,7 @@ def build_batched_trace(
                             attention_kv_reuse_ratio,
                         ),
                         "hidden": hidden,
+                        "num_heads": HSTU_NUM_HEADS,
                         "batch_size": batch_size,
                     },
                 )
@@ -2680,75 +2753,18 @@ def build_batched_trace(
                 ],
                 [hbm_tensor(av, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
             )
-        add_op(
+        add_meta_output_path(
             ops,
-            "aten::layer_norm",
-            [
-                hbm_tensor(av, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
-                source_to_hbm_tensor(
-                    source_medium,
-                    f"{shared_layer}.ln_w",
-                    [hidden],
-                    is_weight=True,
-                    logical_id=f"{shared_layer}.ln_w",
-                    role="weight",
-                    preload_group="post_attention_weights",
-                    **layer_meta,
-                ),
-                source_to_hbm_tensor(
-                    source_medium,
-                    f"{shared_layer}.ln_b",
-                    [hidden],
-                    is_weight=True,
-                    logical_id=f"{shared_layer}.ln_b",
-                    role="weight",
-                    preload_group="post_attention_weights",
-                    **layer_meta,
-                ),
-            ],
-            [hbm_tensor(av_norm, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
-            {**op_modeling_attrs(op_modeling, "layer_norm")},
-        )
-        add_op(
-            ops,
-            "aten::mul",
-            [
-                hbm_tensor(
-                    av_norm, [batch_size, active_tokens, hidden], role="activation", **layer_meta
-                ),
-                hbm_tensor(u, [batch_size, active_tokens, hidden], role="activation", **layer_meta),
-            ],
-            [hbm_tensor(gated, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
-        )
-        add_op(
-            ops,
-            "aten::linear",
-            [
-                hbm_tensor(
-                    gated, [batch_size, active_tokens, hidden], role="activation", **layer_meta
-                ),
-                source_to_hbm_tensor(
-                    source_medium,
-                    f"{shared_layer}.w2",
-                    [hidden, hidden],
-                    is_weight=True,
-                    logical_id=f"{shared_layer}.w2",
-                    role="weight",
-                    preload_group="post_attention_weights",
-                    **layer_meta,
-                ),
-                source_to_hbm_tensor(
-                    source_medium,
-                    f"{shared_layer}.b2",
-                    [hidden],
-                    is_weight=True,
-                    logical_id=f"{shared_layer}.b2",
-                    role="weight",
-                    preload_group="post_attention_weights",
-                    **layer_meta,
-                ),
-            ],
-            [hbm_tensor(out, [batch_size, active_tokens, hidden], role="activation", **layer_meta)],
+            prefix,
+            shared_layer,
+            av,
+            u,
+            current_input,
+            out,
+            [batch_size, active_tokens, hidden],
+            hidden,
+            source_medium,
+            layer_meta,
         )
         current = out
 
@@ -2857,7 +2873,7 @@ def write_single_trace(args, op_modeling):
         rng,
     )
     candidate_indices = [rng.randrange(args.vocab) for _ in range(args.tokens)]
-    indices = candidate_indices + history_indices
+    indices = history_indices + candidate_indices
     trace = build_trace(
         args.layers,
         args.tokens,
@@ -2927,7 +2943,7 @@ def write_pipeline_traces(args, op_modeling):
                     stream_base=stream_base,
                 )
                 candidate_indices = [rng.randrange(args.vocab) for _ in range(tokens)]
-                indices_values_per_user.append(candidate_indices + history_indices)
+                indices_values_per_user.append(history_indices + candidate_indices)
             trace = build_batched_trace(
                 args.layers,
                 tokens,
@@ -3185,6 +3201,12 @@ def main():
         help="Disable out-of-order fused attention start on partial inputs.",
     )
     parser.add_argument(
+        "--enable-ar-reduce-attention-compute",
+        dest="ar_reduce_attention_compute",
+        action="store_true",
+        help="Allow AR physical KV reuse to reduce logical QK/AV work.",
+    )
+    parser.add_argument(
         "--disable-ar-reduce-attention-compute",
         dest="ar_reduce_attention_compute",
         action="store_false",
@@ -3201,7 +3223,7 @@ def main():
     )
     parser.set_defaults(
         attention_partial_start_enabled=True,
-        ar_reduce_attention_compute=True,
+        ar_reduce_attention_compute=False,
     )
     args = parser.parse_args()
     if args.embedding_source_medium is None:
@@ -3214,6 +3236,10 @@ def main():
 
     if args.num_users < 1 or args.users_per_batch < 1:
         raise ValueError("--num-users and --users-per-batch must be positive")
+    if args.hidden % HSTU_NUM_HEADS != 0:
+        raise ValueError(
+            f"--hidden must be divisible by the fixed {HSTU_NUM_HEADS} HSTU heads"
+        )
     if args.kv_reuse_action_count < 1:
         raise ValueError("--kv-reuse-action-count must be positive")
     if args.kv_reuse_window_size < 1:
@@ -3228,10 +3254,7 @@ def main():
         raise ValueError("--kv-reuse-action-stride must be positive")
     if args.kv_reuse_action_offset < 0:
         raise ValueError("--kv-reuse-action-offset must be non-negative")
-    if args.history_recompute_len < 0:
-        raise ValueError("--history-recompute-len must be non-negative")
-    if args.history_recompute_len > args.kv_len:
-        raise ValueError("--history-recompute-len must be <= --kv-len")
+    validate_recompute_len(args.kv_len, args.history_recompute_len)
     op_modeling = parse_op_modeling(args.op_modeling)
     multi_trace = (
         args.pipeline

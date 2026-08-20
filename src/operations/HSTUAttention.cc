@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 
 namespace {
 
@@ -65,12 +66,19 @@ HSTUAttention::HSTUAttention(SimulationConfig config, Model* model,
   if (_attributes.count("current_tokens"))
     _current_tokens = std::stoul(get_attribute("current_tokens"));
   if (_attributes.count("hidden")) _hidden = std::stoul(get_attribute("hidden"));
+  if (_attributes.count("num_heads"))
+    _num_heads = std::stoul(get_attribute("num_heads"));
   if (_attributes.count("attention_score_elements"))
     _attention_score_elements = std::stoull(get_attribute("attention_score_elements"));
 
   if (_logical_kv_len == 0 && _kv_axis < _k_cache_shape.size())
     _logical_kv_len = _k_cache_shape[_kv_axis] + _current_tokens;
   if (_hidden == 0 && !_output_shape.empty()) _hidden = _output_shape.back();
+  if (_num_heads == 0 || _hidden == 0 || _hidden % _num_heads != 0) {
+    throw std::invalid_argument(
+        "HSTU attention requires non-zero hidden/num_heads and hidden divisible "
+        "by num_heads");
+  }
 
   std::string output_name = _attributes.count("output_name")
                                 ? get_attribute("output_name")
@@ -93,6 +101,7 @@ HSTUAttention::HSTUAttention(const HSTUAttention& src) : Operation(src) {
   _logical_kv_len = src._logical_kv_len;
   _current_tokens = src._current_tokens;
   _hidden = src._hidden;
+  _num_heads = src._num_heads;
   _attention_score_elements = src._attention_score_elements;
   _dense_elements_per_tile = src._dense_elements_per_tile;
   _kv_rows_per_tile = src._kv_rows_per_tile;
@@ -222,11 +231,17 @@ void HSTUAttention::initialize_output_compute_tiles() {
         .src_addrs = std::vector<addr_type>(q_addrs.begin(), q_addrs.end()),
         .operand_id = _INPUT_OPERAND,
     }));
-    append_gemm_compute(tile.get(), capped_u32(tokens), hidden,
-                        effective_kv_len, ACCUM_SPAD_BASE);
-    append_silu_compute(tile.get(), tile_score_elements);
-    append_gemm_compute(tile.get(), capped_u32(tokens), effective_kv_len,
-                        hidden, ACCUM_SPAD_BASE);
+    const uint32_t heads = std::max<uint32_t>(_num_heads, 1);
+    const uint32_t head_dim = std::max<uint32_t>(hidden / heads, 1);
+    for (uint32_t head = 0; head < heads; ++head) {
+      append_gemm_compute(tile.get(), capped_u32(tokens), head_dim,
+                          effective_kv_len, ACCUM_SPAD_BASE);
+    }
+    append_pointwise_compute(tile.get(), tile_score_elements * heads);
+    for (uint32_t head = 0; head < heads; ++head) {
+      append_gemm_compute(tile.get(), capped_u32(tokens), effective_kv_len,
+                          head_dim, ACCUM_SPAD_BASE);
+    }
     tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
         .opcode = Opcode::MOVOUT,
         .dest_addr = ACCUM_SPAD_BASE,
@@ -263,18 +278,23 @@ void HSTUAttention::append_gemm_compute(Tile* tile, uint32_t n, uint32_t c,
   }
 }
 
-void HSTUAttention::append_silu_compute(Tile* tile, uint64_t score_elements) {
+void HSTUAttention::append_pointwise_compute(Tile* tile,
+                                             uint64_t score_elements) {
   const uint64_t bytes =
       std::max<uint64_t>(1, score_elements * _config.precision);
-  tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
-      .opcode = Opcode::SWISH,
-      .dest_addr = SPAD_BASE,
-      .size = std::max<uint32_t>(
-          1, capped_u32(ceil_div_u64(bytes, _config.dram_req_size))),
-      .compute_size = capped_u32(bytes),
-      .src_addrs = std::vector<addr_type>{ACCUM_SPAD_BASE},
-      .src_from_accum = true,
-  }));
+  // Meta HSTU: score = (QK * alpha); score = SiLU(score);
+  // score /= max_seq_len; score *= mask. These are four point-wise passes.
+  for (Opcode opcode : {Opcode::MUL, Opcode::SWISH, Opcode::DIV, Opcode::MUL}) {
+    tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
+        .opcode = opcode,
+        .dest_addr = SPAD_BASE,
+        .size = std::max<uint32_t>(
+            1, capped_u32(ceil_div_u64(bytes, _config.dram_req_size))),
+        .compute_size = capped_u32(bytes),
+        .src_addrs = std::vector<addr_type>{ACCUM_SPAD_BASE},
+        .src_from_accum = true,
+    }));
+  }
 }
 
 void HSTUAttention::initialize_movin_compute_tile(
@@ -295,13 +315,18 @@ void HSTUAttention::initialize_movin_compute_tile(
       .src_addrs = std::vector<addr_type>(input_addrs.begin(), input_addrs.end()),
       .operand_id = operand_id,
   }));
+  // MOVIN cannot be the last instruction in the current core state machine,
+  // because only execution/store completion marks a tile finished. Use a
+  // zero-byte dependency marker; unlike the old implementation this charges
+  // no vector work for data movement.
   tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
       .opcode = Opcode::COMP,
       .dest_addr = SPAD_BASE,
       .size = logical_request_count,
-      .compute_size = std::max<uint32_t>(compute_size, 1),
+      .compute_size = 0,
       .src_addrs = std::vector<addr_type>{SPAD_BASE},
   }));
+  (void)compute_size;
   _tiles.push_back(std::move(tile));
 }
 

@@ -74,6 +74,8 @@ ConvertedOp TraceOpConverter::convert(const OpEntry& entry) {
     return convert_cat(entry);
   if (name == "aten::mul" || name == "mul")
     return convert_mul(entry);
+  if (name == "aten::add" || name == "add")
+    return convert_add(entry);
   if (name == "aten::transpose" || name == "aten::permute" ||
       name == "aten::reshape" || name == "aten::view" || name == "transpose" ||
       name == "permute" || name == "reshape" || name == "view")
@@ -85,6 +87,10 @@ ConvertedOp TraceOpConverter::convert(const OpEntry& entry) {
   if (name == "hstu::attention" || name == "hstu_attention" ||
       name == "HSTUAttention")
     return convert_hstu_attention(entry);
+  if (name == "hstu::input_prep" || name == "HSTUInputPrep")
+    return convert_hstu_input_prep(entry);
+  if (name == "hstu::output_prep" || name == "HSTUOutputPrep")
+    return convert_hstu_output_prep(entry);
 
   spdlog::debug("[TraceOpConverter] Unknown op '{}' -> Dummy", name);
   return convert_dummy(entry);
@@ -373,6 +379,12 @@ ConvertedOp TraceOpConverter::convert_mul(const OpEntry& entry) {
   return mul;
 }
 
+ConvertedOp TraceOpConverter::convert_add(const OpEntry& entry) {
+  ConvertedOp add = convert_mul(entry);
+  add.attrs["elementwise_op"] = "add";
+  return add;
+}
+
 ConvertedOp TraceOpConverter::convert_view(const OpEntry& entry) {
   ConvertedOp view;
   view.optype = "View";
@@ -440,6 +452,32 @@ ConvertedOp TraceOpConverter::convert_hstu_attention(const OpEntry& entry) {
   }
   if (!attn.attrs.count("kv_axis")) attn.attrs["kv_axis"] = "1";
   return attn;
+}
+
+ConvertedOp TraceOpConverter::convert_hstu_input_prep(const OpEntry& entry) {
+  ConvertedOp prep;
+  prep.optype = "HSTUInputPrep";
+  prep.attrs = entry.attrs;
+  if (!entry.inputs.empty())
+    prep.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+  if (!entry.outputs.empty()) {
+    prep.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    prep.attrs["output_name"] = entry.outputs[0].name;
+  }
+  return prep;
+}
+
+ConvertedOp TraceOpConverter::convert_hstu_output_prep(const OpEntry& entry) {
+  ConvertedOp prep;
+  prep.optype = "HSTUOutputPrep";
+  prep.attrs = entry.attrs;
+  if (!entry.inputs.empty())
+    prep.attrs["input_shape"] = shape_to_str(entry.inputs[0].shape);
+  if (!entry.outputs.empty()) {
+    prep.attrs["output_shape"] = shape_to_str(entry.outputs[0].shape);
+    prep.attrs["output_name"] = entry.outputs[0].name;
+  }
+  return prep;
 }
 
 ConvertedOp TraceOpConverter::convert_dummy(const OpEntry& entry) {

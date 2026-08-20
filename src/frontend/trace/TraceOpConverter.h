@@ -29,10 +29,13 @@ class TraceOpConverter {
 	  static ConvertedOp convert_split(const OpEntry& entry);
 	  static ConvertedOp convert_cat(const OpEntry& entry);
 	  static ConvertedOp convert_mul(const OpEntry& entry);
+	  static ConvertedOp convert_add(const OpEntry& entry);
 	  static ConvertedOp convert_view(const OpEntry& entry);
 	  static ConvertedOp convert_softmax(const OpEntry& entry);
   static ConvertedOp convert_embedding(const OpEntry& entry);
   static ConvertedOp convert_hstu_attention(const OpEntry& entry);
+  static ConvertedOp convert_hstu_input_prep(const OpEntry& entry);
+  static ConvertedOp convert_hstu_output_prep(const OpEntry& entry);
   static ConvertedOp convert_dummy(const OpEntry& entry);
 
 	  static std::string shape_to_str(const std::vector<uint32_t>& shape);

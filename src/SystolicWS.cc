@@ -73,6 +73,9 @@ void SystolicWS::cycle() {
           front->start_cycle +
           get_vector_compute_cycles(front);  // Setting IC as 1 (Might need to modify)
       _vector_pipeline.push(std::move(front));
+      // Dependency-only markers have zero compute latency. Retire them in the
+      // issue cycle so they do not consume a synthetic Vector-active cycle.
+      finish_vector_pipeline();
     }
     _ex_inst_queue.pop();
   }
