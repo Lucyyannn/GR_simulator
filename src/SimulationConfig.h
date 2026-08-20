@@ -33,6 +33,7 @@ struct CoreConfig {
   uint32_t div_latency = 1;
   uint32_t exp_latency = 1;
   uint32_t gelu_latency = 1;
+  uint32_t swish_latency = 1;
   uint32_t add_tree_latency = 1;
   uint32_t scalar_sqrt_latency = 1;
   uint32_t scalar_add_latency = 1;

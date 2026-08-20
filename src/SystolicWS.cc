@@ -165,7 +165,8 @@ cycle_type SystolicWS::get_vector_compute_cycles(std::unique_ptr<Instruction>& i
       return vec_op_iter * _config.core_config[_id].mul_latency;
     case Opcode::MAC:
       return vec_op_iter * _config.core_config[_id].mac_latency;
-    case Opcode::SWISH: //TODO: Implement SWISH
+    case Opcode::SWISH:
+      return vec_op_iter * _config.core_config[_id].swish_latency;
     case Opcode::GELU:
       return vec_op_iter * _config.core_config[_id].gelu_latency;
     case Opcode::COMP:

@@ -268,7 +268,11 @@ SimulationConfig initialize_config(json config) {
     parsed_config.core_config[i].add_latency = core_config["add_latency"];
     parsed_config.core_config[i].mul_latency = core_config["mul_latency"];
     parsed_config.core_config[i].exp_latency = core_config["exp_latency"];
-    parsed_config.core_config[i].gelu_latency = core_config["gelu_latency"];
+    parsed_config.core_config[i].gelu_latency =
+        core_config.value("gelu_latency", 1u);
+    parsed_config.core_config[i].swish_latency =
+        core_config.value("swish_latency",
+                          parsed_config.core_config[i].gelu_latency);
     parsed_config.core_config[i].add_tree_latency = core_config["add_tree_latency"];
     parsed_config.core_config[i].scalar_sqrt_latency = core_config["scalar_sqrt_latency"];
     parsed_config.core_config[i].scalar_add_latency = core_config["scalar_add_latency"];
