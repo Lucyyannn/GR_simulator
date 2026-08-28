@@ -40,6 +40,82 @@ Core::~Core() {
   }
 }
 
+void Core::close_compute_activity(bool is_cube, cycle_type end_cycle) {
+  OpenComputeActivity& open =
+      is_cube ? _open_cube_activity : _open_vector_activity;
+  if (!open.active) return;
+  if (end_cycle < open.start_cycle) end_cycle = open.start_cycle;
+  if (end_cycle > open.start_cycle) {
+    _compute_activity_intervals.push_back(ComputeActivityInterval{
+        .core_id = _id,
+        .op_id = open.key.op_id,
+        .op_name = open.op_name,
+        .compute_region = open.key.compute_region,
+        .resource = open.resource,
+        .start_cycle = open.start_cycle,
+        .end_cycle = end_cycle,
+    });
+  }
+  open.active = false;
+}
+
+void Core::flush_compute_activity_intervals() {
+  // _core_cycle is the first cycle after the last cycle accounted by cycle().
+  close_compute_activity(true, _core_cycle);
+  close_compute_activity(false, _core_cycle);
+}
+
+void Core::record_compute_activity(const Instruction* inst, bool is_cube) {
+  if (inst == nullptr || inst->my_tile == nullptr) return;
+
+  const uint32_t op_id = inst->my_tile->layer_id;
+  const std::string resource = is_cube ? "cube" : "vector";
+  const std::string region = inst->compute_region.empty()
+                                 ? resource
+                                 : inst->compute_region;
+  const ComputeActivityKey key{.op_id = op_id, .compute_region = region};
+
+  OpenComputeActivity& open =
+      is_cube ? _open_cube_activity : _open_vector_activity;
+  if (open.active && !(open.key == key)) {
+    close_compute_activity(is_cube, _core_cycle);
+  }
+  if (!open.active) {
+    open.active = true;
+    open.key = key;
+    open.op_name = inst->my_tile->optype;
+    open.resource = resource;
+    open.start_cycle = _core_cycle;
+  }
+
+  auto& detail = _compute_activity_detail[key];
+  detail.op_name = inst->my_tile->optype;
+  detail.compute_region = region;
+  if (is_cube) {
+    detail.cube_active_cycles++;
+  } else {
+    detail.vector_active_cycles++;
+  }
+
+  // Preserve the original operation-level aggregate for existing consumers.
+  auto& aggregate = _op_compute_activity[op_id];
+  aggregate.op_name = inst->my_tile->optype;
+  if (aggregate.compute_region.empty()) {
+    aggregate.compute_region = region;
+  } else if (aggregate.compute_region != region) {
+    aggregate.compute_region = "mixed";
+  }
+  if (is_cube) {
+    aggregate.cube_active_cycles++;
+  } else {
+    aggregate.vector_active_cycles++;
+  }
+}
+
+void Core::record_compute_activity_inactive(bool is_cube) {
+  close_compute_activity(is_cube, _core_cycle);
+}
+
 bool Core::can_issue(bool is_accum_tile) {
   return _tiles.size() < 2;  // double buffer
 }

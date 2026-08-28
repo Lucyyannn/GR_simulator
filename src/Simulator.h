@@ -53,6 +53,7 @@ class Simulator {
   std::string compute_activity_csv_path() const;
   void write_final_hardware_summary_csv(uint64_t sim_time_ps) const;
   void write_final_compute_activity_csv(uint64_t sim_time_ps) const;
+  void write_final_compute_activity_detail_csv() const;
   void append_memory_hardware_summary_rows(std::ostream& out,
                                            const std::string& name,
                                            const Dram* memory,

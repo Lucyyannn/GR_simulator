@@ -742,6 +742,29 @@ def lookup_ir_context(
     return {}
 
 
+def lookup_task2_context(
+    calibration: dict,
+    user: str,
+    hidden: int,
+    kv_len: int,
+    batch: int,
+) -> dict:
+    """Return an exact 910C_new task2 calibration context, if available."""
+    root = calibration.get("task2_contexts", {})
+    if not isinstance(root, dict):
+        return {}
+    for user_key in (user, user.lower(), user.upper()):
+        value = (
+            root.get(user_key, {})
+            .get(str(hidden), {})
+            .get(str(kv_len), {})
+            .get(str(batch))
+        )
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
 def apply_calibrated_bandwidth(hw: dict[str, float], calibration: dict) -> None:
     if calibration.get("memory_bandwidth_calibration"):
         return
@@ -993,6 +1016,11 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
     source_medium = history_embedding_medium
     ir_context = lookup_ir_context(calibration, str(hw["chip"]), source_medium, batch, scheme)
     applied_context = apply_ir_context_calibration(hw, ir_context, source_medium)
+    task2_context = (
+        {}
+        if bool(getattr(args, "ignore_task2_calibration", False))
+        else lookup_task2_context(calibration, args.user, H, args.kv_len, batch)
+    )
     overridden: set[str] = set()
     for key in ["B_ddr", "B_ssd", "B_hbm", "B_core", "F_cube", "F_vec"]:
         override = getattr(args, key.lower())
@@ -1029,6 +1057,16 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
         }
     else:
         Bkv, Bkv_cal = ir_kv_preload_bandwidth_bps(hw, calibration, kv_medium)
+    task2_kv_bandwidth = task2_context.get("kv_preload_bandwidth_GBps")
+    if task2_kv_bandwidth is not None:
+        Bkv = float(task2_kv_bandwidth) * 1e9
+        Bkv_cal = {
+            "calibrated": True,
+            "medium": kv_medium,
+            "source": "task2_context.kv_preload_bandwidth_GBps",
+            "bandwidth_Bps": Bkv,
+            "bandwidth_GBps": float(task2_kv_bandwidth),
+        }
     Bemb, Bemb_cal = memory_bandwidth_bps(
         calibration,
         chip,
@@ -1039,6 +1077,16 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
         hw[f"B_{emb_medium}"],
         f"B_{emb_medium}" in overridden,
     )
+    task2_emb_bandwidth = task2_context.get("history_embedding_bandwidth_GBps")
+    if task2_emb_bandwidth is not None:
+        Bemb = float(task2_emb_bandwidth) * 1e9
+        Bemb_cal = {
+            "calibrated": True,
+            "medium": emb_medium,
+            "source": "task2_context.history_embedding_bandwidth_GBps",
+            "bandwidth_Bps": Bemb,
+            "bandwidth_GBps": float(task2_emb_bandwidth),
+        }
     Bcand, Bcand_cal = memory_bandwidth_bps(
         calibration,
         chip,
@@ -1086,6 +1134,11 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
     compute_correction, compute_correction_detail = ir_compute_correction_factor(
         calibration, chip, H
     )
+    task2_compute_key = (
+        "w_both_compute_scale_mult" if args.enable_kv_reuse
+        else "compute_scale_mult"
+    )
+    task2_compute_scale_mult = float(task2_context.get(task2_compute_key, 1.0))
 
     # IR counts item rows, so ratio=1.0 is exactly item_count. The trace
     # generator accepts this boundary and ratio sweeps must not silently turn
@@ -1128,6 +1181,9 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             full_compute_scale = op_scale * applied_context["compute_scale_mult"]
             recompute_compute_scale = full_compute_scale * float(applied_context["recompute_compute_scale_mult"])
             pre_cached_compute_scale = recompute_compute_scale * float(applied_context["pre_cached_compute_scale_mult"])
+            full_compute_scale *= task2_compute_scale_mult
+            recompute_compute_scale *= task2_compute_scale_mult
+            pre_cached_compute_scale *= task2_compute_scale_mult
         else:
             # Dynamic calibration starts from config-derived peak throughput;
             # it replaces the legacy chip-name and hidden-size multipliers.
@@ -1695,6 +1751,9 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
             "calibrated_max_history_recompute_len": search_max_recompute_items,
             "calibration_bound_applied": 1 if calibrated_bound is not None else 0,
             "calibration_bound_source": calibrated_bound_source,
+            "task2_context_applied": 1 if task2_context else 0,
+            "task2_context": task2_context,
+            "task2_compute_scale_mult": task2_compute_scale_mult,
             "compute_scale_mult": applied_context["compute_scale_mult"],
             "recompute_compute_scale_mult": applied_context["recompute_compute_scale_mult"],
             "pre_cached_compute_scale_mult": applied_context["pre_cached_compute_scale_mult"],
@@ -1905,6 +1964,7 @@ def main() -> None:
         help="Allow a nonzero IR choice even when safety guards would prefer k=0.",
     )
     parser.add_argument("--ignore-calibrated-bound", action="store_true", help="Do not cap k by calibration context bounds.")
+    parser.add_argument("--ignore-task2-calibration", action="store_true", help="Ignore empirical task2 910C_new context calibration.")
     parser.add_argument("--allow-compute-overrun", action="store_true", help="Allow candidates whose compute exceeds KV preload.")
     parser.add_argument(
         "--allow-baseline-regression",

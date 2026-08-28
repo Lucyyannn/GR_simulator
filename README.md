@@ -2,10 +2,9 @@
 
 [![Docker Image CI](https://github.com/PSAL-POSTECH/ONNXim/actions/workflows/docker-image.yml/badge.svg)](https://github.com/PSAL-POSTECH/ONNXim/actions/workflows/docker-image.yml)
 
-GR\_simulator是一个配备统一互联结构（Unified Bus, UB）的 HSTU-based GR 推理系统。系统以 NPU 作为主要计算设备，NPU 侧配备 HBM，用于承载在线推理过程中的当前执行数据和临时缓冲；片外由UB连接 DRAM 与 SSD ，统一协调不同存储层级中的冷/热用户数据进入 NPU 侧执行。 
+GR\_simulator是一个配备统一互联结构（Unified Bus, UB）的 HSTU-based GR 推理系统。系统以 NPU 作为主要计算设备，NPU 侧配备 HBM，用于承载在线推理过程中的当前执行数据和临时缓冲；片外由UB连接 DRAM 与 SSD ，统一协调不同存储层级中的冷/热用户数据进入 NPU 侧执行。
 
-
-***
+---
 
 ## 目录
 
@@ -15,8 +14,7 @@ GR\_simulator是一个配备统一互联结构（Unified Bus, UB）的 HSTU-base
 - [编译运行](#编译运行)
 - [实验复现方法](#实验复现方法)
 
-
-***
+---
 
 ## 系统架构
 
@@ -24,8 +22,7 @@ GR\_simulator是一个配备统一互联结构（Unified Bus, UB）的 HSTU-base
 
 GR\_simulator 以 trace 作为主要输入，Trace Frontend 负责解析算子与访存描述，Pipe Scheduler 将计算与预取请求组织成流水执行。NPU 采用 [ONNXim](https://github.com/PSAL-POSTECH/ONNXim) 的 tile scheduler 与多核执行模型，存储侧由 Storage Controller 统一管理 HBM、DDR 和 SSD 请求，其中 HBM/DDR 使用 [Ramulator2](https://github.com/CMU-SAFARI/ramulator2) 建模，SSD 使用 [FEMU](https://github.com/MoatLab/FEMU) BlackBoxSSD 建模。NPU Core 通过 NoC 与多级存储连接。
 
-
-***
+---
 
 ## 代码结构
 
@@ -71,7 +68,7 @@ GR_simulator/
 └── img/                        # README 和文档图片资源
 ```
 
-***
+---
 
 ## 环境配置
 
@@ -108,18 +105,17 @@ docker run -it --name gr-simulator-mini \
 
 **系统要求：**
 
-| 依赖项       | 最低版本             |
-| --------- | ---------------- |
-| 操作系统      | Ubuntu 20.04（推荐） |
-| GCC / G++ | >= 10.5.0        |
-| CMake     | >= 3.22.1        |
-| Python    | >= 3.8           |
-| Conan     | 1.57.0           |
-
+| 依赖项    | 最低版本             |
+| --------- | -------------------- |
+| 操作系统  | Ubuntu 20.04（推荐） |
+| GCC / G++ | >= 10.5.0            |
+| CMake     | >= 3.22.1            |
+| Python    | >= 3.8               |
+| Conan     | 1.57.0               |
 
 **Conan依赖**：
 
-| 包名                 | 版本     |
+| 包名               | 版本   |
 | ------------------ | ------ |
 | boost              | 1.79.0 |
 | robin-hood-hashing | 3.11.5 |
@@ -129,13 +125,15 @@ docker run -it --name gr-simulator-mini \
 ### 3.环境验证
 
 完成环境搭建后，可通过运行简单的算子来验证环境配置成功：
+
 ```bash
 bash scripts/run_embedding.sh # 一个简单的embedding算子测试
 bash scripts/run_gemm.sh      # 一个简单的gemm算子测试
 ```
+
 运行脚本后，终端输出日志信息，并在最后报告各模块时钟周期数与仿真时间。
 
-***
+---
 
 ## 编译运行
 
@@ -152,6 +150,7 @@ make -j$(nproc)
 ### 2.运行 HSTU 模型推理
 
 仿真器使用`run_hstu.sh`脚本作为HSTU推理仿真的主入口，该脚本可执行一次完整的HSTU ranking模型推理，具体包含如下流程：
+
 1. **trace生成**。根据命令行输入参数（如模型层数、请求数量、优化策略）生成相应的模型trace文件；
 2. **使用指定的仿真器配置执行仿真**。仿真执行过程中，会生成三个关键文件：`layer.log`记录仿真器运行过程中的日志，并在最后报告仿真时间；`layer_breakdown.csv`记录每个 layer 的 preload、compute、op、movin 等事件的起止时间和耗时；`hardware_summary.csv`汇总NPU、HBM、DDR、SSD 的硬件利用率。
 3. **绘制流水线可视化图像**。根据`layer_breakdown.csv`记录的各事件明细，绘制时间轴图像，可用于分析流水线中的compute与preload的调度效果。
@@ -167,7 +166,6 @@ bash scripts/run_hstu.sh \
 
 可通过指定更多参数调整负载配置。`run_hstu.sh`脚本的详细说明可见 `introductions/run_experiments.md`。
 
-
 ## 实验复现方法
 
 本节介绍几个关键实验的复现脚本与使用方法。
@@ -180,7 +178,6 @@ bash scripts/run_SpeedupComparison.sh
 
 该脚本在910C配置下进行各方法的推理效率对比，覆盖 `Recompute`、`FullCache`、`W_AR`、`W_IR`、`W_both` 五类方法，并遍历 HSTU-small/middle/large、`kv_len={4096,8192,16384}`、`batch_size={1,4,8}`、hot/cold 用户。对于开启Item Recompute优化的 W_IR 和 W_both方法，会自动调用 `recompute_ratio_cost_model_new.py`脚本，使用代价模型估算每个case的最优recompute比例。默认输出目录为 `results/SpeedupComparison`。
 
-
 ### 2. 不同 NPU 配置的扩展实验
 
 ```bash
@@ -189,6 +186,7 @@ bash scripts/run_scalability.sh \
   --max-concurrent 45 \
   --docker-container gr-simulator \
 ```
+
 该脚本在`910A/910B/910C`三种代表性NPU配置下，分别对Cold/Hot用户测试`Full_Cache`、`Full_Recompute`、`w_AR`、`w_IR`、`w_both` 五类方法。脚本默认对单用户执行，历史序列长度`KV_LEN`=4096。由于不同硬件配置的参数特性不同，脚本会先执行内存带宽校准，然后根据代价模型估算最优recompute比例，并执行模型推理。
 
 完成实验后，可运行 `scripts/plot_pipeline_comparison.py `脚本对统一配置下五种方法的流水线可视化，直观对比不同方法的性能差异。
@@ -217,7 +215,6 @@ bash scripts/run_ItemRecompute.sh
 
 该脚本用于探究Item Re-computation 方法的embedding索引模式、不同recompute比例的影响。它会运行 `continuous` 与 `random` 两种历史 embedding 索引模式，覆盖 `0%/20%/40%/60%/80%/100%` 以及代价模型估算出的最优 recompute 比例，对比不同的Item Recompute设置的效果。默认输出目录为 `results/ItemRecompute`。
 
-
 ### 6. Out-of-Order Pipeline 消融实验
 
 ```bash
@@ -225,7 +222,3 @@ bash scripts/run_OoO_pipeline_Ablation.sh
 ```
 
 该脚本用于复现 Out-of-Order pipeline 的消融实验，比较开启和关闭 out-of-order pipeline 时，action reuse 与 item recompute 组合后的表现。脚本默认遍历 `cold/hot`、`batch_size={1,4,8}`、`kv_len={4096,8192,16384}`，默认输出目录为 `results/OoO_pipeline_ablation`。
-
-
-
-

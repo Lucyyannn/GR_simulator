@@ -684,6 +684,7 @@ void Simulator::print_final_summary(double wall_clock_seconds) const {
   print_simulation_time_summary(wall_clock_seconds);
   write_final_hardware_summary_csv(final_sim_time_ps());
   write_final_compute_activity_csv(final_sim_time_ps());
+  write_final_compute_activity_detail_csv();
 }
 
 uint64_t Simulator::final_sim_time_ps() const {
@@ -827,6 +828,70 @@ void Simulator::write_final_compute_activity_csv(uint64_t sim_time_ps) const {
         activity.vector_overlap_with_cube_cycles,
         activity.cube_overlap_with_vector_cycles,
         activity.same_op_overlap_cycles, op_union);
+  }
+}
+
+void Simulator::write_final_compute_activity_detail_csv() const {
+  fs::path hardware_path(compute_activity_csv_path());
+  const fs::path detail_path =
+      hardware_path.parent_path().append("compute_activity_detail.csv");
+  const fs::path interval_path =
+      hardware_path.parent_path().append("compute_activity_intervals.csv");
+  if (!detail_path.parent_path().empty())
+    fs::create_directories(detail_path.parent_path());
+
+  std::ofstream detail(detail_path);
+  if (!detail.is_open()) {
+    spdlog::warn("Failed to write compute activity detail CSV: {}",
+                 detail_path.string());
+    return;
+  }
+  detail << "scope,core_id,op_id,op_name,compute_region,total_core_cycles,"
+            "cube_active_cycles,vector_active_cycles,cube_busy_time_us,"
+            "vector_busy_time_us\n";
+
+  // The simulator uses an integer picosecond core period, so use the same
+  // period here as final_sim_time_ps() rather than 1/frequency.  This keeps
+  // detail timestamps bit-for-bit consistent with layer_breakdown.csv.
+  const double period_us = static_cast<double>(_core_period) / 1e6;
+  for (size_t core_id = 0; core_id < _cores.size(); ++core_id) {
+    const Core* core = _cores[core_id].get();
+    if (core == nullptr) continue;
+    const uint64_t total_cycles = core->get_total_cycles();
+    for (const auto& [key, activity] : core->get_compute_activity_detail()) {
+      const double cube_us = activity.cube_active_cycles * period_us;
+      const double vector_us = activity.vector_active_cycles * period_us;
+      write_csv_row(detail, {
+          "core_region", std::to_string(core_id), std::to_string(key.op_id),
+          activity.op_name, key.compute_region,
+          std::to_string(total_cycles),
+          std::to_string(activity.cube_active_cycles),
+          std::to_string(activity.vector_active_cycles), csv_value(cube_us),
+          csv_value(vector_us),
+      });
+    }
+  }
+  detail.close();
+
+  std::ofstream intervals(interval_path);
+  if (!intervals.is_open()) {
+    spdlog::warn("Failed to write compute activity intervals CSV: {}",
+                 interval_path.string());
+    return;
+  }
+  intervals << "core_id,op_id,op_name,compute_region,resource,start_cycle,"
+               "end_cycle,start_us,end_us,duration_us\n";
+  for (const auto& core : _cores) {
+    if (core == nullptr) continue;
+    for (const auto& event : core->get_compute_activity_intervals()) {
+      const double start_us = event.start_cycle * period_us;
+      const double end_us = event.end_cycle * period_us;
+      intervals << event.core_id << ',' << event.op_id << ','
+                << event.op_name << ',' << event.compute_region << ','
+                << event.resource << ',' << event.start_cycle << ','
+                << event.end_cycle << ',' << start_us << ',' << end_us << ','
+                << (end_us - start_us) << '\n';
+    }
   }
 }
 

@@ -131,6 +131,9 @@ typedef struct {
   bool src_from_accum = false;
   bool zero_init = false;
   bool last_inst = false;
+  // Optional semantic tag for instruction-level compute attribution.  Empty
+  // means that the generic opcode/resource name is used.
+  std::string compute_region;
   Tile* my_tile;
   std::string to_string();
 } Instruction;

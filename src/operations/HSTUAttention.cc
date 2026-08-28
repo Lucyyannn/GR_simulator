@@ -7,6 +7,7 @@
 #include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <utility>
 
 namespace {
 
@@ -235,12 +236,13 @@ void HSTUAttention::initialize_output_compute_tiles() {
     const uint32_t head_dim = std::max<uint32_t>(hidden / heads, 1);
     for (uint32_t head = 0; head < heads; ++head) {
       append_gemm_compute(tile.get(), capped_u32(tokens), head_dim,
-                          effective_kv_len, ACCUM_SPAD_BASE);
+                          effective_kv_len, ACCUM_SPAD_BASE,
+                          "hstu.qk_gemm");
     }
     append_pointwise_compute(tile.get(), tile_score_elements * heads);
     for (uint32_t head = 0; head < heads; ++head) {
       append_gemm_compute(tile.get(), capped_u32(tokens), effective_kv_len,
-                          head_dim, ACCUM_SPAD_BASE);
+                          head_dim, ACCUM_SPAD_BASE, "hstu.av_gemm");
     }
     tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
         .opcode = Opcode::MOVOUT,
@@ -254,7 +256,8 @@ void HSTUAttention::initialize_output_compute_tiles() {
 }
 
 void HSTUAttention::append_gemm_compute(Tile* tile, uint32_t n, uint32_t c,
-                                        uint32_t m, addr_type dest_addr) {
+                                        uint32_t m, addr_type dest_addr,
+                                        const std::string& compute_region) {
   const uint32_t loop_size =
       std::max<uint32_t>(1, _config.core_config[target_core].core_height);
   for (uint32_t m_offset = 0; m_offset < m; m_offset += loop_size) {
@@ -272,6 +275,7 @@ void HSTUAttention::append_gemm_compute(Tile* tile, uint32_t n, uint32_t c,
             .tile_m = m_loop,
             .tile_k = c_loop,
             .tile_n = n_loop,
+            .compute_region = compute_region,
         }));
       }
     }
@@ -284,7 +288,13 @@ void HSTUAttention::append_pointwise_compute(Tile* tile,
       std::max<uint64_t>(1, score_elements * _config.precision);
   // Meta HSTU: score = (QK * alpha); score = SiLU(score);
   // score /= max_seq_len; score *= mask. These are four point-wise passes.
-  for (Opcode opcode : {Opcode::MUL, Opcode::SWISH, Opcode::DIV, Opcode::MUL}) {
+  const std::vector<std::pair<Opcode, std::string>> pointwise = {
+      {Opcode::MUL, "hstu.score_mul"},
+      {Opcode::SWISH, "hstu.score_swish"},
+      {Opcode::DIV, "hstu.score_div"},
+      {Opcode::MUL, "hstu.mask_mul"},
+  };
+  for (const auto& [opcode, compute_region] : pointwise) {
     tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
         .opcode = opcode,
         .dest_addr = SPAD_BASE,
@@ -293,6 +303,7 @@ void HSTUAttention::append_pointwise_compute(Tile* tile,
         .compute_size = capped_u32(bytes),
         .src_addrs = std::vector<addr_type>{ACCUM_SPAD_BASE},
         .src_from_accum = true,
+        .compute_region = compute_region,
     }));
   }
 }

@@ -89,11 +89,13 @@ void HSTUOutputPrep::initialize_instructions(Tile* tile, uint32_t token_offset,
       .src_addrs = {SPAD_BASE, weight_spad, bias_spad},
       .tile_m = tokens, .vector_rows = tokens,
       .vector_bytes_per_row = _hidden * _config.precision,
+      .compute_region = "hstu.output_layernorm",
   }));
   tile->instructions.push_back(std::make_unique<Instruction>(Instruction{
       .opcode = Opcode::MUL, .dest_addr = SPAD_BASE,
       .size = static_cast<uint32_t>(attn_addrs.size()), .compute_size = bytes,
       .src_addrs = {SPAD_BASE, u_spad},
+      .compute_region = "hstu.output_mul",
   }));
   // [u, attention, u * norm(attention)] is a resident logical view consumed
   // by the 3H -> H output GEMM. No concat copy and no MOVOUT are charged.

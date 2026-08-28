@@ -92,6 +92,7 @@ void HSTUInputPrep::initialize_instructions(Tile* tile, uint32_t token_offset,
       .src_addrs = {SPAD_BASE, weight_spad, bias_spad},
       .tile_m = tokens, .vector_rows = tokens,
       .vector_bytes_per_row = _hidden * _config.precision,
+      .compute_region = "hstu.input_layernorm",
   }));
   // The normalized activation remains in UB and is consumed by the following
   // projection GEMM. Deliberately no MOVOUT here.

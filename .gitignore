@@ -15,3 +15,7 @@ detail.csv
 build/
 __pycache__
 IR_Recompute.md
+${csv%/
+configs/task1_6/
+docs/
+graph_info.json

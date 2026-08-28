@@ -19,7 +19,8 @@ class HSTUAttention : public Operation {
   void initialize_kv_cache_tiles(uint32_t input_idx);
   void initialize_output_compute_tiles();
   void append_gemm_compute(Tile* tile, uint32_t n, uint32_t c, uint32_t m,
-                           addr_type dest_addr);
+                           addr_type dest_addr,
+                           const std::string& compute_region);
   void append_pointwise_compute(Tile* tile, uint64_t score_elements);
   void initialize_movin_compute_tile(uint32_t operand_id,
                                      const std::set<addr_type>& input_addrs,

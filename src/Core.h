@@ -13,6 +13,7 @@
 
 struct OpComputeActivity {
   std::string op_name;
+  std::string compute_region;
   cycle_type cube_active_cycles = 0;
   cycle_type vector_active_cycles = 0;
   // Attribution follows the named pipeline. These two fields are equal after
@@ -21,6 +22,29 @@ struct OpComputeActivity {
   cycle_type vector_overlap_with_cube_cycles = 0;
   cycle_type cube_overlap_with_vector_cycles = 0;
   cycle_type same_op_overlap_cycles = 0;
+};
+
+struct ComputeActivityKey {
+  uint32_t op_id = 0;
+  std::string compute_region;
+
+  bool operator<(const ComputeActivityKey& other) const {
+    if (op_id != other.op_id) return op_id < other.op_id;
+    return compute_region < other.compute_region;
+  }
+  bool operator==(const ComputeActivityKey& other) const {
+    return op_id == other.op_id && compute_region == other.compute_region;
+  }
+};
+
+struct ComputeActivityInterval {
+  uint32_t core_id = 0;
+  uint32_t op_id = 0;
+  std::string op_name;
+  std::string compute_region;
+  std::string resource;
+  cycle_type start_cycle = 0;
+  cycle_type end_cycle = 0;
 };
 
 class Core {
@@ -60,6 +84,15 @@ class Core {
   get_op_compute_activity() const {
     return _op_compute_activity;
   }
+  virtual const std::map<ComputeActivityKey, OpComputeActivity>&
+  get_compute_activity_detail() const {
+    return _compute_activity_detail;
+  }
+  virtual const std::vector<ComputeActivityInterval>&
+  get_compute_activity_intervals() const {
+    return _compute_activity_intervals;
+  }
+  virtual void flush_compute_activity_intervals();
   virtual cycle_type get_total_cycles() const { return _core_cycle; }
   virtual double get_core_utilization_percent() const {
     return _core_cycle == 0
@@ -81,6 +114,9 @@ class Core {
   virtual cycle_type calculate_add_tree_iterations(uint32_t vector_size);
   virtual cycle_type calculate_vector_op_iterations(uint32_t vector_size);
   void add_fast_forward_stats(cycle_type cycles);
+  void record_compute_activity(const Instruction* inst, bool is_cube);
+  void record_compute_activity_inactive(bool is_cube);
+  void close_compute_activity(bool is_cube, cycle_type end_cycle);
   void record_phase_event(CorePhase phase, uint32_t layer_id,
                           cycle_type start_cycle, cycle_type end_cycle,
                           uint64_t bytes = 0);
@@ -115,6 +151,18 @@ class Core {
   double _stat_matmul_cycle = 0;
   double _stat_tot_matmul_cycle = 0;
   std::map<uint32_t, OpComputeActivity> _op_compute_activity;
+  std::map<ComputeActivityKey, OpComputeActivity> _compute_activity_detail;
+  std::vector<ComputeActivityInterval> _compute_activity_intervals;
+
+  struct OpenComputeActivity {
+    bool active = false;
+    ComputeActivityKey key;
+    std::string op_name;
+    std::string resource;
+    cycle_type start_cycle = 0;
+  };
+  OpenComputeActivity _open_cube_activity;
+  OpenComputeActivity _open_vector_activity;
 
   int _running_layer;
   uint32_t tile_rr = 0;

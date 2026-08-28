@@ -54,6 +54,18 @@ def load_rows(path):
         return list(csv.DictReader(handle))
 
 
+def load_compute_intervals(csv_path):
+    """Load instruction-level resource intervals emitted by the simulator."""
+    interval_path = Path(csv_path).with_name("compute_activity_intervals.csv")
+    if not interval_path.exists():
+        return []
+    try:
+        with interval_path.open("r", encoding="utf-8") as handle:
+            return list(csv.DictReader(handle))
+    except (OSError, csv.Error):
+        return []
+
+
 def parse_int(value, default=0):
     try:
         return int(float(value))
@@ -179,6 +191,70 @@ def render_segments(row, context):
     return [(start, duration, display_phase(row))]
 
 
+def op_id_from_row(row):
+    match = re.search(r"(?:^|;)op_id=(\d+)(?:;|$)", row.get("detail", ""))
+    return match.group(1) if match else ""
+
+
+def render_resource_segments(row, intervals):
+    """Split a top-level op span by actual Cube/Vector active intervals.
+
+    Intervals are unioned across cores over the shared simulation clock.  The
+    resulting colors describe the resource activity visible during the op
+    span; gaps remain the regular gray op-span color.
+    """
+    start = float(row["start_us"])
+    end = float(row["end_us"])
+    if end <= start or not intervals:
+        return [(start, max(end - start, 0.001), "op")]
+
+    op_id = op_id_from_row(row)
+    selected = [
+        item for item in intervals
+        if (op_id and item.get("op_id") == op_id)
+        or (not op_id and item.get("op_name") == row.get("name"))
+    ]
+    if not selected:
+        return [(start, max(end - start, 0.001), "op")]
+
+    clipped = []
+    boundaries = {start, end}
+    for item in selected:
+        left = max(start, float(item["start_us"]))
+        right = min(end, float(item["end_us"]))
+        if right <= left:
+            continue
+        clipped.append((left, right, item.get("resource", "")))
+        boundaries.add(left)
+        boundaries.add(right)
+    if not clipped:
+        return [(start, max(end - start, 0.001), "op")]
+
+    points = sorted(boundaries)
+    segments = []
+    for left, right in zip(points, points[1:]):
+        if right <= left:
+            continue
+        midpoint = (left + right) / 2.0
+        cube = any(
+            resource == "cube" and begin <= midpoint < finish
+            for begin, finish, resource in clipped
+        )
+        vector = any(
+            resource == "vector" and begin <= midpoint < finish
+            for begin, finish, resource in clipped
+        )
+        phase = "overlap" if cube and vector else "cube" if cube else "vector" if vector else "op"
+        if segments and segments[-1][2] == phase and abs(
+            segments[-1][0] + segments[-1][1] - left
+        ) < 1e-9:
+            old_start, old_duration, old_phase = segments[-1]
+            segments[-1] = (old_start, old_duration + right - left, old_phase)
+        else:
+            segments.append((left, right - left, phase))
+    return segments or [(start, max(end - start, 0.001), "op")]
+
+
 def preload_source_medium(row, context):
     if row.get("pipe") != "preload":
         return ""
@@ -208,6 +284,7 @@ def label_for(row, context):
 def plot_timeline(csv_path, output_path):
     rows = load_rows(csv_path)
     context = load_plot_context(csv_path)
+    compute_intervals = load_compute_intervals(csv_path)
     rows = [
         row
         for row in rows
@@ -244,11 +321,23 @@ def plot_timeline(csv_path, output_path):
         "other": "#8172b2",
         "op": "#999999",
         "movin": "#44aa99",
+        "cube": "#d95f02",
+        # Keep Vector visually distinct from the existing teal MOVIN color.
+        "vector": "#6baed6",
+        "overlap": "#7570b3",
     }
 
     for lane, label in enumerate(labels):
         for row in by_label[label]:
-            for start, duration, phase in render_segments(row, context):
+            if (
+                compute_intervals
+                and row.get("pipe") == "compute"
+                and row.get("phase") == "op"
+            ):
+                segments = render_resource_segments(row, compute_intervals)
+            else:
+                segments = render_segments(row, context)
+            for start, duration, phase in segments:
                 ax.broken_barh(
                     [(start, duration)],
                     (lane - 0.35, 0.7),
@@ -294,6 +383,15 @@ def plot_timeline(csv_path, output_path):
         plt.Rectangle((0, 0), 1, 1, color=colors["op"], label="op span"),
         plt.Rectangle((0, 0), 1, 1, color=colors["movin"], label="MOVIN"),
     ]
+    if compute_intervals:
+        handles.extend([
+            plt.Rectangle((0, 0), 1, 1, color=colors["cube"],
+                          label="Cube GEMM compute"),
+            plt.Rectangle((0, 0), 1, 1, color=colors["vector"],
+                          label="Vector compute"),
+            plt.Rectangle((0, 0), 1, 1, color=colors["overlap"],
+                          label="Cube/Vector overlap"),
+        ])
     ax.legend(handles=handles, loc="upper right")
     fig.tight_layout()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
