@@ -279,7 +279,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     default_root = Path("results") / f"memory_bandwidth_calibration_{time.strftime('%Y%m%d_%H%M%S')}"
     parser.add_argument("--result-root", type=Path, default=default_root)
-    parser.add_argument("--calibration", type=Path, default=Path("scripts/recompute_ratio_calibration.json"))
+    parser.add_argument("--calibration", type=Path, required=True)
     parser.add_argument("--merged-calibration-output", type=Path, default=None)
     parser.add_argument("--chips", type=lambda v: parse_csv_list(v, str), default=["910A", "910B", "910C"])
     parser.add_argument("--patterns", type=lambda v: parse_csv_list(v, str), default=["contiguous", "random_512b_index"])

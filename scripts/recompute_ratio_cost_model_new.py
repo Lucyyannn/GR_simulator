@@ -1,39 +1,14 @@
 #!/usr/bin/env python3
-"""Formula-based item recompute ratio estimator from SOW.
+"""Storage-aware item-KV recompute ratio estimator.
 
-The model scans candidate recompute count k and chooses the value that balances
-the repeated non-layer0 layer cost:
+The default ``paper`` mode directly implements the published equations in
+``item_kv_cost_model.py``.  Formula numerators are theoretical byte/FLOP/op
+counts; calibration is restricted to hardware rates and hardware-efficiency
+factors.  Every integer k in [0, S_i] is eligible, so the selected ratio is not
+restricted to the 0.1 measurement grid.
 
-    T_kv_layer(k) ~= T_compute_layer(k)
-
-where:
-    T_kv_layer(k) is the repeated-layer cached KV preload time after item
-    recompute and optional action reuse.
-    T_compute_layer(k) = T_cube(k) + T_vec(k) + T_core(k)
-
-Layer0-only reordered item embedding reads, candidate embedding reads, and
-weight reads are still reported for diagnostics, but they are not mixed into
-the default IR selection objective. The chosen ratio follows the repeated-layer
-balance rule used for item recompute planning:
-
-    next layer cached KV preload duration ~= current layer full compute duration
-
-Pre-attention history embedding, candidate embedding, and weights are not part
-of the repeated cached KV preload duration; weights are resident in HBM by
-default.
-
-Default hardware parameters are derived from the simulator config. Bandwidth
-metadata (`derived_*` / `target_*`) is preferred over raw `channels * req_size *
-freq` so the estimator stays aligned with nbl-adjusted simulator accounting.
-Calibration is then applied as effective peak-utilization multipliers. CLI
-overrides still take highest precedence.
-
-The legacy fitted compute-scale model was trained against an older objective
-and is not applied to IR candidate selection by default. A new calibration can
-opt in through `ir_cost_model.compute_scale` and
-`ir_cost_model.kv_preload_utilization`. The built-in IR compute correction
-matches the simulator's measured steady-layer op timing and can be overridden
-by calibration.
+The former phase/event-DAG estimator remains available through
+``--cost-model legacy`` for reproducibility only.
 
 脚本共享/迁移说明：
     必需文件：
@@ -68,6 +43,21 @@ import argparse
 import json
 import math
 from pathlib import Path
+
+try:
+    from item_kv_cost_model import (
+        ItemKVCostWorkload,
+        ItemKVHardwareRates,
+        item_kv_cost_terms,
+        select_optimal_item_recompute,
+    )
+except ModuleNotFoundError:  # importlib-based unit tests run from repo root
+    from scripts.item_kv_cost_model import (
+        ItemKVCostWorkload,
+        ItemKVHardwareRates,
+        item_kv_cost_terms,
+        select_optimal_item_recompute,
+    )
 
 # Hardware macro overrides. Leave a value as None to use the JSON config.
 # These are intentionally near the top of the script so a new hardware target
@@ -436,16 +426,35 @@ def ir_compute_scale(calibration: dict) -> float:
     return float(value) if value is not None else DEFAULT_IR_COMPUTE_SCALE
 
 
+def chip_aliases(chip: str) -> tuple[str, ...]:
+    """Return exact-to-generic aliases for a hardware configuration name."""
+    value = str(chip).strip()
+    aliases = [value]
+    if value.lower().endswith("_new"):
+        aliases.append(value[:-4])
+
+    result: list[str] = []
+    seen: set[str] = set()
+    for alias in aliases:
+        folded = alias.casefold()
+        if folded and folded not in seen:
+            seen.add(folded)
+            result.append(alias)
+    return tuple(result)
+
+
 def lookup_chip_value(mapping: dict, chip: str):
     if not isinstance(mapping, dict):
         return None
-    for key in (chip, chip.lower(), chip.upper(), "default", "*"):
-        if key in mapping:
-            return mapping[key]
-    lower_lookup = {str(key).lower(): key for key in mapping}
-    actual_key = lower_lookup.get(chip.lower())
-    if actual_key is not None:
-        return mapping[actual_key]
+    folded_lookup = {str(key).casefold(): key for key in mapping}
+    for alias in chip_aliases(chip):
+        actual_key = folded_lookup.get(alias.casefold())
+        if actual_key is not None:
+            return mapping[actual_key]
+    for fallback in ("default", "*"):
+        actual_key = folded_lookup.get(fallback)
+        if actual_key is not None:
+            return mapping[actual_key]
     return None
 
 
@@ -744,18 +753,38 @@ def lookup_ir_context(
 
 def lookup_task2_context(
     calibration: dict,
+    chip: str,
     user: str,
     hidden: int,
     kv_len: int,
     batch: int,
 ) -> dict:
-    """Return an exact 910C_new task2 calibration context, if available."""
+    """Return an exact task2 context scoped to the selected hardware chip.
+
+    New calibration files should nest contexts below a chip key (optionally
+    below ``chips``).  The historical unscoped layout contains measurements
+    for 910C, so it remains available only to the 910C family.
+    """
     root = calibration.get("task2_contexts", {})
     if not isinstance(root, dict):
         return {}
+
+    scoped_root = root.get("chips", root)
+    context_root = lookup_chip_value(scoped_root, chip)
+    if not isinstance(context_root, dict):
+        context_root = None
+
+    if context_root is None:
+        chip_family = chip_aliases(chip)[-1].casefold()
+        if chip_family != "910c":
+            return {}
+        # Backward compatibility: the original task2_contexts schema started
+        # directly at the user key and was calibrated exclusively on 910C.
+        context_root = root
+
     for user_key in (user, user.lower(), user.upper()):
         value = (
-            root.get(user_key, {})
+            context_root.get(user_key, {})
             .get(str(hidden), {})
             .get(str(kv_len), {})
             .get(str(batch))
@@ -996,7 +1025,386 @@ def compute_preload_tolerance_us(args: argparse.Namespace, layer_kv_preload_us: 
     return max(abs_tol, max(0.0, layer_kv_preload_us) * ratio_tol)
 
 
+PAPER_RATE_KEYS = ("B_kv", "B_emb", "B_core", "F_cube", "F_vec")
+PAPER_ETA_KEYS = ("eta_kv", "eta_emb", "eta_core", "eta_cube", "eta_vec")
+PAPER_SATURATION_KEYS = (
+    "kv_saturation_bytes", "emb_saturation_bytes", "core_saturation_bytes",
+    "cube_saturation_flops", "vec_saturation_ops",
+)
+PAPER_STARTUP_KEYS = (
+    "kv_startup_s", "emb_startup_s", "core_startup_s",
+    "cube_startup_s", "vec_startup_s",
+)
+PAPER_HARDWARE_SHAPE_KEYS = PAPER_SATURATION_KEYS + PAPER_STARTUP_KEYS
+
+
+def reconfiguration_compute_rates(
+    cube_rate: float,
+    vector_rate: float,
+    calibration: dict,
+    chip: str,
+    *,
+    enabled: bool,
+) -> tuple[float, float, dict[str, object]]:
+    """Apply the hardware-only response of a reconfigured compute array.
+
+    The explicit item-KV equations retain their physical work terms.  Only
+    their hardware denominators change, using the calibrated response:
+
+      F'_cube = F_cube * (F_cube / F_cube,ref) ** alpha_cube
+      F'_vec  = F_vec  * (F_vec  / F_vec,ref ) ** alpha_vec
+
+    ``alpha_*`` capture array-level scheduling/under-utilization and are keyed
+    only by chip and physical throughput; they contain no workload, model, or
+    recompute-ratio feature.  A baseline configuration has ratio one, hence it
+    is unchanged exactly.
+    """
+
+    root = calibration.get("npu_reconfiguration_response", {})
+    chip_profiles = root.get("chips", {}) if isinstance(root, dict) else {}
+    profile = lookup_chip_value(chip_profiles, chip)
+    if not enabled or not isinstance(profile, dict):
+        return cube_rate, vector_rate, {"applied": False, "source": "disabled"}
+
+    reference_cube = float(profile["reference_cube_flops"])
+    reference_vector = float(profile["reference_vector_ops"])
+    alpha_cube = float(profile.get("cube_rate_exponent", 0.0))
+    alpha_vector = float(profile.get("vector_rate_exponent", 0.0))
+    cube_ratio = cube_rate / reference_cube
+    vector_ratio = vector_rate / reference_vector
+    return (
+        cube_rate * cube_ratio ** alpha_cube,
+        vector_rate * vector_ratio ** alpha_vector,
+        {
+            "applied": True,
+            "source": "npu_reconfiguration_response",
+            "reference_cube_flops": reference_cube,
+            "reference_vector_ops": reference_vector,
+            "cube_rate_exponent": alpha_cube,
+            "vector_rate_exponent": alpha_vector,
+            "cube_rate_ratio": cube_ratio,
+            "vector_rate_ratio": vector_ratio,
+        },
+    )
+
+
+def _paper_profile_values(
+    section: dict,
+    chip: str,
+    medium: str,
+    batch_size: int,
+    *,
+    allow_rate_inputs: bool = True,
+) -> dict[str, float]:
+    """Resolve a hardware-only profile for chip/tier/batch.
+
+    Supported schema in the simulator config's ``item_kv_cost_model`` section::
+
+      hardware_profiles:
+        chips:
+          910A:
+            default: {eta_core: 0.8, eta_cube: 0.7, eta_vec: 0.6}
+            batches: {"4": {F_cube: 2.0e14}}
+            media:
+              ssd:
+                default: {eta_kv: 0.5, eta_emb: 0.1}
+                batches: {"8": {B_kv: 1.2e10}}
+
+    The calibration ``paper_cost_model`` section uses the same hierarchy but
+    accepts eta, saturation, and startup fields; it cannot override raw B/F
+    inputs.  No model,
+    sequence, hidden-size, or recompute-ratio key is accepted in either place.
+    """
+
+    profiles = section.get("hardware_profiles", {}) if isinstance(section, dict) else {}
+    if not isinstance(profiles, dict):
+        return {}
+    chips = profiles.get("chips", profiles)
+    chip_node = lookup_chip_value(chips, chip)
+    if not isinstance(chip_node, dict):
+        return {}
+
+    overlays: list[dict] = []
+    for value in (
+        chip_node.get("default"),
+        chip_node.get("batches", {}).get(str(batch_size)),
+    ):
+        if isinstance(value, dict):
+            overlays.append(value)
+    medium_node = chip_node.get("media", {}).get(medium, {})
+    if isinstance(medium_node, dict):
+        for value in (
+            medium_node.get("default"),
+            medium_node.get("batches", {}).get(str(batch_size)),
+        ):
+            if isinstance(value, dict):
+                overlays.append(value)
+
+    allowed = set(PAPER_ETA_KEYS + PAPER_HARDWARE_SHAPE_KEYS)
+    if allow_rate_inputs:
+        allowed.update(PAPER_RATE_KEYS)
+    result: dict[str, float] = {}
+    for overlay in overlays:
+        unknown = set(overlay) - allowed
+        if unknown:
+            raise ValueError(
+                "paper hardware profile contains disallowed profile keys: "
+                + ", ".join(sorted(unknown))
+            )
+        result.update({key: float(value) for key, value in overlay.items()})
+    return result
+
+
+def _paper_hardware_rates(
+    args: argparse.Namespace,
+    hw: dict[str, float],
+    calibration: dict,
+    medium: str,
+) -> tuple[ItemKVHardwareRates, dict[str, str]]:
+    """Build formula denominators with CLI > calibration > config precedence."""
+
+    config_json = json.loads(args.config.read_text(encoding="utf-8"))
+    config_values = _paper_profile_values(
+        config_json.get("item_kv_cost_model", {}),
+        str(hw["chip"]), medium, args.batch_size,
+        allow_rate_inputs=True,
+    )
+    calibration_values = _paper_profile_values(
+        calibration.get("paper_cost_model", {}),
+        str(hw["chip"]), medium, args.batch_size,
+        allow_rate_inputs=False,
+    )
+
+    medium_override = getattr(args, f"b_{medium}", None)
+    defaults = {
+        "B_kv": float(medium_override or hw[f"B_{medium}"]),
+        "B_emb": float(medium_override or hw[f"B_{medium}"]),
+        "B_core": float(getattr(args, "b_hbm", None) or hw["B_core"]),
+        "F_cube": float(hw["F_cube"]),
+        "F_vec": float(hw["F_vec"]),
+    }
+    sources = {key: f"config:{args.config}" for key in defaults}
+
+    values = dict(defaults)
+    for label, profile in (("config_profile", config_values),
+                           ("calibration_profile", calibration_values)):
+        for key in PAPER_RATE_KEYS:
+            if key in profile:
+                values[key] = profile[key]
+                sources[key] = label
+
+    cli_rates = {
+        "B_kv": getattr(args, "b_kv", None),
+        "B_emb": getattr(args, "b_emb", None),
+        "B_core": getattr(args, "b_core", None),
+        "F_cube": getattr(args, "f_cube", None),
+        "F_vec": getattr(args, "f_vec", None),
+    }
+    for key, value in cli_rates.items():
+        if value is not None:
+            values[key] = float(value)
+            sources[key] = "cli"
+
+    eta_values = {key: 1.0 for key in PAPER_ETA_KEYS}
+    eta_sources = {key: "identity" for key in PAPER_ETA_KEYS}
+    for label, profile in (("config_profile", config_values),
+                           ("calibration_profile", calibration_values)):
+        for key in PAPER_ETA_KEYS:
+            if key in profile:
+                eta_values[key] = profile[key]
+                eta_sources[key] = label
+    for key in PAPER_ETA_KEYS:
+        value = getattr(args, key, None)
+        if value is not None:
+            eta_values[key] = float(value)
+            eta_sources[key] = "cli"
+
+    shape_values = {key: 0.0 for key in PAPER_HARDWARE_SHAPE_KEYS}
+    shape_sources = {key: "disabled" for key in PAPER_HARDWARE_SHAPE_KEYS}
+    for label, profile in (("config_profile", config_values),
+                           ("calibration_profile", calibration_values)):
+        for key in PAPER_HARDWARE_SHAPE_KEYS:
+            if key in profile:
+                shape_values[key] = float(profile[key])
+                shape_sources[key] = label
+    for key in PAPER_HARDWARE_SHAPE_KEYS:
+        value = getattr(args, key, None)
+        if value is not None:
+            shape_values[key] = float(value)
+            shape_sources[key] = "cli"
+
+    is_reconfigured = isinstance(
+        config_json.get("metadata", {}).get("npu_reconfiguration"), dict
+    )
+    values["F_cube"], values["F_vec"], response = reconfiguration_compute_rates(
+        values["F_cube"], values["F_vec"], calibration, str(hw["chip"]),
+        enabled=is_reconfigured,
+    )
+    if response["applied"]:
+        sources["F_cube"] += "+reconfiguration_response"
+        sources["F_vec"] += "+reconfiguration_response"
+
+    rates = ItemKVHardwareRates(
+        b_kv=values["B_kv"],
+        b_emb=values["B_emb"],
+        b_core=values["B_core"],
+        f_cube=values["F_cube"],
+        f_vec=values["F_vec"],
+        **eta_values,
+        **shape_values,
+    )
+    sources.update(eta_sources)
+    sources.update(shape_sources)
+    sources["npu_reconfiguration_response"] = response
+    return rates, sources
+
+
+def estimate_paper(args: argparse.Namespace) -> dict[str, object]:
+    """Evaluate and optimize the explicit paper cost model."""
+
+    hw = derive_hardware(args.config)
+    calibration = load_calibration(args.calibration)
+    S = int(args.kv_len)
+    Si = (S + 1) // 2
+    original_action_rows = S // 2
+    if args.enable_kv_reuse:
+        action_reuse = action_reuse_ratio_from_total(
+            S, original_action_rows, args.kv_reuse_ratio
+        )
+        Sa = compressed_rows_for_ratio(original_action_rows, action_reuse)
+    else:
+        action_reuse = 0.0
+        Sa = original_action_rows
+
+    workload = ItemKVCostWorkload(
+        original_history_tokens=S,
+        item_kv_after_akr=Si,
+        action_kv_after_akr=Sa,
+        candidates_per_user=int(args.candidates),
+        hidden=int(args.hidden),
+        layers=int(args.layers),
+        bytes_per_element=float(hw["s"]),
+        batch_size=int(args.batch_size),
+        ar_reduces_attention_compute=bool(
+            args.enable_kv_reuse and args.kv_reuse_reduce_npu
+        ),
+    )
+    medium = "ddr" if args.user == "hot" else "ssd"
+    hardware, hardware_sources = _paper_hardware_rates(
+        args, hw, calibration, medium
+    )
+
+    fixed_k = getattr(args, "fixed_recompute_len", None)
+    if fixed_k is None:
+        selected = select_optimal_item_recompute(workload, hardware)
+    else:
+        selected = item_kv_cost_terms(int(fixed_k), workload, hardware)
+
+    us = 1e6
+    effective = hardware.effective
+    L = workload.layers
+    return {
+        "cost_model": "paper_item_kv_v1",
+        "history_recompute_len": int(selected["k"]),
+        "recompute_ratio": float(selected["recompute_ratio"]),
+        "Tmem_us": float(selected["T_mem_s"]) * us,
+        "Tcube_us": float(selected["T_cube_s"]) * us,
+        "Tvec_us": float(selected["T_vec_s"]) * us,
+        "Tcore_us": float(selected["T_core_s"]) * us,
+        "Tnpu_us": float(selected["T_npu_s"]) * us,
+        "Tlatency_us": float(selected["T_s"]) * us,
+        "latency_proxy_us": float(selected["T_s"]) * us,
+        "e2e_proxy_us": float(selected["T_s"]) * us,
+        "objective": "paper_max_Tmem_Tnpu",
+        "objective_value_us": float(selected["T_s"]) * us,
+        # Compatibility fields used by the existing calibration/report tools.
+        "layer_kv_preload_us": float(selected["kv_time_s"]) * us / L,
+        "history_embedding_us": float(selected["embedding_time_s"]) * us,
+        "layer_compute_us": float(selected["T_npu_s"]) * us / L,
+        "candidate_embedding_us": 0.0,
+        "weight_read_us": 0.0,
+        "S": S,
+        "S_i": Si,
+        "S_a": Sa,
+        "S_h": workload.total_kv_after_akr,
+        "C": workload.candidates_per_user,
+        "H": workload.hidden,
+        "L": workload.layers,
+        "s": workload.bytes_per_element,
+        "batch_size": workload.batch_size,
+        "original_action_rows": original_action_rows,
+        "action_reuse_ratio": action_reuse,
+        "kv_reuse_ratio": float(args.kv_reuse_ratio if args.enable_kv_reuse else 0.0),
+        "S_att": workload.attention_history_tokens,
+        "akr_reduces_attention_compute": int(
+            workload.ar_reduces_attention_compute
+        ),
+        "formula_numerators": {
+            "kv_bytes": selected["kv_bytes"],
+            "embedding_bytes": selected["embedding_bytes"],
+            "cube_flops": selected["cube_flops"],
+            "vector_ops": selected["vector_ops"],
+            "core_bytes": selected["core_bytes"],
+        },
+        "hardware_inputs": {
+            "B_kv_Bps": hardware.b_kv,
+            "B_emb_Bps": hardware.b_emb,
+            "B_core_Bps": hardware.b_core,
+            "F_cube_FLOPs": hardware.f_cube,
+            "F_vec_ops": hardware.f_vec,
+        },
+        "hardware_efficiency": {
+            "eta_kv": hardware.eta_kv,
+            "eta_emb": hardware.eta_emb,
+            "eta_core": hardware.eta_core,
+            "eta_cube": hardware.eta_cube,
+            "eta_vec": hardware.eta_vec,
+        },
+        "hardware_rate_factor_semantics": (
+            "effective_rate=hardware_input*eta; eta is hardware-only and may "
+            "exceed 1 when the input is a nominal reference rather than peak"
+        ),
+        "hardware_saturation": {
+            key: getattr(hardware, key) for key in PAPER_SATURATION_KEYS
+        },
+        "hardware_startup_s": {
+            key: getattr(hardware, key) for key in PAPER_STARTUP_KEYS
+        },
+        "effective_hardware": {
+            "B_kv_Bps": effective["B_kv"],
+            "B_emb_Bps": effective["B_emb"],
+            "B_core_Bps": effective["B_core"],
+            "F_cube_FLOPs": effective["F_cube"],
+            "F_vec_ops": effective["F_vec"],
+        },
+        "hardware_parameter_sources": hardware_sources,
+        "formula": {
+            "W_kv": "2*L*N*(S_a+(S_i-k))*H*s",
+            "W_emb": "N*k*H*s",
+            "S_att": "S_h when AR reduces attention compute; otherwise S",
+            "W_cube": "L*N*(8*C*H^2+4*C*S_att*H+8*k*H^2+4*k^2*H)",
+            "W_vec": "L*N*(2*(C*S_att+k^2)+2*(C+k)*H)",
+            "W_core": "L*N*s*((C+k)*H+2*S_h*H+4*k*H)",
+            "R_eff": "R_peak*eta*(1-exp(-(W/n_req)/x_sat)); x_sat=0 means R_peak*eta",
+            "Path": "Path(W,R,x_sat,tau,n_req)=W/R_eff+n_req*tau",
+            "T_mem": "Path(W_kv,B_kv,...,L*N)+Path(W_emb,B_emb,...,N)",
+            "T_cube": "Path(W_cube,F_cube,...,L*N)",
+            "T_vec": "Path(W_vec,F_vec,...,L*N)",
+            "T_core": "Path(W_core,B_core,...,L*N)",
+            "T_npu": "T_cube+T_vec+T_core",
+            "T": "max(T_mem,T_npu)",
+            "decision": "argmin over every integer k in [0,S_i]",
+        },
+        "chip": str(hw["chip"]),
+        "source_medium": medium,
+        "num_cores": int(hw["num_cores"]),
+    }
+
+
 def estimate(args: argparse.Namespace) -> dict[str, float | int]:
+    if getattr(args, "cost_model", "paper") == "paper":
+        return estimate_paper(args)
+
     hw = derive_hardware(args.config)
     calibration = load_calibration(args.calibration)
     apply_calibrated_bandwidth(hw, calibration)
@@ -1019,7 +1427,9 @@ def estimate(args: argparse.Namespace) -> dict[str, float | int]:
     task2_context = (
         {}
         if bool(getattr(args, "ignore_task2_calibration", False))
-        else lookup_task2_context(calibration, args.user, H, args.kv_len, batch)
+        else lookup_task2_context(
+            calibration, str(hw["chip"]), args.user, H, args.kv_len, batch
+        )
     )
     overridden: set[str] = set()
     for key in ["B_ddr", "B_ssd", "B_hbm", "B_core", "F_cube", "F_vec"]:
@@ -1880,11 +2290,21 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=Path, default=Path("configs/910C.json"))
     parser.add_argument("--calibration", type=Path, default=Path("scripts/recompute_ratio_calibration.json"))
+    parser.add_argument(
+        "--cost-model", choices=["paper", "legacy"], default="paper",
+        help="Use the explicit paper equations (default) or the prior event-DAG estimator.",
+    )
     parser.add_argument("--user", choices=["hot", "cold"], required=True)
     parser.add_argument("--layers", type=int, required=True)
     parser.add_argument("--hidden", type=int, required=True)
     parser.add_argument("--kv-len", type=int, required=True)
-    parser.add_argument("--batch-size", type=int, default=1, help="Accepted for interface compatibility; model is per request.")
+    parser.add_argument(
+        "--batch-size", type=int, default=1,
+        help=(
+            "Independent users N in the batch extension. The paper work for one "
+            "user is multiplied by N; users never share a causal k^2 term."
+        ),
+    )
     parser.add_argument("--candidates", type=int, default=128)
     parser.add_argument(
         "--num-heads", type=int, default=4,
@@ -1940,12 +2360,29 @@ def main() -> None:
         action="store_true",
         help="Use an exact context history_recompute_len from calibration when it matches the current model shape.",
     )
-    parser.add_argument("--b_ddr", type=float, default=None, help="Override DDR bandwidth in bytes/s.")
-    parser.add_argument("--b_ssd", type=float, default=None, help="Override SSD bandwidth in bytes/s.")
-    parser.add_argument("--b_hbm", type=float, default=None, help="Override HBM bandwidth in bytes/s.")
-    parser.add_argument("--b_core", type=float, default=None, help="Override HBM-to-core bandwidth in bytes/s.")
-    parser.add_argument("--f_cube", type=float, default=None, help="Override Cube throughput in FLOP/s.")
-    parser.add_argument("--f_vec", type=float, default=None, help="Override vector throughput in element/s.")
+    parser.add_argument("--b-ddr", "--b_ddr", dest="b_ddr", type=float, default=None, help="Override DDR bandwidth in bytes/s.")
+    parser.add_argument("--b-ssd", "--b_ssd", dest="b_ssd", type=float, default=None, help="Override SSD bandwidth in bytes/s.")
+    parser.add_argument("--b-hbm", "--b_hbm", dest="b_hbm", type=float, default=None, help="Override HBM bandwidth in bytes/s.")
+    parser.add_argument("--b-kv", "--b_kv", dest="b_kv", type=float, default=None, help="Paper B_kv input in bytes/s; highest precedence.")
+    parser.add_argument("--b-emb", "--b_emb", dest="b_emb", type=float, default=None, help="Paper B_emb input in bytes/s; highest precedence.")
+    parser.add_argument("--b-core", "--b_core", dest="b_core", type=float, default=None, help="Paper B_core input in bytes/s; highest precedence.")
+    parser.add_argument("--f-cube", "--f_cube", dest="f_cube", type=float, default=None, help="Paper F_cube input in FLOP/s; highest precedence.")
+    parser.add_argument("--f-vec", "--f_vec", dest="f_vec", type=float, default=None, help="Paper F_vec input in Vector operations/s; highest precedence.")
+    parser.add_argument("--eta-kv", "--eta_kv", dest="eta_kv", type=float, default=None, help="Hardware-only efficiency multiplying B_kv.")
+    parser.add_argument("--eta-emb", "--eta_emb", dest="eta_emb", type=float, default=None, help="Hardware-only efficiency multiplying B_emb.")
+    parser.add_argument("--eta-core", "--eta_core", dest="eta_core", type=float, default=None, help="Hardware-only efficiency multiplying B_core.")
+    parser.add_argument("--eta-cube", "--eta_cube", dest="eta_cube", type=float, default=None, help="Hardware-only efficiency multiplying F_cube.")
+    parser.add_argument("--eta-vec", "--eta_vec", dest="eta_vec", type=float, default=None, help="Hardware-only efficiency multiplying F_vec.")
+    parser.add_argument("--kv-saturation-bytes", "--kv_saturation_bytes", dest="kv_saturation_bytes", type=float, default=None, help="KV bytes/request scale x_sat for R_eff(x); zero disables saturation.")
+    parser.add_argument("--emb-saturation-bytes", "--emb_saturation_bytes", dest="emb_saturation_bytes", type=float, default=None, help="Embedding bytes/request scale x_sat; zero disables saturation.")
+    parser.add_argument("--core-saturation-bytes", "--core_saturation_bytes", dest="core_saturation_bytes", type=float, default=None, help="HBM-to-core bytes/request scale x_sat; zero disables saturation.")
+    parser.add_argument("--cube-saturation-flops", "--cube_saturation_flops", dest="cube_saturation_flops", type=float, default=None, help="Cube FLOPs/kernel scale x_sat; zero disables saturation.")
+    parser.add_argument("--vec-saturation-ops", "--vec_saturation_ops", dest="vec_saturation_ops", type=float, default=None, help="Vector ops/kernel scale x_sat; zero disables saturation.")
+    parser.add_argument("--kv-startup-s", "--kv_startup_s", dest="kv_startup_s", type=float, default=None, help="KV hardware startup seconds per layer-user request.")
+    parser.add_argument("--emb-startup-s", "--emb_startup_s", dest="emb_startup_s", type=float, default=None, help="Embedding hardware startup seconds per user request.")
+    parser.add_argument("--core-startup-s", "--core_startup_s", dest="core_startup_s", type=float, default=None, help="HBM-to-core startup seconds per layer-user request.")
+    parser.add_argument("--cube-startup-s", "--cube_startup_s", dest="cube_startup_s", type=float, default=None, help="Cube kernel startup seconds per layer-user request.")
+    parser.add_argument("--vec-startup-s", "--vec_startup_s", dest="vec_startup_s", type=float, default=None, help="Vector kernel startup seconds per layer-user request.")
     parser.add_argument(
         "--objective",
         choices=["balance", "steady", "pipeline", "e2e"],
@@ -1964,7 +2401,7 @@ def main() -> None:
         help="Allow a nonzero IR choice even when safety guards would prefer k=0.",
     )
     parser.add_argument("--ignore-calibrated-bound", action="store_true", help="Do not cap k by calibration context bounds.")
-    parser.add_argument("--ignore-task2-calibration", action="store_true", help="Ignore empirical task2 910C_new context calibration.")
+    parser.add_argument("--ignore-task2-calibration", action="store_true", help="Ignore empirical task2 910C context calibration.")
     parser.add_argument("--allow-compute-overrun", action="store_true", help="Allow candidates whose compute exceeds KV preload.")
     parser.add_argument(
         "--allow-baseline-regression",
