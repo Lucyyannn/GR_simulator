@@ -6,10 +6,17 @@ REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 cd "${REPO_ROOT}"
 
 SIMULATOR_BIN="${SIMULATOR_BIN:-build/bin/Simulator}"
-CALIBRATION="${CALIBRATION:-scripts/recompute_ratio_calibration.json}"
-KV_REUSE_RATIO="${KV_REUSE_RATIO:-0.4360}"
+BASE_CONFIG="${BASE_CONFIG:-configs/910C.json}"
+CALIBRATION="${CALIBRATION:-}"
+KV_REUSE_RATIO="${KV_REUSE_RATIO:-0.4802}"
 RESULT_ROOT="${RESULT_ROOT:-results/OoO_pipeline_ablation}"
 METHOD_FILTER="${METHOD_FILTER:-without_OoO with_OoO}"
+
+[[ -f "${BASE_CONFIG}" ]] || { echo "Missing BASE_CONFIG: ${BASE_CONFIG}" >&2; exit 2; }
+if [[ -z "${CALIBRATION}" || ! -f "${CALIBRATION}" ]]; then
+  echo "Set CALIBRATION to a current paper_cost_model schema-v2 calibration JSON." >&2
+  exit 2
+fi
 
 contains_word() {
   local needle="$1"
@@ -31,7 +38,7 @@ source_for_user() {
 optimal_recompute_len() {
   local user="$1" batch_size="$2" kv_len="$3" no_ar_reduce="$4"
   local args=(
-    --config configs/910C.json
+    --config "${BASE_CONFIG}"
     --calibration "${CALIBRATION}"
     --user "${user}"
     --layers 4
@@ -40,6 +47,7 @@ optimal_recompute_len() {
     --batch-size "${batch_size}"
     --enable-kv-reuse
     --kv-reuse-ratio "${KV_REUSE_RATIO}"
+    --kv-reuse-reduce-npu
     --field len
   )
   if [[ "${no_ar_reduce}" == "1" ]]; then
@@ -58,7 +66,7 @@ run_without_ooo() {
     --source-medium "${src}" \
     --embedding-source-medium ssd \
     --history-recompute-source-medium "${src}" \
-    --base-config configs/910C.json \
+    --base-config "${BASE_CONFIG}" \
     --result-dir "${result_dir}" \
     --layers 4 \
     --hidden 256 \
@@ -73,6 +81,7 @@ run_without_ooo() {
     --attention-modeling fused \
     --without-ooo-pipeline \
     --enable-kv-reuse \
+    --enable-ar-reduce-attention-compute \
     --kv-reuse-variant window_topk \
     --kv-reuse-window-size 1024 \
     --kv-reuse-topk 4 \
@@ -91,7 +100,7 @@ run_with_ooo() {
     --source-medium "${src}" \
     --embedding-source-medium ssd \
     --history-recompute-source-medium "${src}" \
-    --base-config configs/910C.json \
+    --base-config "${BASE_CONFIG}" \
     --result-dir "${result_dir}" \
     --layers 4 \
     --hidden 256 \
@@ -105,6 +114,7 @@ run_with_ooo() {
     --vocab 262144 \
     --attention-modeling fused \
     --enable-kv-reuse \
+    --enable-ar-reduce-attention-compute \
     --kv-reuse-variant window_topk \
     --kv-reuse-window-size 1024 \
     --kv-reuse-topk 4 \

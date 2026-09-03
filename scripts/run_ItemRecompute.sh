@@ -6,10 +6,17 @@ REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 cd "${REPO_ROOT}"
 
 SIMULATOR_BIN="${SIMULATOR_BIN:-build/bin/Simulator}"
-CALIBRATION="${CALIBRATION:-scripts/recompute_ratio_calibration.json}"
+BASE_CONFIG="${BASE_CONFIG:-configs/910C.json}"
+CALIBRATION="${CALIBRATION:-}"
 RESULT_ROOT="${RESULT_ROOT:-results/ItemRecompute}"
 KV_LEN=4096
 ITEM_COUNT=$(((KV_LEN + 1) / 2))
+
+[[ -f "${BASE_CONFIG}" ]] || { echo "Missing BASE_CONFIG: ${BASE_CONFIG}" >&2; exit 2; }
+if [[ -z "${CALIBRATION}" || ! -f "${CALIBRATION}" ]]; then
+  echo "Set CALIBRATION to a current paper_cost_model schema-v2 calibration JSON." >&2
+  exit 2
+fi
 
 ratio_to_len() {
   python3 - "$1" "${ITEM_COUNT}" <<'PY'
@@ -22,7 +29,7 @@ PY
 
 optimal_len() {
   python3 scripts/recompute_ratio_cost_model_new.py \
-    --config configs/910C.json \
+    --config "${BASE_CONFIG}" \
     --calibration "${CALIBRATION}" \
     --user cold \
     --layers 4 \
@@ -42,7 +49,7 @@ run_case() {
     --source-medium ssd \
     --embedding-source-medium ssd \
     --history-recompute-source-medium ssd \
-    --base-config configs/910C.json \
+    --base-config "${BASE_CONFIG}" \
     --result-dir "${result_dir}" \
     --layers 4 \
     --hidden 256 \

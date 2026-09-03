@@ -6,7 +6,10 @@ REPO_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 cd "${REPO_ROOT}"
 
 SIMULATOR_BIN="${SIMULATOR_BIN:-build/bin/Simulator}"
+BASE_CONFIG="${BASE_CONFIG:-configs/910C.json}"
 RESULT_ROOT="${RESULT_ROOT:-results/ActionReuse}"
+
+[[ -f "${BASE_CONFIG}" ]] || { echo "Missing BASE_CONFIG: ${BASE_CONFIG}" >&2; exit 2; }
 
 reuse_ratio_for() {
   case "$1 $2" in
@@ -27,7 +30,7 @@ for window_size in 64 128 256 512; do
       --source-medium ssd \
       --embedding-source-medium ssd \
       --history-recompute-source-medium ssd \
-      --base-config configs/910C.json \
+      --base-config "${BASE_CONFIG}" \
       --result-dir "${result_dir}" \
       --layers 4 \
       --hidden 256 \
@@ -40,6 +43,7 @@ for window_size in 64 128 256 512; do
       --vocab 262144 \
       --attention-modeling fused \
       --enable-kv-reuse \
+      --enable-ar-reduce-attention-compute \
       --kv-reuse-variant window_topk \
       --kv-reuse-window-size "${window_size}" \
       --kv-reuse-topk "${top_k}" \

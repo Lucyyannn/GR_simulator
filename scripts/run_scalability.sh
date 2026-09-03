@@ -14,7 +14,7 @@ Run single-NPU, single-user HSTU-small/middle/large scalability experiments.
 
 Options:
   --result-root PATH             Output root. Default: results/hstu_modelsize_scalability_<timestamp>
-  --calibration PATH             Base calibration JSON. Default: scripts/recompute_ratio_calibration.json
+  --calibration PATH             Required paper_cost_model schema-v2 calibration JSON
   --calibration-cache-root PATH  Persistent cache root. Default: MISC/hstu_modelsize_calibration_cache
   --skip-calibration             Use --calibration directly and skip memory calibration
   --force-calibration            Re-run calibration even when cache exists
@@ -68,7 +68,7 @@ parse_csv_into_array() {
 }
 
 RESULT_ROOT="${RESULT_ROOT:-results/hstu_modelsize_scalability_$(timestamp)}"
-BASE_CALIBRATION="${RECOMPUTE_CALIBRATION:-scripts/recompute_ratio_calibration.json}"
+BASE_CALIBRATION="${RECOMPUTE_CALIBRATION:-}"
 CALIBRATION_CACHE_ROOT="${CALIBRATION_CACHE_ROOT:-MISC/hstu_modelsize_calibration_cache}"
 SCHEMES_OVERRIDE="${SCHEMES_OVERRIDE:-}"
 DOCKER_CONTAINER="${DOCKER_CONTAINER:-}"
@@ -177,8 +177,8 @@ if [[ -z "${RESULT_ROOT}" || "${RESULT_ROOT}" == "/" ]]; then
   echo "--result-root must not be empty or /" >&2
   exit 1
 fi
-if [[ ! -f "${BASE_CALIBRATION}" ]]; then
-  echo "Calibration file not found: ${BASE_CALIBRATION}" >&2
+if (( ! SUMMARY_ONLY )) && { [[ -z "${BASE_CALIBRATION}" ]] || [[ ! -f "${BASE_CALIBRATION}" ]]; }; then
+  echo "Provide --calibration with a current paper_cost_model schema-v2 JSON." >&2
   exit 1
 fi
 if ! [[ "${MAX_CONCURRENT_JOBS}" =~ ^[0-9]+$ ]] || (( MAX_CONCURRENT_JOBS < 1 )); then
@@ -237,7 +237,7 @@ NUM_USERS="${NUM_USERS:-1}"
 USERS_PER_BATCH="${USERS_PER_BATCH:-1}"
 CANDIDATES_PER_USER="${CANDIDATES_PER_USER:-128}"
 MACRO_BATCH_SIZE="${MACRO_BATCH_SIZE:-128}"
-KV_REUSE_RATIO="${KV_REUSE_RATIO:-0.4360}"
+KV_REUSE_RATIO="${KV_REUSE_RATIO:-0.4802}"
 FULL_RECOMPUTE_LEN="${FULL_RECOMPUTE_LEN:-${KV_LEN}}"
 RECOMPUTE_MODEL="${RECOMPUTE_MODEL:-scripts/recompute_ratio_cost_model_new.py}"
 IR_OBJECTIVE="${IR_OBJECTIVE:-balance}"
@@ -437,7 +437,7 @@ compute_recompute_len() {
     --field json
   )
   if [[ "${enable_kv_reuse}" == "1" ]]; then
-    model_args+=(--enable-kv-reuse --kv-reuse-ratio "${KV_REUSE_RATIO}")
+    model_args+=(--enable-kv-reuse --kv-reuse-ratio "${KV_REUSE_RATIO}" --kv-reuse-reduce-npu)
   fi
   model_output=$(python3 "${RECOMPUTE_MODEL}" "${model_args[@]}")
   if [[ -n "${diag_path}" ]]; then
@@ -480,7 +480,7 @@ build_run_args() {
       RUN_ARGS+=(--history-recompute-len "${FULL_RECOMPUTE_LEN}" --history-recompute-index-mode random)
       ;;
     w_AR)
-      RUN_ARGS+=(--history-recompute-len 0 --enable-kv-reuse --kv-reuse-ratio "${KV_REUSE_RATIO}")
+      RUN_ARGS+=(--history-recompute-len 0 --enable-kv-reuse --enable-ar-reduce-attention-compute --kv-reuse-ratio "${KV_REUSE_RATIO}")
       ;;
     w_IR)
       recompute_len=$(compute_recompute_len "${size}" "${chip}" "${source_medium}" 0 "${case_dir}/ir_selection.json")
@@ -488,7 +488,7 @@ build_run_args() {
       ;;
     w_both)
       recompute_len=$(compute_recompute_len "${size}" "${chip}" "${source_medium}" 1 "${case_dir}/ir_selection.json")
-      RUN_ARGS+=(--history-recompute-len "${recompute_len}" --enable-kv-reuse --kv-reuse-ratio "${KV_REUSE_RATIO}")
+      RUN_ARGS+=(--history-recompute-len "${recompute_len}" --enable-kv-reuse --enable-ar-reduce-attention-compute --kv-reuse-ratio "${KV_REUSE_RATIO}")
       ;;
     *)
       echo "Unknown scheme: ${scheme}" >&2

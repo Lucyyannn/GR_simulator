@@ -469,7 +469,7 @@ def write_reproduce(root: Path, calibration: Path, metadata: dict) -> None:
         command = (
             "bash scripts/run_scalability_npus.sh "
             f"--result-root {shell_value(root)} "
-            f"--calibration {shell_value(metadata.get('base_calibration', 'scripts/recompute_ratio_calibration.json'))} "
+            f"--calibration {shell_value(metadata.get('base_calibration', '<schema-v2-calibration.json>'))} "
             f"--calibration-cache-root {shell_value(metadata.get('calibration_cache_root', 'results/MISC/hstu_ir_calibration_cache'))} "
             f"--max-concurrent {shell_value(metadata.get('max_concurrent', 30))}"
         )
