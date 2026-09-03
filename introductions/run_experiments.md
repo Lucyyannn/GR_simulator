@@ -24,7 +24,7 @@
 | `--source-medium` | `ddr` / `ssd` | `ssd` | 历史 KV cache 等主要源数据的初始介质。cold 用户通常用 `ssd`，hot 用户通常用 `ddr`。 |
 | `--embedding-source-medium` | `ddr` / `ssd` | `ssd` | candidate embedding rows 的初始介质。 |
 | `--history-recompute-source-medium` | `ddr` / `ssd` | 同 `--source-medium` | IR/recompute 的历史 embedding rows 的初始介质。 |
-| `--base-config` | path | `configs/910C.json` | simulator 基础配置文件。 |
+| `--base-config` | path | 建议显式指定 `configs/910C.json` | simulator 基础配置文件；整理期间不要依赖旧默认值。 |
 | `--result-dir` | path | `results/run_hstu_<source-medium>` | 实验输出目录。若目录已存在会被删除重建。 |
 | `--layers` | int | `4` | HSTU 层数。 |
 | `--hidden` | int | `256` | hidden dimension。 |
@@ -41,6 +41,7 @@
 | `--op-modeling` | string | `split=materialize,view=materialize,concat=materialize` | 指定部分算子的建模方式，例如 `split=materialize,view=materialize,concat=materialize`。 |
 | `--attention-modeling` | `decomposed` / `fused` | `fused` | attention 建模方式。当前 HSTU 实验通常使用 `fused`。 |
 | `--without-ooo-pipeline` | flag | 不启用 | 标准 without out-of-order pipeline 模式：关闭 attention partial start，关闭 AR attention compute reduction，并增加 HBM->HBM history restore。 |
+| `--enable-ar-reduce-attention-compute` | flag | 不启用 | 凡正式启用AR的方法均需显式加入，使Action KV复用同时减少相应QK/AV计算。 |
 | `--enable-kv-reuse` | flag | 不启用 | 开启 KV row reuse metadata，即 AR。 |
 | `--kv-reuse-ratio` | float in `[0,1)` | `0` | KV reuse 压缩比例。开启 `--enable-kv-reuse` 后，该值决定 action KV 的压缩强度。 |
 | `--log-level` | string | `warn` | simulator log level。 |
@@ -95,6 +96,7 @@ bash scripts/run_hstu.sh \
   --vocab 262144 \
   --attention-modeling fused \
   --enable-kv-reuse \
-  --kv-reuse-ratio 0.4360 \
+  --enable-ar-reduce-attention-compute \
+  --kv-reuse-ratio 0.4802 \
   --log-level warn
 ```

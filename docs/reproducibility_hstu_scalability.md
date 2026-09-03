@@ -16,9 +16,9 @@
   - 负责 DRAM/SSD×910A/B/C×small/middle/large×5 种方案的批量调度。
 - `scripts/summarize_scalability_results.py`
   - 实验完成后输出 `summary.md / scalability_summary.csv / time_qps.csv / time_qps.xlsx / reproduce.md`。
-- `scripts/recompute_ratio_calibration.json`
-  - 默认基准校准文件（可替换）。
-- `configs/910A.json`、`configs/910B.json`、`configs/910C.json`
+- `scripts/calibrate_item_kv_hardware.py`
+  - 根据 ratio sweep 生成 schema-v2 硬件参数校准文件。
+- `configs/910A.json`、`configs/910B.json`、`configs/910C.json`、`configs/MTIA2.json`
   - 当前实验的硬件配置。
 
 ## 2. 推荐顺序（先校准再跑完整实验）
@@ -28,7 +28,7 @@
 ```bash
 python3 scripts/calibrate_memory_bandwidth.py \
   --result-root MISC/hstu_modelsize_calibration_cache/manual_$(date +%Y%m%d_%H%M%S)/memory \
-  --calibration scripts/recompute_ratio_calibration.json \
+  --calibration results/<calibration-root>/item_kv_hardware_calibration.json \
   --merged-calibration-output MISC/hstu_modelsize_calibration_cache/manual_$(date +%Y%m%d_%H%M%S)/memory/recompute_ratio_calibration_memory_merged.json \
   --chips 910A,910B,910C \
   --patterns contiguous,random_512b_index \
@@ -51,6 +51,7 @@ python3 scripts/calibrate_memory_bandwidth.py \
 ```bash
 bash scripts/run_scalability.sh \
   --result-root results/hstu_modelsize_$(date +%Y%m%d_%H%M%S) \
+  --calibration results/<calibration-root>/item_kv_hardware_calibration.json \
   --max-concurrent 45 \
   --calibration-cache-root MISC/hstu_modelsize_calibration_cache \
   --docker-container gr-simulator-mini \
@@ -115,10 +116,11 @@ bash scripts/run_hstu.sh \
 若为 `w_both`，加入：
 
 ```bash
---enable-kv-reuse --kv-reuse-ratio 0.4360
+--enable-kv-reuse --enable-ar-reduce-attention-compute --kv-reuse-ratio 0.4802
 ```
 
-`--enable-kv-reuse` 组合 `w_AR` 只改变 KV 访问行为，不改 HBM 内核参数。
+正式AR语义同时减少复用Action对应的KV访问和QK/AV计算；结果元数据中的
+`ar_reduce_attention_compute` 必须为 `true`。
 
 ## 5. 实验后如何汇总（可复现产物）
 

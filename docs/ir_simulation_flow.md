@@ -9,6 +9,7 @@ Use the canonical scalability runner:
 ```bash
 bash scripts/run_scalability.sh \
   --result-root results/hstu_modelsize_scalability_$(date +%Y%m%d_%H%M%S) \
+  --calibration results/<calibration-root>/item_kv_hardware_calibration.json \
   --docker-container gr-simulator-mini \
   --max-concurrent 45
 ```
@@ -28,8 +29,8 @@ bash scripts/run_scalability.sh \
 - `scripts/recompute_ratio_cost_model_new.py`: formula-based IR estimate and calibrated final `history_recompute_len`.
 - `scripts/summarize_scalability_results.py`: shared summary writer for current model-size runs and older NPU-layout results.
 - `scripts/run_hstu.sh`: builds one HSTU run directory and invokes `./build/bin/Simulator`.
-- `scripts/recompute_ratio_calibration.json`: base calibration file merged with per-run calibration.
-- `configs/910A.json`, `configs/910B.json`, `configs/910C.json`: simulator hardware configs.
+- `scripts/calibrate_item_kv_hardware.py`: generates the schema-v2 hardware-only item-KV calibration.
+- `configs/910A.json`, `configs/910B.json`, `configs/910C.json`, `configs/MTIA2.json`: simulator hardware configs. Each simulator core corresponds to one physical 64x64 Cube core.
 
 ## Inputs
 
@@ -43,7 +44,7 @@ Current scalability defaults follow `AGENTS.md`:
 - source media: `ddr`, `ssd`
 - chips: `910A`, `910B`, `910C`
 - schemes: `Full_Cache`, `Full_Recompute`, `w_AR`, `w_IR`, `w_both`
-- `w_both` uses `kv_reuse_ratio=0.4360`
+- `w_both` uses `kv_reuse_ratio=0.4802`
 
 Source user mode is selected by medium:
 

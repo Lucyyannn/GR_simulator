@@ -37,6 +37,8 @@ GR_simulator/
 │   ├── 910A.json
 │   ├── 910B.json
 │   ├── 910C.json
+│   ├── MTIA2.json
+│   ├── item_kv_calib.json   # item-KV cost model 硬件校准参数
 │   ├── booksim2_configs/       # Booksim2 NoC 配置
 │   └── ramulator2_configs/     # Ramulator2 DDR/HBM 配置
 ├── src/                        # 仿真器核心源码
@@ -55,7 +57,10 @@ GR_simulator/
 │   ├── run_hstu.sh             # HSTU 实验的通用入口
 │   ├── generate_hstu_baseline_trace.py
 │   ├── recompute_ratio_cost_model_new.py
-│   ├── recompute_ratio_calibration.json
+│   ├── item_kv_cost_model.py
+│   ├── calibrate_item_kv_hardware.py
+│   ├── npu_config.py
+│   ├── search_npu_reconfiguration.py
 │   ├── run_ActionReuse.sh
 │   ├── run_ItemRecompute.sh
 │   ├── run_OoO_pipeline_Ablation.sh
@@ -170,26 +175,44 @@ bash scripts/run_hstu.sh \
 
 本节介绍几个关键实验的复现脚本与使用方法。
 
+进行 item recompute 或 `w_both` 实验前，请先阅读 [重计算比例预测说明](docs/recompute_cost_model.md)。该文档说明如何用 `configs/item_kv_calib.json` 和论文 cost model 得到 `history_recompute_len`，以及如何传入或覆盖带宽、算力参数。
+
 ### 1. 推理效率评估实验
 
 ```bash
-bash scripts/run_SpeedupComparison.sh
+CALIBRATION=configs/item_kv_calib.json \
+  bash scripts/run_SpeedupComparison.sh
 ```
 
-该脚本在910C配置下进行各方法的推理效率对比，覆盖 `Recompute`、`FullCache`、`W_AR`、`W_IR`、`W_both` 五类方法，并遍历 HSTU-small/middle/large、`kv_len={4096,8192,16384}`、`batch_size={1,4,8}`、hot/cold 用户。对于开启Item Recompute优化的 W_IR 和 W_both方法，会自动调用 `recompute_ratio_cost_model_new.py`脚本，使用代价模型估算每个case的最优recompute比例。默认输出目录为 `results/SpeedupComparison`。
+该脚本默认在 `910C` 配置下进行各方法的推理效率对比，覆盖 `Recompute`、`FullCache`、`W_AR`、`W_IR`、`W_both` 五类方法，并遍历 HSTU-small/middle/large、`kv_len={4096,8192,16384}`、`batch_size={1,4,8}`、hot/cold 用户。运行 W_IR/W_both 时必须通过 `CALIBRATION` 指定当前 schema-v2 硬件校准文件。默认输出目录为 `results/SpeedupComparison`。
 
 ### 2. 不同 NPU 配置的扩展实验
+
+若要在面积和功耗约束下自动重探索 Cube/Vector 配置，请先阅读 [NPU 重配置搜索说明](docs/npu_reconfiguration.md)。该流程通过命令行设置搜索范围、自动生成最优配置，并只仿真每个基线的预测最优点，不需要手工维护额外配置文件。
 
 ```bash
 bash scripts/run_scalability.sh \
   --result-root results/hstu_scalability_$(date +%Y%m%d_%H%M%S) \
+  --calibration configs/item_kv_calib.json \
   --max-concurrent 45 \
   --docker-container gr-simulator \
 ```
 
-该脚本在`910A/910B/910C`三种代表性NPU配置下，分别对Cold/Hot用户测试`Full_Cache`、`Full_Recompute`、`w_AR`、`w_IR`、`w_both` 五类方法。脚本默认对单用户执行，历史序列长度`KV_LEN`=4096。由于不同硬件配置的参数特性不同，脚本会先执行内存带宽校准，然后根据代价模型估算最优recompute比例，并执行模型推理。
+该脚本在 `910A/910B/910C` 三种NPU配置下，分别对Cold/Hot用户测试`Full_Cache`、`Full_Recompute`、`w_AR`、`w_IR`、`w_both` 五类方法。必须通过 `--calibration` 指定当前 schema-v2 硬件校准文件。
 
 完成实验后，可运行 `scripts/plot_pipeline_comparison.py `脚本对统一配置下五种方法的流水线可视化，直观对比不同方法的性能差异。
+
+若要按照用户活跃度将高活跃用户的KV放入有限DDR、其余KV放入SSD，并估算AR/`w_both`相对SSD上的RE和CA的QPS提升，请参阅[活跃度加权QPS说明](docs/activity_weighted_qps.md)。
+
+10K/20K/100K 用户规模下的随机 CA 与 user-activity-aware REFORGE 容量收益评估，请参阅[User-Activity-Aware KV Placement](docs/user_activity_placement.md)。
+
+11点Item重计算ratio sweep、Embedding访问优化曲线和非网格cost-model预测点的正式绘图入口为 `scripts/plot_item_kv_recompute_ratio.py`，使用方法请参阅 [ItemKVRecomputeRatio Figure](docs/recompute_ratio_prediction_plot.md)。
+
+SystemThroughput论文图使用 `scripts/plot_system_throughput.py` 生成；用法和输入格式见[SystemThroughput绘图说明](docs/system_throughput.md)。
+
+NPU Scalability论文图使用 `scripts/plot_npu_scalability.py` 生成；只需更新完整QPS数据表，绘图脚本不会调整数据，具体格式见[NPU Scalability绘图说明](docs/npu_scalability_plot.md)。
+
+910C、HSTU-Large、8K的M/M/1 P99论文图使用 `scripts/plot_p99_latency.py` 生成；数据与越界标记说明见[P99绘图说明](docs/p99_latency_plot.md)。
 
 ### 3. M/M/1 P99 Latency 实验
 
@@ -208,6 +231,8 @@ bash scripts/run_ActionReuse.sh
 该脚本用于复现 Action KV Reuse 方法的参数网格实验，测试不同窗口大小与`Top-K`取值下的端到端推理时延。脚本默认选择 HSTU-small、`kv_len=4096`、cold/SSD 场景，遍历 `window_size={64,128,256,512}` 与 `top_k={1,2,3,4,5}`，并为每组参数设置对应的 `kv_reuse_ratio`，该值取自HSTU模型侧[recsys](https://github.com/cry-daniel/recsys)在各参数配置下测试得到的实际复用率。默认输出目录为 `results/ActionReuse`。
 
 ### 5. Item Re-computation 方法有效性实验
+
+运行前请先查看 [重计算比例预测说明](docs/recompute_cost_model.md)，确认硬件配置、校准配置和 AR 参数一致。
 
 ```bash
 bash scripts/run_ItemRecompute.sh
