@@ -118,6 +118,8 @@ class Ramulator2Memory : public Dram {
   TieredMemoryConfig _tier_config;
   std::string _device_name;
   std::vector<std::unique_ptr<NDPSim::Ramulator2>> _mem;
+  std::vector<uint64_t> _channel_reads;
+  std::vector<uint64_t> _channel_writes;
   int _tx_ch_log2;
   int _tx_log2;
   int _req_size;

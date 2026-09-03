@@ -231,6 +231,9 @@ Ramulator2Memory::Ramulator2Memory(const SimulationConfig& config,
   _capacity_bytes = tier_config.capacity_bytes;
   _address_req_size = tier_config.req_size;
   _mem.resize(_n_ch);
+  _channel_reads.assign(_n_ch, 0);
+  _channel_writes.assign(_n_ch, 0);
+  _cycles = 0;
   for (int ch = 0; ch < _n_ch; ch++) {
     _mem[ch] = std::make_unique<NDPSim::Ramulator2>(
       ch, _n_ch, tier_config.config_path, _device_name, tier_config.print_interval,
@@ -251,6 +254,7 @@ void Ramulator2Memory::cycle() {
   for (int ch = 0; ch < _n_ch; ch++) {
     _mem[ch]->cycle();
   }
+  _cycles++;
 }
 
 bool Ramulator2Memory::is_full(uint32_t cid, MemoryAccess* request) {
@@ -298,6 +302,11 @@ void Ramulator2Memory::pop(uint32_t cid) {
   // origin_data (MemoryAccess*) is owned by Core after top(); caller must
   // have already forwarded it - delete the wrapper only
   _inflight_requests--;
+  if (mf->is_write()) {
+    _channel_writes[cid]++;
+  } else {
+    _channel_reads[cid]++;
+  }
   delete mf;
 }
 
@@ -320,17 +329,14 @@ MemoryBandwidthStats Ramulator2Memory::get_bandwidth_stats() const {
 
   double util_sum = 0.0;
   for (uint32_t ch = 0; ch < _n_ch; ch++) {
-    const auto& mem = _mem[ch];
-    if (!mem) continue;
-    const uint64_t cycles = mem->get_cycle_count();
-    const uint64_t reads = mem->get_total_reads();
-    const uint64_t writes = mem->get_total_writes();
+    const uint64_t reads = _channel_reads[ch];
+    const uint64_t writes = _channel_writes[ch];
     const double util =
-        cycles == 0
+        _cycles == 0
             ? 0.0
             : static_cast<double>(reads + writes) * 100.0 *
-                  static_cast<double>(mem->get_nbl()) /
-                  static_cast<double>(cycles);
+                  static_cast<double>(std::max(_tier_config.nbl, 1u)) /
+                  static_cast<double>(_cycles);
     stats.channel_utilization_percent[ch] = util;
     stats.channel_reads[ch] = reads;
     stats.channel_writes[ch] = writes;
